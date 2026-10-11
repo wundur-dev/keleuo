@@ -37,8 +37,20 @@ pub struct TerminalView {
     bounds: Rc<Cell<Bounds<Pixels>>>,
     cell: Rc<Cell<Size<Pixels>>>,
     selecting: bool,
+    /// 1, 2, ... in opening order: the key of its saved name.
+    pub number: usize,
+    /// For the automatic name: the folder, its git branch and the login shell.
+    pub folder: std::path::PathBuf,
+    pub branch: Option<String>,
     _events: Option<Task<()>>,
 }
+
+pub enum TerminalEvent {
+    Closed,
+    Activated,
+}
+
+impl EventEmitter<TerminalEvent> for TerminalView {}
 
 impl TerminalView {
     pub fn new(spec: workbench_core::host::CommandSpec, cx: &mut Context<Self>) -> Self {
@@ -93,6 +105,9 @@ impl TerminalView {
             bounds: Rc::new(Cell::new(Bounds::default())),
             cell: Rc::new(Cell::new(size(px(8.), px(16.)))),
             selecting: false,
+            number: 0,
+            folder: std::path::PathBuf::new(),
+            branch: None,
             _events: events,
         }
     }
@@ -367,6 +382,27 @@ fn key_bytes(ks: &Keystroke, mode: TermMode) -> Option<Vec<u8>> {
     Some(bytes)
 }
 
+impl TerminalView {
+    /// The program in the foreground when it is not the shell, else the folder and branch.
+    pub fn auto_name(&self) -> String {
+        let program = self.pty.as_ref().and_then(|p| p.foreground_program());
+        let shell = std::env::var("SHELL").unwrap_or_default();
+        let mut name = workbench_core::tabs::auto_name(
+            &self.folder,
+            self.branch.as_deref(),
+            program.as_deref(),
+            &shell,
+        );
+        if self.number > 1 && program.as_deref().is_none_or(|p| p.contains("sh")) {
+            name = format!("{name} {}", self.number);
+        }
+        if self.exited {
+            name.push_str(" (exited)");
+        }
+        name
+    }
+}
+
 impl Focusable for TerminalView {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus.clone()
@@ -381,10 +417,13 @@ impl Render for TerminalView {
         let bounds_cell = self.bounds.clone();
         let cell_cell = self.cell.clone();
         let cell_paint = self.cell.clone();
+        let ring = gpui_kit::component::ActiveTheme::theme(&**cx).ring;
         let base = div()
             .id("terminal")
             .size_full()
             .bg(hsla(palette::BACKGROUND))
+            .border_t_2()
+            .border_color(if focused { ring } else { transparent_black() })
             .track_focus(&self.focus)
             .key_context("Terminal")
             .on_key_down(cx.listener(Self::on_key))

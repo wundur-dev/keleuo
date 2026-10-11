@@ -16,6 +16,7 @@ pub enum SkillsEvent {
 }
 
 pub struct SkillsPanel {
+    focus: FocusHandle,
     host: Arc<dyn Host>,
     project: PathBuf,
     catalog: Option<Arc<Catalog>>,
@@ -29,6 +30,7 @@ impl EventEmitter<SkillsEvent> for SkillsPanel {}
 impl SkillsPanel {
     pub fn new(host: Arc<dyn Host>, project: PathBuf, cx: &mut Context<Self>) -> Self {
         let mut this = Self {
+            focus: cx.focus_handle(),
             host,
             project,
             catalog: None,
@@ -175,6 +177,12 @@ impl SkillsPanel {
     }
 }
 
+impl Focusable for SkillsPanel {
+    fn focus_handle(&self, _: &App) -> FocusHandle {
+        self.focus.clone()
+    }
+}
+
 impl Render for SkillsPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let muted = cx.theme().muted_foreground;
@@ -215,6 +223,7 @@ impl Render for SkillsPanel {
                 }
             }
         }
-        list.size_full()
+        let bg = cx.theme().sidebar;
+        list.size_full().bg(bg)
     }
 }

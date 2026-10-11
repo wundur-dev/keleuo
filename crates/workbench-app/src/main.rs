@@ -20,16 +20,17 @@ mod actions;
 mod claude_panel;
 mod claude_session;
 mod control;
+mod doc_panel;
 mod file_tree;
 mod palette;
+mod panels;
 mod perf;
 mod picker;
 mod pty;
-mod right_area;
 mod sessions;
 mod skills_panel;
-mod tab_strip;
 mod terminal_view;
+mod theme;
 mod workspace;
 
 use actions::*;
@@ -147,6 +148,12 @@ fn main() {
             cx.set_global(AppSettings(Rc::new(RefCell::new(Settings::load(
                 Settings::default_path(),
             )))));
+            cx.set_global(panels::Names(Rc::new(RefCell::new(
+                workbench_core::tabs::NameStore::open_default(),
+            ))));
+            cx.set_global(panels::Renaming::default());
+            workspace::register_panels(cx);
+            theme::apply(cx);
             control::start(cx);
             bind_keys(cx);
             cx.set_menus(menus());

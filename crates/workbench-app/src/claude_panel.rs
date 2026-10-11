@@ -23,10 +23,18 @@ use crate::claude_session::ClaudeSession;
 pub enum ClaudePanelEvent {
     OpenFile(PathBuf, Option<u32>),
     NewSession,
+    /// The session's tab was closed.
+    Closed,
+    /// Its tab became the shown one.
+    Activated,
 }
 
 pub struct ClaudePanel {
     pub session: Entity<ClaudeSession>,
+    /// The session's number and the key of its saved name.
+    pub number: usize,
+    pub name_key: String,
+    focus: FocusHandle,
     input: Entity<TextareaState>,
     scroll: ScrollHandle,
     /// Tool cards the user opened (or closed, for diffs which start open).
@@ -111,6 +119,9 @@ impl ClaudePanel {
         });
         Self {
             session,
+            number: 0,
+            name_key: String::new(),
+            focus: cx.focus_handle(),
             input,
             scroll: ScrollHandle::new(),
             toggled: HashSet::new(),
@@ -121,6 +132,16 @@ impl ClaudePanel {
             ticker: None,
             _subs: vec![s1, s2],
         }
+    }
+
+    /// Keyboard focus is in this session (its message box or the panel).
+    pub fn contains_focus(&self, window: &Window, cx: &App) -> bool {
+        self.focus.contains_focused(window, cx)
+            || self
+                .input
+                .read(cx)
+                .focus_handle(cx)
+                .contains_focused(window, cx)
     }
 
     pub fn focus_input(&self, window: &mut Window, cx: &mut App) {
@@ -854,9 +875,17 @@ impl ClaudePanel {
     }
 }
 
+impl Focusable for ClaudePanel {
+    fn focus_handle(&self, _: &App) -> FocusHandle {
+        self.focus.clone()
+    }
+}
+
 impl Render for ClaudePanel {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let started = std::time::Instant::now();
+        let focused = self.contains_focus(window, cx);
+        let ring = cx.theme().ring;
         let theme = cx.theme();
         let (fg, muted, red, user_bg, border) = (
             theme.foreground,
@@ -902,6 +931,10 @@ impl Render for ClaudePanel {
             .size_full()
             .flex()
             .flex_col()
+            .bg(gpui_kit::rgb(0x17181b))
+            .track_focus(&self.focus)
+            .border_t_2()
+            .border_color(if focused { ring } else { transparent_black() })
             .child(self.render_header(cx))
             .children(self.render_agent_strip(cx))
             .child(

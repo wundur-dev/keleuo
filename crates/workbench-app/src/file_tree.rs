@@ -26,6 +26,7 @@ struct Row {
 }
 
 pub struct FileTree {
+    focus: FocusHandle,
     host: Arc<dyn Host>,
     root: PathBuf,
     nodes: Vec<Node>,
@@ -42,6 +43,7 @@ impl EventEmitter<FileTreeEvent> for FileTree {}
 impl FileTree {
     pub fn new(host: Arc<dyn Host>, root: PathBuf, cx: &mut Context<Self>) -> Self {
         let mut this = Self {
+            focus: cx.focus_handle(),
             host,
             root,
             nodes: Vec::new(),
@@ -135,6 +137,12 @@ impl FileTree {
     }
 }
 
+impl Focusable for FileTree {
+    fn focus_handle(&self, _: &App) -> FocusHandle {
+        self.focus.clone()
+    }
+}
+
 impl Render for FileTree {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
@@ -155,7 +163,8 @@ impl Render for FileTree {
         let rows = self.rows.clone();
         let selected = self.selected.clone();
         let entity = cx.entity().downgrade();
-        uniform_list("file-tree", rows.len(), move |range, _window, _cx| {
+        let sidebar_bg = cx.theme().sidebar;
+        let list = uniform_list("file-tree", rows.len(), move |range, _window, _cx| {
             range
                 .map(|ix| {
                     let row = &rows[ix];
@@ -187,7 +196,11 @@ impl Render for FileTree {
                 .collect()
         })
         .track_scroll(&self.scroll)
-        .size_full()
-        .into_any_element()
+        .size_full();
+        div()
+            .size_full()
+            .bg(sidebar_bg)
+            .child(list)
+            .into_any_element()
     }
 }

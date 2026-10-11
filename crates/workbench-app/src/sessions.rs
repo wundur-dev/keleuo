@@ -27,8 +27,12 @@ pub enum SessionsEvent {
     OpenFile(PathBuf, Option<u32>),
     FileChanged(PathBuf),
     TurnEnded,
-    /// The shown session changed (or one was added or closed).
-    Switched,
+    /// Show this session (bring its tab forward).
+    Show(Entity<ClaudePanel>),
+    /// A new session: place its tab.
+    Added(Entity<ClaudePanel>),
+    /// Close this session's tab.
+    Remove(Entity<ClaudePanel>),
 }
 
 pub struct SessionTab {
@@ -53,6 +57,7 @@ struct Rename {
 }
 
 pub struct Sessions {
+    focus: FocusHandle,
     host: Arc<dyn Host>,
     root: PathBuf,
     names: Rc<RefCell<NameStore>>,
@@ -78,6 +83,7 @@ impl Sessions {
         cx: &mut Context<Self>,
     ) -> Self {
         let mut this = Self {
+            focus: cx.focus_handle(),
             host,
             root,
             names,
@@ -105,6 +111,14 @@ impl Sessions {
         }
     }
 
+    pub fn host(&self) -> Arc<dyn Host> {
+        self.host.clone()
+    }
+
+    pub fn root(&self) -> PathBuf {
+        self.root.clone()
+    }
+
     pub fn active_tab(&self) -> Option<&SessionTab> {
         self.tabs.get(self.active)
     }
@@ -112,6 +126,20 @@ impl Sessions {
     // ----- live sessions -----
 
     fn add(&mut self, session: ClaudeSession, window: &mut Window, cx: &mut Context<Self>) {
+        let panel = self.adopt(session, None, window, cx);
+        cx.emit(SessionsEvent::Added(panel));
+        self.switch(self.tabs.len() - 1, window, cx);
+    }
+
+    /// Take a session in (from `add`, or rebuilt from a saved layout with its `number`) and
+    /// return its panel.
+    pub fn adopt(
+        &mut self,
+        session: ClaudeSession,
+        number: Option<usize>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<ClaudePanel> {
         let session = cx.new(|_| session);
         let panel = cx.new(|cx| ClaudePanel::new(session.clone(), window, cx));
         let index = self.index.clone();
@@ -120,11 +148,13 @@ impl Sessions {
             cx.subscribe_in(
                 &panel,
                 window,
-                |this, _, ev: &ClaudePanelEvent, window, cx| match ev {
+                |this, panel, ev: &ClaudePanelEvent, window, cx| match ev {
                     ClaudePanelEvent::OpenFile(path, line) => {
                         cx.emit(SessionsEvent::OpenFile(path.clone(), *line))
                     }
                     ClaudePanelEvent::NewSession => this.new_session(window, cx),
+                    ClaudePanelEvent::Closed => this.removed(&Some(panel.clone()), cx),
+                    ClaudePanelEvent::Activated => this.shown(panel, cx),
                 },
             ),
             cx.subscribe(&session, |_, _, ev: &SessionEvent, cx| match ev {
@@ -134,15 +164,86 @@ impl Sessions {
             // Sidebar dots and the agent tree follow the session.
             cx.observe(&session, |_, _, cx| cx.notify()),
         ];
-        let number = self.next;
-        self.next += 1;
+        let number = number.unwrap_or(self.next);
+        self.next = self.next.max(number + 1);
+        let key = self.key(number);
+        panel.update(cx, |p, _| {
+            p.number = number;
+            p.name_key = key;
+        });
         self.tabs.push(SessionTab {
             number,
             session,
-            panel,
+            panel: panel.clone(),
             _subs: subs,
         });
-        self.switch(self.tabs.len() - 1, window, cx);
+        cx.notify();
+        panel
+    }
+
+    /// A session's tab was closed: end its process and forget it.
+    fn removed(&mut self, panel: &Option<Entity<ClaudePanel>>, cx: &mut Context<Self>) {
+        let Some(panel) = panel else { return };
+        if let Some(ix) = self.tabs.iter().position(|t| &t.panel == panel) {
+            let tab = self.tabs.remove(ix);
+            tab.session.update(cx, |s, _| s.stop());
+            self.active = self.active.min(self.tabs.len().saturating_sub(1));
+            self.scan(cx);
+            cx.notify();
+        }
+    }
+
+    /// Note which session is shown (its tab became active).
+    pub fn shown(&mut self, panel: &Entity<ClaudePanel>, cx: &mut Context<Self>) {
+        if let Some(ix) = self.tabs.iter().position(|t| &t.panel == panel)
+            && ix != self.active
+        {
+            self.active = ix;
+            self.tabs[ix].session.update(cx, |s, _| s.unseen = false);
+            cx.notify();
+        }
+    }
+
+    /// A session from a saved layout: its tab comes back at once; its history (when it had a
+    /// session id) loads in the background.
+    pub fn restore(
+        &mut self,
+        session_id: Option<String>,
+        number: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<ClaudePanel> {
+        let panel = self.adopt(
+            ClaudeSession::new(self.host.clone(), self.root.clone()),
+            Some(number),
+            window,
+            cx,
+        );
+        if let Some(id) = session_id {
+            let session = panel.read(cx).session.clone();
+            let host = self.host.clone();
+            let root = self.root.clone();
+            cx.spawn(async move |_, cx: &mut AsyncApp| {
+                let chat = cx
+                    .background_spawn(async move {
+                        let home = workbench_core::skills::claude_home(host.as_ref())?;
+                        let path =
+                            history::project_sessions_dir(&home, &root).join(format!("{id}.jsonl"));
+                        history::load_session(host.as_ref(), &path, &root.to_string_lossy()).ok()
+                    })
+                    .await;
+                if let Some(chat) = chat {
+                    let _ = session.update(cx, |s, cx| {
+                        s.chat = chat;
+                        s.chat
+                            .push_notice("Restored: the next message continues this conversation.");
+                        cx.notify();
+                    });
+                }
+            })
+            .detach();
+        }
+        panel
     }
 
     pub fn new_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -158,7 +259,7 @@ impl Sessions {
         let t = &self.tabs[ix];
         t.session.update(cx, |s, _| s.unseen = false);
         t.panel.update(cx, |p, cx| p.focus_input(window, cx));
-        cx.emit(SessionsEvent::Switched);
+        cx.emit(SessionsEvent::Show(t.panel.clone()));
         cx.notify();
     }
 
@@ -166,19 +267,13 @@ impl Sessions {
         if ix >= self.tabs.len() {
             return;
         }
-        let tab = self.tabs.remove(ix);
-        tab.session.update(cx, |s, _| s.stop());
-        if self.tabs.is_empty() {
-            self.new_session(window, cx);
-            return;
-        }
-        self.active = self.active.min(self.tabs.len() - 1);
-        self.switch(self.active, window, cx);
-        self.scan(cx);
+        let _ = window;
+        // Closing the tab ends the session (see `removed`).
+        cx.emit(SessionsEvent::Remove(self.tabs[ix].panel.clone()));
     }
 
     fn key(&self, number: usize) -> String {
-        NameStore::key(&self.root, &format!("session:{number}"))
+        crate::panels::session_key(&self.root, number)
     }
 
     fn auto_name(&self, tab: &SessionTab, cx: &App) -> String {
@@ -705,13 +800,21 @@ fn short_time(iso: &str) -> String {
     format!("{date} {time}")
 }
 
+impl Focusable for Sessions {
+    fn focus_handle(&self, _: &App) -> FocusHandle {
+        self.focus.clone()
+    }
+}
+
 impl Render for Sessions {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let bg = cx.theme().sidebar;
         let mut col = div()
             .id("sessions-list")
             .flex()
             .flex_col()
-            .w_full()
+            .size_full()
+            .bg(bg)
             .overflow_y_scroll();
         for ix in 0..self.tabs.len() {
             col = col.child(self.render_session_row(ix, cx));
@@ -725,108 +828,5 @@ impl Render for Sessions {
             }
         }
         col
-    }
-}
-
-/// The row of session tabs at the top of the Claude column, with "+" for a new one.
-pub struct SessionTabs {
-    sessions: Entity<Sessions>,
-    _obs: Subscription,
-}
-
-impl SessionTabs {
-    pub fn new(sessions: Entity<Sessions>, cx: &mut Context<Self>) -> Self {
-        let obs = cx.observe(&sessions, |_, _, cx| cx.notify());
-        Self {
-            sessions,
-            _obs: obs,
-        }
-    }
-}
-
-impl Render for SessionTabs {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
-        let (fg, muted, border, active_bg, bar, hover, blue, amber) = (
-            theme.foreground,
-            theme.muted_foreground,
-            theme.border,
-            theme.tab_active,
-            theme.tab_bar,
-            theme.secondary_hover,
-            theme.blue,
-            theme.warning,
-        );
-        let s = self.sessions.read(cx);
-        let mut row = div()
-            .id("session-tabs")
-            .h(px(26.))
-            .flex_none()
-            .flex()
-            .items_center()
-            .bg(bar)
-            .border_b_1()
-            .border_color(border)
-            .overflow_x_scroll();
-        for (ix, tab) in s.tabs.iter().enumerate() {
-            let active = ix == s.active;
-            let session = tab.session.read(cx);
-            let dot = if session.chat.needs_input() {
-                Some(amber)
-            } else if session.chat.busy {
-                Some(blue)
-            } else if session.unseen && !active {
-                Some(fg)
-            } else {
-                None
-            };
-            let sessions = self.sessions.downgrade();
-            row = row.child(
-                div()
-                    .id(("session-tab", tab.number))
-                    .h_full()
-                    .px_2()
-                    .flex()
-                    .flex_none()
-                    .items_center()
-                    .gap_1()
-                    .text_xs()
-                    .max_w(px(220.))
-                    .border_r_1()
-                    .border_color(border)
-                    .text_color(if active { fg } else { muted })
-                    .when(active, |d| d.bg(active_bg).border_t_2().border_color(blue))
-                    .hover(|d| d.bg(hover))
-                    .child(Icon::new(IconName::Bot).xsmall())
-                    .child(div().truncate().child(s.name(tab, cx)))
-                    .children(dot.map(|c| div().size(px(6.)).flex_none().rounded_full().bg(c)))
-                    .on_click(move |_, window, cx| {
-                        let _ = sessions.update(cx, |s, cx| s.switch(ix, window, cx));
-                    }),
-            );
-        }
-        let sessions = self.sessions.downgrade();
-        row.child(
-            div()
-                .id("session-new")
-                .h_full()
-                .px_2()
-                .flex()
-                .flex_none()
-                .items_center()
-                .gap_1()
-                .text_xs()
-                .text_color(muted)
-                .hover(|d| d.bg(hover).text_color(fg))
-                .child(Icon::new(IconName::Plus).xsmall())
-                .child("New session")
-                .tooltip(|w, cx| {
-                    gpui_kit::component::tooltip::Tooltip::new("New Claude session (Cmd+N)")
-                        .build(w, cx)
-                })
-                .on_click(move |_, window, cx| {
-                    let _ = sessions.update(cx, |s, cx| s.new_session(window, cx));
-                }),
-        )
     }
 }

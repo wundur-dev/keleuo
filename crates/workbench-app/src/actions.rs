@@ -20,9 +20,9 @@ actions!(
         CloseSession,
         SplitRight,
         SplitDown,
-        MoveTabToOtherHalf,
         GoBack,
         GoForward,
+        ResetLayout,
     ]
 );
 
@@ -43,7 +43,6 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-shift-w", CloseSession, None),
         KeyBinding::new("cmd-\\", SplitRight, None),
         KeyBinding::new("cmd-shift-\\", SplitDown, None),
-        KeyBinding::new("cmd-alt-\\", MoveTabToOtherHalf, None),
         KeyBinding::new("ctrl--", GoBack, None),
         KeyBinding::new("ctrl-shift--", GoForward, None),
     ]);
@@ -66,10 +65,10 @@ pub fn menus() -> Vec<Menu> {
             MenuItem::action("Sidebar", ToggleSidebar),
             MenuItem::action("Split Right", SplitRight),
             MenuItem::action("Split Down", SplitDown),
-            MenuItem::action("Move Tab to Other Half", MoveTabToOtherHalf),
+            MenuItem::action("Reset Layout", ResetLayout),
             MenuItem::separator(),
-            MenuItem::action("Focus on Files", FocusRight),
-            MenuItem::action("Focus on Claude", FocusClaude),
+            MenuItem::action("Zoom Files and Terminals", FocusRight),
+            MenuItem::action("Zoom Claude", FocusClaude),
             MenuItem::action("Markdown: Edit or Preview", TogglePreview),
             MenuItem::action("Ask Claude", AskClaude),
             MenuItem::separator(),
