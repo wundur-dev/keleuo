@@ -24,7 +24,24 @@ Remote over SSH (first steps, see below): `cargo run -p workbench-app -- --ssh h
 
 ## Layout and keys
 
-STATUS_TABLE_PLACEHOLDER
+One thin title bar carries the panel switches, the editor tabs, the folder and git branch.
+Below it: skills | files | code | Claude, over the terminal. Panels resize with splitters.
+
+| Keys | What |
+| --- | --- |
+| Cmd+1 / Cmd+2 / Cmd+3 / Cmd+J | Show or hide skills / files / Claude / terminal (sizes are kept) |
+| Cmd+Shift+E / Cmd+Shift+C | Focus mode: only the editor / only Claude (again to leave) |
+| Cmd+O | Open a folder in a new window |
+| Cmd+S, Cmd+W | Save, close tab |
+| Cmd+E | Markdown: rendered or editor |
+| F2, double-click, right-click | Rename a tab in place (Enter saves, Escape cancels); "Reset name" in the menu |
+| Cmd+click (or F12) in code | Go to definition (quick symbol index) |
+| Ctrl+- / Ctrl+Shift+- | Back / forward through jumps |
+| Cmd+L | Ask Claude (focus the message box) |
+| Cmd+T | New terminal tab |
+
+`WORKBENCH_MODEL=haiku` picks the model for Claude; `WORKBENCH_PERF=1` prints paint times,
+key-to-glyph latency and file open times to stderr.
 
 ## Layout of the code
 
@@ -76,4 +93,20 @@ For reading and navigating code in the editor (not for the Claude panel).
 
 ## What is missing
 
-MISSING_PLACEHOLDER
+- Remote: `--ssh host:/path` is wired (terminal and Claude over ssh, files over one `ssh`
+  command each) but untested, since no SSH host was available. No remote file watching.
+- Code intelligence: definitions come from line patterns, not tree-sitter queries or LSP. No
+  hover, no find references, no outline view yet.
+- Editor: no "save changes?" prompt on close; a file changed on disk while it has unsaved
+  edits is not reloaded and not flagged.
+- Claude: one conversation per window; no session picker for `--resume`; subagent tool calls
+  are shown inline (marked) rather than nested; images in tool results show as `[image]`;
+  the chat is not virtualized, so very long sessions will get slower.
+- Terminal: no mouse reporting, no kitty keyboard protocol, no IME composition (dead keys
+  and CJK input), no cursor blink, fixed colours and font (Menlo 12.5).
+- Skills: plugin skills are found from `installed_plugins.json` and their `skills/` folder
+  only (custom skill paths in a plugin manifest are not read). No delete or rename.
+- Idle CPU is about 1 percent: gpui wakes the main thread on every display refresh even
+  when nothing is drawn.
+- Windows and Linux: nothing Mac-only in the core, but the app was only built and run on
+  macOS.

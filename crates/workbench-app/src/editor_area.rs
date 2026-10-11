@@ -39,6 +39,7 @@ struct Doc {
     /// Text as last read or saved, to tell our own saves from outside changes.
     saved: String,
     pending_line: Option<u32>,
+    opened_at: std::time::Instant,
     _sub: Option<Subscription>,
 }
 
@@ -185,6 +186,7 @@ impl EditorArea {
             read_only,
             saved: String::new(),
             pending_line: line,
+            opened_at: std::time::Instant::now(),
             _sub: None,
         });
         self.activate(id, cx);
@@ -370,6 +372,12 @@ impl EditorArea {
         }
         if self.active == Some(id) {
             self.focus_active(window, cx);
+        }
+        if let Some(doc) = self.doc(id) {
+            let started = doc.opened_at;
+            window.on_next_frame(move |_, _| {
+                crate::perf::record("file open to first frame", started.elapsed())
+            });
         }
         cx.notify();
     }
