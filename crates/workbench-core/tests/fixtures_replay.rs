@@ -218,3 +218,53 @@ fn write_turn_gives_a_created_file_diff() {
         "markdown kept for rendering: {last_text}"
     );
 }
+
+#[test]
+fn subagents_are_tracked_live() {
+    use workbench_core::conversation::AgentStatus;
+    let text = fixture("subagents_turn.jsonl");
+    let mut chat = Conversation::new("");
+    chat.push_user("launch two subagents");
+    // Replay up to the first progress report: both running, one using Read.
+    let lines: Vec<&str> = text.lines().collect();
+    let first_progress = lines
+        .iter()
+        .position(|l| l.contains("\"task_progress\""))
+        .unwrap();
+    chat.apply_lines(&lines[..=first_progress].join("\n"));
+    assert_eq!(chat.agents.len(), 2);
+    assert!(chat.agents.iter().all(|a| a.running()));
+    assert_eq!(chat.agents[0].description, "Read greet.py function name");
+    assert_eq!(chat.agents[0].kind, "general-purpose");
+    assert_eq!(chat.agents[0].current_tool.as_deref(), Some("Read"));
+    assert_eq!(chat.running_agents().count(), 2);
+    // The rest of the turn: both done, with their own tool calls and token counts.
+    chat.apply_lines(&lines[first_progress + 1..].join("\n"));
+    assert!(chat.agents.iter().all(|a| a.status == AgentStatus::Done));
+    assert_eq!(chat.running_agents().count(), 0);
+    assert_eq!(chat.turn_agents().len(), 2);
+    let reader = &chat.agents[0];
+    assert!(reader.total_tokens.unwrap() > 1000);
+    assert!(reader.duration_ms.unwrap() > 0);
+    assert!(reader.summary.as_deref().unwrap().contains("greet"));
+    let tools: Vec<&str> = reader
+        .items
+        .iter()
+        .filter_map(|i| match i {
+            Item::Tool(t) => Some(t.name.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(tools, ["Read"]);
+    assert!(matches!(&reader.items[0], Item::Tool(t) if t.done()));
+    // The subagents' calls stay out of the main list; the Agent calls are there.
+    let main_tools: Vec<&str> = chat
+        .items
+        .iter()
+        .filter_map(|i| match i {
+            Item::Tool(t) => Some(t.name.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(main_tools, ["Agent", "Agent"]);
+}

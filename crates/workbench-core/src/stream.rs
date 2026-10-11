@@ -63,6 +63,8 @@ pub enum Event {
         is_error: bool,
         /// Claude Code's structured version (`tool_use_result`), when there is one.
         structured: Option<Value>,
+        /// The subagent's Agent or Task tool call, when a subagent made the call.
+        parent_tool_use_id: Option<String>,
     },
     /// A user message echoed back (with `--replay-user-messages`) or sent by Claude Code.
     UserText(String),
@@ -86,6 +88,32 @@ pub enum Event {
         input_tokens: u64,
         output_tokens: u64,
         session_id: String,
+    },
+    /// A subagent (Agent or Task tool call) started.
+    TaskStarted {
+        tool_use_id: String,
+        task_id: String,
+        description: String,
+        subagent_type: String,
+    },
+    /// A subagent's progress: what it is doing and how much it used so far.
+    TaskProgress {
+        tool_use_id: String,
+        task_id: String,
+        description: String,
+        last_tool: Option<String>,
+        total_tokens: Option<u64>,
+        tool_uses: Option<u64>,
+        duration_ms: Option<u64>,
+    },
+    /// A subagent finished (`completed`, `failed`, ...).
+    TaskDone {
+        tool_use_id: Option<String>,
+        task_id: String,
+        status: String,
+        summary: Option<String>,
+        total_tokens: Option<u64>,
+        duration_ms: Option<u64>,
     },
     /// A line that is not JSON (Claude Code sometimes prints warnings on stdout).
     Unparsed(String),
@@ -123,6 +151,56 @@ pub fn parse_value(v: &Value) -> Event {
                 cwd: s(v, "cwd"),
             },
             "status" => Event::Status(s(v, "status")),
+            "task_started" => Event::TaskStarted {
+                tool_use_id: s(v, "tool_use_id"),
+                task_id: s(v, "task_id"),
+                description: s(v, "description"),
+                subagent_type: s(v, "subagent_type"),
+            },
+            "task_progress" => {
+                let usage = v.get("usage").unwrap_or(&Value::Null);
+                Event::TaskProgress {
+                    tool_use_id: s(v, "tool_use_id"),
+                    task_id: s(v, "task_id"),
+                    description: s(v, "description"),
+                    last_tool: v
+                        .get("last_tool_name")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                    total_tokens: usage.get("total_tokens").and_then(Value::as_u64),
+                    tool_uses: usage.get("tool_uses").and_then(Value::as_u64),
+                    duration_ms: usage.get("duration_ms").and_then(Value::as_u64),
+                }
+            }
+            "task_notification" => {
+                let usage = v.get("usage").unwrap_or(&Value::Null);
+                Event::TaskDone {
+                    tool_use_id: v
+                        .get("tool_use_id")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                    task_id: s(v, "task_id"),
+                    status: s(v, "status"),
+                    summary: v.get("summary").and_then(Value::as_str).map(str::to_string),
+                    total_tokens: usage.get("total_tokens").and_then(Value::as_u64),
+                    duration_ms: usage.get("duration_ms").and_then(Value::as_u64),
+                }
+            }
+            "task_updated" => match v
+                .get("patch")
+                .and_then(|p| p.get("status"))
+                .and_then(Value::as_str)
+            {
+                Some(status) if status != "running" => Event::TaskDone {
+                    tool_use_id: None,
+                    task_id: s(v, "task_id"),
+                    status: status.to_string(),
+                    summary: None,
+                    total_tokens: None,
+                    duration_ms: None,
+                },
+                _ => Event::Other("system/task_updated".into()),
+            },
             other => Event::Other(format!("system/{other}")),
         },
         "stream_event" => parse_stream_event(v.get("event").unwrap_or(&Value::Null)),
@@ -246,7 +324,15 @@ fn parse_user(v: &Value) -> Event {
                     .get("is_error")
                     .and_then(Value::as_bool)
                     .unwrap_or(false),
-                structured: v.get("tool_use_result").filter(|r| r.is_object()).cloned(),
+                structured: v
+                    .get("tool_use_result")
+                    .or_else(|| v.get("toolUseResult"))
+                    .filter(|r| r.is_object())
+                    .cloned(),
+                parent_tool_use_id: v
+                    .get("parent_tool_use_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
             };
         }
     }

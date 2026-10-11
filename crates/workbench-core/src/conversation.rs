@@ -54,6 +54,54 @@ pub enum Item {
     Error(String),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AgentStatus {
+    Running,
+    Done,
+    Failed,
+}
+
+/// A subagent: an Agent or Task tool call running its own conversation.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SubAgent {
+    /// The Agent or Task tool call that started it.
+    pub tool_use_id: String,
+    pub task_id: Option<String>,
+    pub description: String,
+    pub kind: String,
+    pub status: AgentStatus,
+    /// When it started (for the live elapsed time); `None` in replays.
+    pub started: Option<std::time::Instant>,
+    /// Reported duration so far, in milliseconds.
+    pub duration_ms: Option<u64>,
+    /// The tool it is using right now.
+    pub current_tool: Option<String>,
+    pub total_tokens: Option<u64>,
+    pub tool_uses: Option<u64>,
+    pub summary: Option<String>,
+    /// Its own messages and tool calls.
+    pub items: Vec<Item>,
+}
+
+impl SubAgent {
+    pub fn running(&self) -> bool {
+        self.status == AgentStatus::Running
+    }
+
+    /// Elapsed time: live while running, else what the stream reported.
+    pub fn elapsed(&self) -> Option<std::time::Duration> {
+        match (self.status, self.started) {
+            (AgentStatus::Running, Some(t)) => Some(t.elapsed()),
+            _ => self.duration_ms.map(std::time::Duration::from_millis),
+        }
+    }
+}
+
+/// Is this tool the one that starts subagents?
+pub fn is_agent_tool(name: &str) -> bool {
+    matches!(name, "Agent" | "Task")
+}
+
 /// What applying an event changed that the window cares about beyond the chat itself.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Applied {
@@ -66,6 +114,10 @@ pub struct Applied {
 #[derive(Clone, Debug, Default)]
 pub struct Conversation {
     pub items: Vec<Item>,
+    /// Subagents, in start order.
+    pub agents: Vec<SubAgent>,
+    /// Index into `agents` where the current (or last) turn's subagents begin.
+    pub turn_agents_from: usize,
     pub session_id: Option<String>,
     pub model: Option<String>,
     pub permission_mode: Option<String>,
@@ -86,6 +138,8 @@ pub struct Conversation {
     cost_base: f64,
     /// Bumped on every change, so a view can tell when to redraw.
     pub revision: u64,
+    /// Applying a recorded history: no live clocks.
+    pub replaying: bool,
 }
 
 impl Conversation {
@@ -99,6 +153,7 @@ impl Conversation {
     /// Record a message the user sent.
     pub fn push_user(&mut self, text: &str) {
         self.items.push(Item::User(text.to_string()));
+        self.turn_agents_from = self.agents.len();
         self.busy = true;
         self.status = Some("sending".into());
         self.revision += 1;
@@ -164,10 +219,90 @@ impl Conversation {
     }
 
     fn tool_mut(&mut self, id: &str) -> Option<&mut ToolCall> {
-        self.items.iter_mut().find_map(|i| match i {
-            Item::Tool(t) if t.id == id => Some(t),
-            _ => None,
-        })
+        if let Some(ix) = self
+            .items
+            .iter()
+            .position(|i| matches!(i, Item::Tool(t) if t.id == id))
+        {
+            return match &mut self.items[ix] {
+                Item::Tool(t) => Some(t),
+                _ => None,
+            };
+        }
+        for agent in &mut self.agents {
+            if let Some(ix) = agent
+                .items
+                .iter()
+                .position(|i| matches!(i, Item::Tool(t) if t.id == id))
+            {
+                return match &mut agent.items[ix] {
+                    Item::Tool(t) => Some(t),
+                    _ => None,
+                };
+            }
+        }
+        None
+    }
+
+    pub fn agent(&self, tool_use_id: &str) -> Option<&SubAgent> {
+        self.agents.iter().find(|a| a.tool_use_id == tool_use_id)
+    }
+
+    /// The subagent for a tool call id, created when first seen.
+    fn agent_entry(&mut self, tool_use_id: &str) -> &mut SubAgent {
+        if let Some(ix) = self
+            .agents
+            .iter()
+            .position(|a| a.tool_use_id == tool_use_id)
+        {
+            return &mut self.agents[ix];
+        }
+        let (description, kind) = match self.tool(tool_use_id) {
+            Some(t) => (
+                t.input
+                    .get("description")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+                t.input
+                    .get("subagent_type")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+            ),
+            None => (String::new(), String::new()),
+        };
+        self.agents.push(SubAgent {
+            tool_use_id: tool_use_id.to_string(),
+            task_id: None,
+            description,
+            kind,
+            status: AgentStatus::Running,
+            started: (!self.replaying).then(std::time::Instant::now),
+            duration_ms: None,
+            current_tool: None,
+            total_tokens: None,
+            tool_uses: None,
+            summary: None,
+            items: Vec::new(),
+        });
+        self.agents.last_mut().unwrap()
+    }
+
+    fn agent_by_task(&mut self, task_id: &str) -> Option<&mut SubAgent> {
+        self.agents
+            .iter_mut()
+            .find(|a| a.task_id.as_deref() == Some(task_id))
+    }
+
+    /// Subagents still running.
+    pub fn running_agents(&self) -> impl Iterator<Item = &SubAgent> {
+        self.agents.iter().filter(|a| a.running())
+    }
+
+    /// Subagents of the current (or last) turn.
+    pub fn turn_agents(&self) -> &[SubAgent] {
+        &self.agents[self.turn_agents_from.min(self.agents.len())..]
     }
 
     fn finish_streaming(&mut self) {
@@ -257,7 +392,36 @@ impl Conversation {
                 parent_tool_use_id,
                 ..
             } => {
-                if !model.is_empty() && parent_tool_use_id.is_none() {
+                if let Some(parent) = parent_tool_use_id {
+                    let cwd = self.cwd.clone();
+                    let agent = self.agent_entry(&parent);
+                    for block in blocks {
+                        match block {
+                            Block::Text(text) if !text.trim().is_empty() => {
+                                agent.items.push(Item::Assistant {
+                                    text,
+                                    streaming: false,
+                                })
+                            }
+                            Block::ToolUse { id, name, input } => {
+                                agent.current_tool = Some(name.clone());
+                                agent.items.push(Item::Tool(ToolCall {
+                                    summary: tool_summary(&name, &input, &cwd),
+                                    diff: diff::from_input(&name, &input),
+                                    id,
+                                    name,
+                                    input,
+                                    result: None,
+                                    is_error: false,
+                                    parent: Some(parent.clone()),
+                                }));
+                            }
+                            _ => {}
+                        }
+                    }
+                    return applied;
+                }
+                if !model.is_empty() {
                     self.model = Some(model);
                 }
                 for block in blocks {
@@ -285,7 +449,11 @@ impl Conversation {
                                 tool.input = input;
                                 tool.parent = parent_tool_use_id.clone();
                             } else {
-                                self.new_tool(id, name, input, parent_tool_use_id.clone());
+                                let agent_tool = is_agent_tool(&name);
+                                self.new_tool(id.clone(), name, input, None);
+                                if agent_tool {
+                                    self.agent_entry(&id);
+                                }
                             }
                             self.status = Some("running tool".into());
                         }
@@ -297,7 +465,30 @@ impl Conversation {
                 content,
                 is_error,
                 structured,
+                parent_tool_use_id,
             } => {
+                if let Some(parent) = &parent_tool_use_id
+                    && let Some(agent) = self.agents.iter_mut().find(|a| &a.tool_use_id == parent)
+                {
+                    agent.current_tool = None;
+                }
+                // The Agent tool's own result: the subagent is done.
+                if let Some(agent) = self
+                    .agents
+                    .iter_mut()
+                    .find(|a| a.tool_use_id == tool_use_id)
+                    && agent.running()
+                {
+                    agent.status = if is_error {
+                        AgentStatus::Failed
+                    } else {
+                        AgentStatus::Done
+                    };
+                    agent.current_tool = None;
+                    if agent.duration_ms.is_none() {
+                        agent.duration_ms = agent.started.map(|t| t.elapsed().as_millis() as u64);
+                    }
+                }
                 if let Some(tool) = self.tool_mut(&tool_use_id) {
                     if !is_error
                         && let Some(d) =
@@ -314,6 +505,64 @@ impl Conversation {
                 }
             }
             Event::UserText(_) => {}
+            Event::TaskStarted {
+                tool_use_id,
+                task_id,
+                description,
+                subagent_type,
+            } => {
+                let agent = self.agent_entry(&tool_use_id);
+                agent.task_id = Some(task_id);
+                if !description.is_empty() {
+                    agent.description = description;
+                }
+                if !subagent_type.is_empty() {
+                    agent.kind = subagent_type;
+                }
+            }
+            Event::TaskProgress {
+                tool_use_id,
+                task_id,
+                last_tool,
+                total_tokens,
+                tool_uses,
+                duration_ms,
+                ..
+            } => {
+                let agent = self.agent_entry(&tool_use_id);
+                agent.task_id.get_or_insert(task_id);
+                if last_tool.is_some() {
+                    agent.current_tool = last_tool;
+                }
+                agent.total_tokens = total_tokens.or(agent.total_tokens);
+                agent.tool_uses = tool_uses.or(agent.tool_uses);
+                agent.duration_ms = duration_ms.or(agent.duration_ms);
+            }
+            Event::TaskDone {
+                tool_use_id,
+                task_id,
+                status,
+                summary,
+                total_tokens,
+                duration_ms,
+            } => {
+                let agent = match tool_use_id {
+                    Some(id) => Some(self.agent_entry(&id)),
+                    None => self.agent_by_task(&task_id),
+                };
+                if let Some(agent) = agent {
+                    agent.status = match status.as_str() {
+                        "failed" | "error" | "killed" | "cancelled" => AgentStatus::Failed,
+                        _ => AgentStatus::Done,
+                    };
+                    agent.current_tool = None;
+                    agent.summary = summary.or(agent.summary.take());
+                    agent.total_tokens = total_tokens.or(agent.total_tokens);
+                    agent.duration_ms = duration_ms
+                        .or(agent.duration_ms)
+                        .or_else(|| agent.started.map(|t| t.elapsed().as_millis() as u64));
+                }
+            }
             Event::PermissionRequest {
                 request_id,
                 tool_name,

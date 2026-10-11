@@ -11,3 +11,7 @@ Real `claude -p --output-format stream-json --input-format stream-json --verbose
 Cleaned before checking in: the folder path is `/tmp/wb-proj`; thinking signatures,
 partial tool input deltas, hook and rate limit events, and the long lists in `init`
 (skills, plugins, commands) are removed.
+- `subagents_turn.jsonl`: two subagents started in parallel with the Agent tool, with
+  `task_started`, `task_progress` and `task_notification` events and their own tool calls.
+- `session_history.jsonl`: the session file Claude Code wrote for that run (user and
+  assistant lines only, cleaned the same way), for listing and resuming earlier sessions.

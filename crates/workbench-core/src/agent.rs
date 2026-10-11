@@ -23,6 +23,8 @@ pub struct StartOptions {
     pub permission_mode: Option<String>,
     /// Continue this earlier conversation.
     pub resume: Option<String>,
+    /// Continue it in a copy (the original keeps running elsewhere).
+    pub fork: bool,
 }
 
 pub trait Agent: Send {
@@ -80,6 +82,7 @@ impl Agent for ClaudeCode {
             model: options.model.clone(),
             permission_mode: options.permission_mode.clone(),
             resume: options.resume.clone(),
+            fork: options.fork,
         });
         self.process = Some(Process::spawn(&spec, move |m| sink(m))?);
         Ok(())

@@ -2,6 +2,7 @@
 //!
 //! - [`skills`]: skills, agents, commands and CLAUDE.md files relevant to a project;
 //! - [`frontmatter`]: the YAML header of a SKILL.md or agent file;
+//! - [`history`]: earlier Claude Code sessions of a folder, and `claude` processes running there;
 //! - [`files`]: the project file tree, respecting .gitignore;
 //! - [`stream`]: the Claude Code `stream-json` protocol, line by line;
 //! - [`conversation`]: the chat state built from that stream;
@@ -21,6 +22,7 @@ pub mod conversation;
 pub mod diff;
 pub mod files;
 pub mod frontmatter;
+pub mod history;
 pub mod host;
 pub mod links;
 pub mod settings;

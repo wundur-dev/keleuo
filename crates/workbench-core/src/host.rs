@@ -68,6 +68,10 @@ pub trait Host: Send + Sync {
     fn create_dir_all(&self, path: &Path) -> io::Result<()>;
     fn exists(&self, path: &Path) -> bool;
     fn is_file(&self, path: &Path) -> bool;
+    /// Modification time in seconds since the epoch, when the host can tell.
+    fn modified(&self, _path: &Path) -> Option<u64> {
+        None
+    }
     fn read_dir(&self, path: &Path) -> io::Result<Vec<DirEntry>>;
     /// Every path under `root` git would not ignore, relative to `root`, with `is_dir`.
     fn list_files(&self, root: &Path, max: usize) -> Vec<(PathBuf, bool)>;
@@ -130,6 +134,11 @@ impl Host for LocalHost {
 
     fn is_file(&self, path: &Path) -> bool {
         path.is_file()
+    }
+
+    fn modified(&self, path: &Path) -> Option<u64> {
+        let m = std::fs::metadata(path).ok()?.modified().ok()?;
+        Some(m.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs())
     }
 
     fn read_dir(&self, path: &Path) -> io::Result<Vec<DirEntry>> {

@@ -22,6 +22,8 @@ pub struct Options {
     pub permission_mode: Option<String>,
     /// `--resume <session id>`: continue an earlier conversation.
     pub resume: Option<String>,
+    /// With `resume`: continue in a copy (`--fork-session`), leaving the original alone.
+    pub fork: bool,
 }
 
 impl Options {
@@ -49,6 +51,9 @@ impl Options {
         }
         if let Some(id) = &self.resume {
             args.extend(["--resume".into(), id.clone()]);
+            if self.fork {
+                args.push("--fork-session".into());
+            }
         }
         args
     }
