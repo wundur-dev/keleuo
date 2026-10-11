@@ -180,6 +180,77 @@ pub fn load_conversation(text: &str, cwd: &str) -> Conversation {
     chat
 }
 
+/// Add a subagent's own transcript (`<session>/subagents/agent-<id>.jsonl`) to a rebuilt chat,
+/// under the Agent tool call `tool_use_id` (from the agent's `.meta.json`).
+pub fn attach_subagent(chat: &mut Conversation, tool_use_id: &str, text: &str) {
+    chat.replaying = true;
+    for line in text.lines() {
+        let Ok(v) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        let event = match v.get("type").and_then(Value::as_str) {
+            Some("assistant") => match stream::parse_value(&v) {
+                stream::Event::Assistant {
+                    message_id,
+                    model,
+                    blocks,
+                    ..
+                } => stream::Event::Assistant {
+                    message_id,
+                    model,
+                    blocks,
+                    parent_tool_use_id: Some(tool_use_id.to_string()),
+                },
+                _ => continue,
+            },
+            Some("user") => match stream::parse_value(&v) {
+                stream::Event::ToolResult {
+                    tool_use_id: id,
+                    content,
+                    is_error,
+                    structured,
+                    ..
+                } => stream::Event::ToolResult {
+                    tool_use_id: id,
+                    content,
+                    is_error,
+                    structured,
+                    parent_tool_use_id: Some(tool_use_id.to_string()),
+                },
+                _ => continue,
+            },
+            _ => continue,
+        };
+        chat.apply(event);
+    }
+    chat.replaying = false;
+}
+
+/// Read a session's file and its subagents' transcripts and rebuild the chat.
+pub fn load_session(host: &dyn Host, path: &Path, cwd: &str) -> std::io::Result<Conversation> {
+    let mut chat = load_conversation(&host.read_to_string(path)?, cwd);
+    let dir = path.with_extension("").join("subagents");
+    if let Ok(entries) = host.read_dir(&dir) {
+        for e in entries.iter().filter(|e| e.name.ends_with(".meta.json")) {
+            let Ok(meta) = host.read_to_string(&dir.join(&e.name)) else {
+                continue;
+            };
+            let Some(tool_use_id) = serde_json::from_str::<Value>(&meta).ok().and_then(|m| {
+                m.get("toolUseId")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            }) else {
+                continue;
+            };
+            let transcript = dir.join(e.name.replace(".meta.json", ".jsonl"));
+            if let Ok(text) = host.read_to_string(&transcript) {
+                attach_subagent(&mut chat, &tool_use_id, &text);
+            }
+        }
+    }
+    Ok(chat)
+}
+
 /// A `claude` process running somewhere on this machine.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ClaudeProcess {
@@ -349,6 +420,30 @@ mod tests {
         assert_eq!(chat.agents.len(), 2);
         assert!(chat.agents.iter().all(|a| !a.running()));
         assert!(!chat.busy);
+    }
+
+    #[test]
+    fn attaches_a_subagent_transcript() {
+        let mut chat = load_conversation(&fixture("session_history.jsonl"), "/tmp/wb-proj");
+        let id = chat.agents[0].tool_use_id.clone();
+        attach_subagent(&mut chat, &id, &fixture("subagent_transcript.jsonl"));
+        let agent = chat.agent(&id).unwrap();
+        let names: Vec<&str> = agent
+            .items
+            .iter()
+            .filter_map(|i| match i {
+                Item::Tool(t) => Some(t.name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(names, ["Read"]);
+        assert!(matches!(&agent.items[0], Item::Tool(t) if t.done()));
+        assert!(
+            agent
+                .items
+                .iter()
+                .any(|i| matches!(i, Item::Assistant { .. }))
+        );
     }
 
     #[test]

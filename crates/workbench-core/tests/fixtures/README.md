@@ -15,3 +15,4 @@ partial tool input deltas, hook and rate limit events, and the long lists in `in
   `task_started`, `task_progress` and `task_notification` events and their own tool calls.
 - `session_history.jsonl`: the session file Claude Code wrote for that run (user and
   assistant lines only, cleaned the same way), for listing and resuming earlier sessions.
+- `subagent_transcript.jsonl`: the first subagent's own transcript from that session's `subagents/` folder.

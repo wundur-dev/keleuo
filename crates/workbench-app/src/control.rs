@@ -84,6 +84,24 @@ fn dispatch(line: &str, cx: &mut App) -> String {
     let Some((handle, ws)) = workspace else {
         return "no workspace".into();
     };
+    if let Some(keys) = line.strip_prefix("key ") {
+        // Keystrokes dispatched inside the app (no system input): `key cmd-n`.
+        let keys = keys.trim().to_string();
+        return handle
+            .update(cx, |_, window, cx| {
+                let mut handled = Vec::new();
+                for k in keys.split_whitespace() {
+                    match Keystroke::parse(k) {
+                        Ok(ks) => {
+                            handled.push(format!("{k}:{}", window.dispatch_keystroke(ks, cx)))
+                        }
+                        Err(e) => handled.push(format!("{k}:bad ({e})")),
+                    }
+                }
+                handled.join(" ")
+            })
+            .unwrap_or_else(|_| "window closed".into());
+    }
     handle
         .update(cx, |_, window, cx| {
             ws.update(cx, |ws, cx| ws.command(line, window, cx))

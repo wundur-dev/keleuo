@@ -20,10 +20,9 @@ use workbench_core::tabs::NameStore;
 
 use crate::AppSettings;
 use crate::actions::*;
-use crate::claude_panel::{ClaudePanel, ClaudePanelEvent};
-use crate::claude_session::{ClaudeSession, SessionEvent};
 use crate::file_tree::{FileTree, FileTreeEvent};
 use crate::right_area::{RightArea, RightAreaEvent, Split};
+use crate::sessions::{SessionTabs, Sessions, SessionsEvent};
 use crate::skills_panel::{SkillsEvent, SkillsPanel};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -73,13 +72,6 @@ impl Section {
     }
 }
 
-struct SessionTab {
-    number: usize,
-    session: Entity<ClaudeSession>,
-    panel: Entity<ClaudePanel>,
-    _subs: Vec<Subscription>,
-}
-
 /// An inline rename in the sidebar: the name store key, the automatic name, the field.
 struct Rename {
     key: String,
@@ -110,9 +102,8 @@ pub struct Workspace {
     skills: Entity<SkillsPanel>,
     tree: Entity<FileTree>,
     pub area: Entity<RightArea>,
-    sessions: Vec<SessionTab>,
-    active_session: usize,
-    next_session: usize,
+    pub sessions: Entity<Sessions>,
+    session_tabs: Entity<SessionTabs>,
     sidebar_folded: bool,
     open_sections: [bool; 4],
     focus_mode: Option<FocusMode>,
@@ -138,6 +129,8 @@ impl Workspace {
         let tree = cx.new(|cx| FileTree::new(host.clone(), root.clone(), cx));
         let area = cx.new(|cx| RightArea::new(host.clone(), root.clone(), names.clone(), cx));
         let layout = cx.new(|_| ResizableState::default());
+        let sessions = cx.new(|cx| Sessions::new(host.clone(), root.clone(), names.clone(), cx));
+        let session_tabs = cx.new(|cx| SessionTabs::new(sessions.clone(), cx));
         let folded = cx.global::<AppSettings>().0.borrow().layout.sidebar_folded;
 
         let mut subs = Vec::new();
@@ -168,12 +161,8 @@ impl Workspace {
                     ws.index = index.clone();
                     ws.area.update(cx, |a, _| a.index = index.clone());
                     ws.build_symbols(index.clone(), cx);
-                    for s in &ws.sessions {
-                        s.panel.update(cx, |p, cx| {
-                            p.index = index.clone();
-                            cx.notify();
-                        });
-                    }
+                    ws.sessions
+                        .update(cx, |s, cx| s.set_index(index.clone(), cx));
                 }
             },
         ));
@@ -194,6 +183,33 @@ impl Workspace {
         ));
         // The sidebar lists terminals: redraw when the area changes.
         subs.push(cx.observe(&area, |_, _, cx| cx.notify()));
+        subs.push(cx.subscribe_in(
+            &sessions,
+            window,
+            |ws, _, ev: &SessionsEvent, window, cx| match ev {
+                SessionsEvent::OpenFile(path, line) => {
+                    ws.open_file(path.clone(), *line, window, cx)
+                }
+                SessionsEvent::FileChanged(path) => {
+                    let path = path.clone();
+                    ws.area
+                        .update(cx, |a, cx| a.file_changed(&path, window, cx));
+                    if path.ends_with("SKILL.md")
+                        || path.components().any(|c| c.as_os_str() == ".claude")
+                    {
+                        ws.skills.update(cx, |s, cx| s.refresh(None, cx));
+                    }
+                }
+                SessionsEvent::TurnEnded => ws.tree.update(cx, |t, cx| t.refresh(cx)),
+                SessionsEvent::Switched => {
+                    if ws.focus_mode == Some(FocusMode::Right) {
+                        ws.focus_mode = None;
+                    }
+                    cx.notify();
+                }
+            },
+        ));
+        subs.push(cx.observe(&sessions, |_, _, cx| cx.notify()));
 
         let watch = Self::watch_files(&host, &root, window, cx);
 
@@ -205,9 +221,8 @@ impl Workspace {
             skills,
             tree,
             area,
-            sessions: Vec::new(),
-            active_session: 0,
-            next_session: 1,
+            sessions,
+            session_tabs,
             sidebar_folded: folded,
             open_sections: [true, true, true, true],
             focus_mode: None,
@@ -221,7 +236,7 @@ impl Workspace {
             _subs: subs,
         };
         this.load_branch(cx);
-        this.new_session(window, cx);
+        this.sessions.update(cx, |s, cx| s.new_session(window, cx));
         this
     }
 
@@ -336,108 +351,6 @@ impl Workspace {
         .detach();
     }
 
-    // ----- sessions -----
-
-    pub fn new_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let session = cx.new(|_| ClaudeSession::new(self.host.clone(), self.root.clone()));
-        let panel = cx.new(|cx| ClaudePanel::new(session.clone(), window, cx));
-        let index = self.index.clone();
-        panel.update(cx, |p, _| p.index = index);
-        let subs = vec![
-            cx.subscribe_in(
-                &panel,
-                window,
-                |ws, _, ev: &ClaudePanelEvent, window, cx| match ev {
-                    ClaudePanelEvent::OpenFile(path, line) => {
-                        ws.open_file(path.clone(), *line, window, cx)
-                    }
-                    ClaudePanelEvent::NewSession => ws.new_session(window, cx),
-                },
-            ),
-            cx.subscribe_in(
-                &session,
-                window,
-                |ws, _, ev: &SessionEvent, window, cx| match ev {
-                    SessionEvent::FileChanged(path) => {
-                        let path = path.clone();
-                        ws.area
-                            .update(cx, |a, cx| a.file_changed(&path, window, cx));
-                        if path.ends_with("SKILL.md")
-                            || path.components().any(|c| c.as_os_str() == ".claude")
-                        {
-                            ws.skills.update(cx, |s, cx| s.refresh(None, cx));
-                        }
-                    }
-                    SessionEvent::TurnEnded => ws.tree.update(cx, |t, cx| t.refresh(cx)),
-                },
-            ),
-            // Sidebar dots follow the session state.
-            cx.observe(&session, |_, _, cx| cx.notify()),
-        ];
-        let number = self.next_session;
-        self.next_session += 1;
-        self.sessions.push(SessionTab {
-            number,
-            session,
-            panel,
-            _subs: subs,
-        });
-        self.switch_session(self.sessions.len() - 1, window, cx);
-    }
-
-    fn switch_session(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
-        if ix >= self.sessions.len() {
-            return;
-        }
-        self.active_session = ix;
-        if self.focus_mode == Some(FocusMode::Right) {
-            self.focus_mode = None;
-        }
-        let s = &self.sessions[ix];
-        s.session.update(cx, |s, _| s.unseen = false);
-        s.panel.update(cx, |p, cx| p.focus_input(window, cx));
-        cx.notify();
-    }
-
-    fn close_session(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
-        if ix >= self.sessions.len() {
-            return;
-        }
-        let tab = self.sessions.remove(ix);
-        tab.session.update(cx, |s, _| s.stop());
-        if self.sessions.is_empty() {
-            self.new_session(window, cx);
-            return;
-        }
-        self.active_session = self.active_session.min(self.sessions.len() - 1);
-        self.switch_session(self.active_session, window, cx);
-    }
-
-    fn session_key(&self, number: usize) -> String {
-        NameStore::key(&self.root, &format!("session:{number}"))
-    }
-
-    fn session_auto_name(&self, tab: &SessionTab, cx: &App) -> String {
-        tab.session
-            .read(cx)
-            .chat
-            .title(40)
-            .unwrap_or_else(|| format!("Session {}", tab.number))
-    }
-
-    fn session_name(&self, tab: &SessionTab, cx: &App) -> String {
-        let key = self.session_key(tab.number);
-        self.names
-            .borrow()
-            .get(&key)
-            .map(str::to_string)
-            .unwrap_or_else(|| self.session_auto_name(tab, cx))
-    }
-
-    fn active_session(&self) -> Option<&SessionTab> {
-        self.sessions.get(self.active_session)
-    }
-
     // ----- right area -----
 
     fn show_right(&mut self) {
@@ -484,15 +397,17 @@ impl Workspace {
             Some(mode)
         };
         match self.focus_mode {
-            Some(FocusMode::Claude) => {
-                if let Some(s) = self.active_session() {
-                    s.panel.update(cx, |p, cx| p.focus_input(window, cx));
-                }
-            }
+            Some(FocusMode::Claude) => self.focus_claude(window, cx),
             Some(FocusMode::Right) => self.area.update(cx, |a, cx| a.focus_active(window, cx)),
             None => {}
         }
         cx.notify();
+    }
+
+    fn focus_claude(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(panel) = self.sessions.read(cx).active_tab().map(|t| t.panel.clone()) {
+            panel.update(cx, |p, cx| p.focus_input(window, cx));
+        }
     }
 
     /// Remember column widths a moment after the user stops dragging.
@@ -615,21 +530,83 @@ impl Workspace {
             }),
             "session" => {
                 if arg == "new" {
-                    self.new_session(window, cx);
+                    self.sessions.update(cx, |s, cx| s.new_session(window, cx));
                 } else if let Ok(n) = arg.parse::<usize>() {
-                    self.switch_session(n.saturating_sub(1), window, cx);
+                    self.sessions
+                        .update(cx, |s, cx| s.switch(n.saturating_sub(1), window, cx));
                 }
             }
-            "send" => {
-                if let Some(s) = self.active_session() {
+            "send" | "allow" | "deny" => {
+                if let Some(session) = self
+                    .sessions
+                    .read(cx)
+                    .active_tab()
+                    .map(|t| t.session.clone())
+                {
                     let text = arg.to_string();
-                    s.session.update(cx, |s, cx| s.send(&text, cx));
+                    session.update(cx, |s, cx| match cmd {
+                        "send" => s.send(&text, cx),
+                        c => s.answer_first(c == "allow", cx),
+                    });
                 }
             }
-            "allow" | "deny" => {
-                if let Some(s) = self.active_session() {
-                    let allow = cmd == "allow";
-                    s.session.update(cx, |s, cx| s.answer_first(allow, cx));
+            "earlier" => {
+                let s = self.sessions.read(cx);
+                return s
+                    .earlier
+                    .iter()
+                    .enumerate()
+                    .map(|(i, e)| {
+                        format!(
+                            "{}:{}:{}:{}",
+                            i + 1,
+                            e.info.messages,
+                            if e.running_pid.is_some() {
+                                "running"
+                            } else {
+                                "idle"
+                            },
+                            e.info.title
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" | ");
+            }
+            "scan" => self.sessions.update(cx, |s, cx| s.scan(cx)),
+            "resume" | "fork" | "takeover" => {
+                let n = arg.parse::<usize>().unwrap_or(1).saturating_sub(1);
+                let found = self.sessions.read(cx).earlier.get(n).cloned();
+                let Some(e) = found else {
+                    return "no such earlier session".into();
+                };
+                let (fork, wait) = match cmd {
+                    "fork" => (true, None),
+                    "takeover" => (false, e.running_pid),
+                    _ => (false, None),
+                };
+                self.sessions
+                    .update(cx, |s, cx| s.resume(&e.info.id, fork, wait, window, cx));
+            }
+            "expand" => {
+                // Open every subagent of the shown session.
+                if let Some((session, panel)) = self
+                    .sessions
+                    .read(cx)
+                    .active_tab()
+                    .map(|t| (t.session.clone(), t.panel.clone()))
+                {
+                    let ids: Vec<String> = session
+                        .read(cx)
+                        .chat
+                        .agents
+                        .iter()
+                        .map(|a| a.tool_use_id.clone())
+                        .collect();
+                    panel.update(cx, |p, cx| {
+                        for id in &ids {
+                            p.expand_agent(id, cx);
+                        }
+                    });
                 }
             }
             "fold" => self.toggle_sidebar(cx),
@@ -652,22 +629,21 @@ impl Workspace {
                 }
             }
             "rename-session" => {
-                if let Some(tab) = self.active_session() {
-                    let key = self.session_key(tab.number);
-                    let _ = self.names.borrow_mut().set(&key, arg);
-                    cx.notify();
-                }
+                let name = arg.to_string();
+                self.sessions.update(cx, |s, cx| s.rename_active(&name, cx));
             }
             "state" => {
                 let a = self.area.read(cx);
+                let ss = self.sessions.read(cx);
                 return format!(
-                    "sessions={} active={} folded={} split={:?} focus={:?} terminals={}",
-                    self.sessions.len(),
-                    self.active_session + 1,
+                    "sessions={} active={} folded={} split={:?} focus={:?} terminals={} focused={}",
+                    ss.tabs.len(),
+                    ss.active + 1,
                     self.sidebar_folded,
                     a.split,
                     self.focus_mode,
-                    a.terminals(cx).len()
+                    a.terminals(cx).len(),
+                    window.focused(cx).is_some()
                 );
             }
             _ => return format!("unknown command: {cmd}"),
@@ -813,7 +789,9 @@ impl Workspace {
                         match section {
                             Section::Skills => ws.skills.update(cx, |s, cx| s.new_skill(cx)),
                             Section::Terminals => ws.new_terminal(window, cx),
-                            Section::Sessions => ws.new_session(window, cx),
+                            Section::Sessions => {
+                                ws.sessions.update(cx, |s, cx| s.new_session(window, cx))
+                            }
                             Section::Files => {}
                         }
                     }))
@@ -823,11 +801,9 @@ impl Workspace {
 
     fn render_sidebar(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
-        let (bg, border, blue, amber, fg, muted) = (
+        let (bg, border, fg, muted) = (
             theme.sidebar,
             theme.border,
-            theme.blue,
-            theme.warning,
             theme.foreground,
             theme.muted_foreground,
         );
@@ -889,35 +865,16 @@ impl Workspace {
                     }
                 }
                 Section::Sessions => {
-                    col = col.child(self.section_header(section, Some(self.sessions.len()), cx));
+                    let n = self.sessions.read(cx).tabs.len();
+                    col = col.child(self.section_header(section, Some(n), cx));
                     if open {
-                        let mut list = div().flex_none().flex().flex_col();
-                        for (ix, tab) in self.sessions.iter().enumerate() {
-                            let s = tab.session.read(cx);
-                            let dot = if s.chat.needs_input() {
-                                Some(amber)
-                            } else if s.chat.busy {
-                                Some(blue)
-                            } else if s.unseen && ix != self.active_session {
-                                Some(fg)
-                            } else {
-                                None
-                            };
-                            let row = Row {
-                                id: SharedString::from(format!("session-row-{}", tab.number)),
-                                name: self.session_name(tab, cx),
-                                key: self.session_key(tab.number),
-                                auto: self.session_auto_name(tab, cx),
-                                dot,
-                                selected: ix == self.active_session,
-                                icon: IconName::Bot,
-                                select: Rc::new(move |ws, window, cx| {
-                                    ws.switch_session(ix, window, cx)
-                                }),
-                            };
-                            list = list.child(self.render_row(row, cx));
-                        }
-                        col = col.child(list);
+                        col = col.child(
+                            div()
+                                .flex_none()
+                                .max_h(px(320.))
+                                .flex()
+                                .child(self.sessions.clone()),
+                        );
                     }
                 }
             }
@@ -1027,10 +984,10 @@ impl Render for Workspace {
         if self.host.is_remote() {
             place = format!("{}: {place}", self.host.label());
         }
-        let session_name = self
-            .active_session()
-            .map(|t| self.session_name(t, cx))
-            .unwrap_or_default();
+        let session_name = {
+            let ss = self.sessions.read(cx);
+            ss.active_tab().map(|t| ss.name(t, cx)).unwrap_or_default()
+        };
         let focus_label = match self.focus_mode {
             Some(FocusMode::Right) => Some("focus: files"),
             Some(FocusMode::Claude) => Some("focus: Claude"),
@@ -1099,7 +1056,7 @@ impl Render for Workspace {
             None => (!self.sidebar_folded, true, true),
         };
         let layout = cx.global::<AppSettings>().0.borrow().layout.clone();
-        let claude = self.active_session().map(|t| t.panel.clone());
+        let claude = self.sessions.read(cx).active_tab().map(|t| t.panel.clone());
         let weak = cx.entity().downgrade();
         let columns = h_resizable("main")
             .with_state(&self.layout)
@@ -1118,7 +1075,14 @@ impl Render for Workspace {
                     .size(px(layout.claude_width))
                     .size_range(px(320.)..Pixels::MAX)
                     .visible(claude_vis)
-                    .child(div().size_full().children(claude)),
+                    .child(
+                        div()
+                            .size_full()
+                            .flex()
+                            .flex_col()
+                            .child(self.session_tabs.clone())
+                            .child(div().flex_1().min_h_0().children(claude)),
+                    ),
             )
             .child(
                 resizable_panel()
@@ -1188,20 +1152,21 @@ impl Render for Workspace {
                     }
                 })
             }))
-            .on_action(cx.listener(|ws, _: &NewSession, w, cx| ws.new_session(w, cx)))
-            .on_action(
-                cx.listener(|ws, _: &CloseSession, w, cx| {
-                    ws.close_session(ws.active_session, w, cx)
-                }),
-            )
+            .on_action(cx.listener(|ws, _: &NewSession, w, cx| {
+                ws.sessions.update(cx, |s, cx| s.new_session(w, cx))
+            }))
+            .on_action(cx.listener(|ws, _: &CloseSession, w, cx| {
+                ws.sessions.update(cx, |s, cx| {
+                    let ix = s.active;
+                    s.close(ix, w, cx)
+                })
+            }))
             .on_action(cx.listener(|ws, _: &NewTerminal, w, cx| ws.new_terminal(w, cx)))
             .on_action(cx.listener(|ws, _: &AskClaude, w, cx| {
                 if ws.focus_mode == Some(FocusMode::Right) {
                     ws.focus_mode = None;
                 }
-                if let Some(s) = ws.active_session() {
-                    s.panel.update(cx, |p, cx| p.focus_input(w, cx));
-                }
+                ws.focus_claude(w, cx);
                 cx.notify();
             }))
             .child(top)

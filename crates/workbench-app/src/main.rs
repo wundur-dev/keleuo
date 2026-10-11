@@ -26,6 +26,7 @@ mod perf;
 mod picker;
 mod pty;
 mod right_area;
+mod sessions;
 mod skills_panel;
 mod tab_strip;
 mod terminal_view;

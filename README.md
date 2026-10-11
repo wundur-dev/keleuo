@@ -34,7 +34,18 @@ Remote over SSH (first steps, see below): `cargo run -p workbench-app -- --ssh h
   Terminals show a dot for unseen output; sessions show blue while working, amber when a
   permission prompt waits, white for unseen activity. Double-click or right-click a row to
   rename it. Cmd+B folds the sidebar to an icon strip.
-- Claude: the main column. Several sessions; the sidebar switches between them.
+- Claude: the main column. Several sessions, each its own `claude` process, history, draft
+  and scroll position; a tab row on top ("+ New session", Cmd+N) and the sidebar switch
+  between them, and hidden sessions keep running.
+- Subagents (the Agent or Task tool) show live: a strip on top of the Claude column while
+  they run and a small tree under their session in the sidebar, each with status, elapsed
+  time, the tool in use and tokens. Click one to see its own messages and tool calls.
+- Earlier sessions: the folder's Claude Code sessions from `~/.claude/projects` (read-only)
+  are listed under "Earlier" with their first message, last activity and size; click to
+  resume one here with its history (subagent transcripts included). A session that a
+  `claude` process elsewhere is still writing (found with `ps` and `lsof`, never signalled) is
+  marked "running in another terminal" and offers "Fork here" (`--fork-session`) or "Take over
+  when it stops" (resumes here once that process exits).
 - Right area: one tab row for files, skills and terminals. Links and diffs in Claude open
   here. Drag a tab to the right or bottom half to split, or use Cmd+\ (beside) and
   Cmd+Shift+\ (below); Cmd+Alt+\ moves the tab to the other half.

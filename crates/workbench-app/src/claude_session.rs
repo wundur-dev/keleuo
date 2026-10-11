@@ -27,6 +27,10 @@ pub struct ClaudeSession {
     pub model: Option<String>,
     /// Something happened since the user last looked at this session.
     pub unseen: bool,
+    /// The next start forks the resumed session (`--fork-session`).
+    fork_next: bool,
+    /// Waiting for a `claude` process elsewhere (this pid) to exit before resuming here.
+    pub waiting_for: Option<u32>,
     _reader: Option<Task<()>>,
 }
 
@@ -44,8 +48,24 @@ impl ClaudeSession {
                 .ok()
                 .filter(|m| !m.is_empty()),
             unseen: false,
+            fork_next: false,
+            waiting_for: None,
             _reader: None,
         }
+    }
+
+    /// A session continuing an earlier one, its history already rebuilt from the file.
+    /// `fork`: continue in a copy (the original runs elsewhere).
+    pub fn resumed(host: Arc<dyn Host>, cwd: PathBuf, chat: Conversation, fork: bool) -> Self {
+        let mut s = Self::new(host, cwd);
+        s.chat = chat;
+        s.fork_next = fork;
+        s.chat.push_notice(if fork {
+            "Forked: the next message continues a copy of this conversation here; the original keeps running."
+        } else {
+            "Resumed: the next message continues this conversation."
+        });
+        s
     }
 
     fn start(&mut self, cx: &mut Context<Self>) -> anyhow::Result<()> {
@@ -54,6 +74,7 @@ impl ClaudeSession {
             model: self.model.clone(),
             permission_mode: self.permission_mode.clone(),
             resume: self.chat.session_id.clone(),
+            fork: std::mem::take(&mut self.fork_next),
         };
         let (tx, rx) = async_channel::unbounded::<Message>();
         self.agent.start(
@@ -120,6 +141,13 @@ impl ClaudeSession {
     pub fn send(&mut self, text: &str, cx: &mut Context<Self>) {
         let text = text.trim();
         if text.is_empty() {
+            return;
+        }
+        if let Some(pid) = self.waiting_for {
+            self.chat.push_error(format!(
+                "This conversation is still open in another terminal (process {pid}). Quit it there first; it resumes here by itself."
+            ));
+            cx.notify();
             return;
         }
         if !self.agent.running()
