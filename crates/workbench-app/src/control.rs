@@ -10,12 +10,12 @@ use std::path::PathBuf;
 use gpui_kit::*;
 
 use crate::picker::Picker;
-use crate::workspace::Workspace;
+use crate::shell::Shell;
 
 /// Where control commands go.
 #[derive(Default)]
 pub struct ControlTargets {
-    pub workspace: Option<(AnyWindowHandle, WeakEntity<Workspace>)>,
+    pub workspace: Option<(AnyWindowHandle, WeakEntity<Shell>)>,
     pub picker: Option<(AnyWindowHandle, WeakEntity<Picker>)>,
 }
 
@@ -104,8 +104,16 @@ fn dispatch(line: &str, cx: &mut App) -> String {
     }
     handle
         .update(cx, |_, window, cx| {
-            ws.update(cx, |ws, cx| ws.command(line, window, cx))
-                .unwrap_or_else(|_| "workspace closed".into())
+            ws.update(cx, |shell, cx| {
+                if let Some(reply) = shell.command(line, window, cx) {
+                    return reply;
+                }
+                match shell.active_workspace() {
+                    Some(w) => w.update(cx, |w, cx| w.command(line, window, cx)),
+                    None => "no session".into(),
+                }
+            })
+            .unwrap_or_else(|_| "window closed".into())
         })
         .unwrap_or_else(|_| "window closed".into())
 }

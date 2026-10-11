@@ -23,6 +23,9 @@ actions!(
         GoBack,
         GoForward,
         ResetLayout,
+        NextSession,
+        PrevSession,
+        RenameSession,
     ]
 );
 
@@ -43,6 +46,8 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-shift-w", CloseSession, None),
         KeyBinding::new("cmd-\\", SplitRight, None),
         KeyBinding::new("cmd-shift-\\", SplitDown, None),
+        KeyBinding::new("ctrl-tab", NextSession, None),
+        KeyBinding::new("ctrl-shift-tab", PrevSession, None),
         KeyBinding::new("ctrl--", GoBack, None),
         KeyBinding::new("ctrl-shift--", GoForward, None),
     ]);
@@ -57,8 +62,9 @@ pub fn menus() -> Vec<Menu> {
             MenuItem::action("Close Tab", CloseTab),
             MenuItem::action("Rename Tab", RenameTab),
             MenuItem::separator(),
-            MenuItem::action("New Claude Session", NewSession),
-            MenuItem::action("Close Claude Session", CloseSession),
+            MenuItem::action("New Session", NewSession),
+            MenuItem::action("Close Session", CloseSession),
+            MenuItem::action("Rename Session", RenameSession),
             MenuItem::action("New Terminal", NewTerminal),
         ]),
         Menu::new("View").items([
@@ -72,6 +78,8 @@ pub fn menus() -> Vec<Menu> {
             MenuItem::action("Markdown: Edit or Preview", TogglePreview),
             MenuItem::action("Ask Claude", AskClaude),
             MenuItem::separator(),
+            MenuItem::action("Next Session", NextSession),
+            MenuItem::action("Previous Session", PrevSession),
             MenuItem::action("Back", GoBack),
             MenuItem::action("Forward", GoForward),
         ]),

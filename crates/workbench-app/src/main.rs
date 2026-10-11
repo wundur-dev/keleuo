@@ -19,6 +19,7 @@ use workbench_core::settings::Settings;
 mod actions;
 mod claude_panel;
 mod claude_session;
+mod claude_side;
 mod control;
 mod doc_panel;
 mod file_tree;
@@ -27,7 +28,7 @@ mod panels;
 mod perf;
 mod picker;
 mod pty;
-mod sessions;
+mod shell;
 mod skills_panel;
 mod terminal_view;
 mod theme;
@@ -94,11 +95,6 @@ fn window_options(title: String, w: f32, h: f32, cx: &App) -> WindowOptions {
 }
 
 pub fn open_workspace(host: Arc<dyn Host>, root: PathBuf, cx: &mut App) {
-    if !host.is_remote() {
-        let settings = cx.global::<AppSettings>().0.clone();
-        settings.borrow_mut().add_recent(&root);
-        let _ = settings.borrow().save();
-    }
     let title = format!(
         "{} - Workbench",
         root.file_name()
@@ -107,7 +103,7 @@ pub fn open_workspace(host: Arc<dyn Host>, root: PathBuf, cx: &mut App) {
     );
     let options = window_options(title, 1500., 940., cx);
     match gpui_kit::open_window(options, cx, |window, cx| {
-        cx.new(|cx| workspace::Workspace::new(host, root, window, cx))
+        cx.new(|cx| shell::Shell::new(host, root, window, cx))
     }) {
         Ok((handle, ws)) => {
             let targets = cx.global_mut::<control::ControlTargets>();

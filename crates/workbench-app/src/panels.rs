@@ -16,9 +16,9 @@ use gpui_kit::*;
 use workbench_core::tabs::NameStore;
 
 use crate::claude_panel::{ClaudePanel, ClaudePanelEvent};
+use crate::claude_side::ClaudeSide;
 use crate::doc_panel::{DocEvent, DocPanel};
 use crate::file_tree::FileTree;
-use crate::sessions::Sessions;
 use crate::skills_panel::SkillsPanel;
 use crate::terminal_view::{TerminalEvent, TerminalView};
 
@@ -90,7 +90,7 @@ pub fn tab_label(key: &str, auto: String, cx: &App) -> String {
 }
 
 /// A tab title: the name (italic when given by hand), an optional dot, or the rename field.
-fn title_element(
+pub fn title_element(
     key: &str,
     auto: String,
     dot: Option<Hsla>,
@@ -155,7 +155,7 @@ macro_rules! list_panel {
 
 list_panel!(FileTree, "Files", "Files", IconName::FolderOpen);
 list_panel!(SkillsPanel, "Skills", "Skills", IconName::BookOpen);
-list_panel!(Sessions, "Sessions", "Claude sessions", IconName::Bot);
+list_panel!(ClaudeSide, "Claude", "Claude", IconName::Bot);
 list_panel!(
     TerminalsList,
     "Terminals",
@@ -207,19 +207,9 @@ impl Panel for SkillsPanel {
     }
 }
 
-impl Panel for Sessions {
+impl Panel for ClaudeSide {
     fn title(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        list_title(IconName::Bot, "Claude sessions")
-    }
-    fn toolbar_buttons(&mut self, _: &mut Window, cx: &mut Context<Self>) -> Option<Vec<Button>> {
-        Some(vec![
-            Button::new("new-session")
-                .ghost()
-                .xsmall()
-                .icon(IconName::Plus)
-                .tooltip("New Claude session (Cmd+N)")
-                .on_click(cx.listener(|s, _, window, cx| s.new_session(window, cx))),
-        ])
+        list_title(IconName::Bot, "Subagents and earlier sessions")
     }
     fn zoom_control(&self, _: &App) -> Option<gpui_kit::component::dock::PanelControl> {
         None
@@ -358,8 +348,9 @@ impl Render for TerminalsList {
 
 // ----- sessions, files, terminals -----
 
-pub fn session_key(root: &std::path::Path, number: usize) -> String {
-    NameStore::key(root, &format!("session:{number}"))
+/// The name key of a session tab.
+pub fn session_key(number: usize) -> String {
+    format!("session-tab:{number}")
 }
 
 impl EventEmitter<PanelEvent> for ClaudePanel {}
@@ -367,6 +358,10 @@ impl EventEmitter<PanelEvent> for ClaudePanel {}
 impl BasePanel for ClaudePanel {
     fn panel_name(&self) -> &'static str {
         "ClaudeSession"
+    }
+    /// The session's conversation stays: close the session tab instead.
+    fn closable(&self, _: &App) -> bool {
+        false
     }
     fn on_removed(&mut self, _: &mut Window, cx: &mut Context<Self>) {
         cx.emit(ClaudePanelEvent::Closed);
@@ -393,30 +388,17 @@ impl Panel for ClaudePanel {
             Some(amber)
         } else if s.chat.busy {
             Some(blue)
-        } else if s.unseen {
-            Some(fg)
         } else {
             None
         };
-        let auto = s
-            .chat
-            .title(32)
-            .unwrap_or_else(|| format!("Session {}", self.number));
-        title_element(&self.name_key.clone(), auto, dot, Some(IconName::Bot), cx)
-    }
-    fn dropdown_menu(
-        &mut self,
-        menu: PopupMenu,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> PopupMenu {
-        let auto = self
-            .session
-            .read(cx)
-            .chat
-            .title(32)
-            .unwrap_or_else(|| format!("Session {}", self.number));
-        rename_menu(menu, self.name_key.clone(), auto, cx)
+        let _ = fg;
+        div()
+            .flex()
+            .items_center()
+            .gap_1()
+            .child(Icon::new(IconName::Bot).xsmall())
+            .child("Claude")
+            .children(dot.map(|c| div().size(px(6.)).rounded_full().bg(c)))
     }
     fn inner_padding(&self, _: &App) -> bool {
         false

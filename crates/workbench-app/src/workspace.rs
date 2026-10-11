@@ -1,5 +1,5 @@
 //! The window: one thin title bar over a dock (gpui-component's DockArea). Everything is a
-//! panel that drags into any tab group: the Files, Skills, Terminals and Claude sessions lists,
+//! panel that drags into any tab group: the Files, Skills, Terminals and Claude lists,
 //! each Claude session, each open file and each terminal. The default layout is the round 2
 //! arrangement (lists on the left, Claude, then code); "Reset layout" brings it back, and the
 //! arrangement is saved per folder.
@@ -14,7 +14,7 @@ use gpui_kit::component::dock::{
     BasePanelView, DockArea, DockAreaState, DockEvent, DockLayout, DockPlacement, DockSkin,
     InsertTarget, PanelBuildContext, PanelId, PanelInfo, PanelStyle, panel_handle, register_panel,
 };
-use gpui_kit::component::{ActiveTheme, Icon, IconName, Placement, Sizable, TitleBar};
+use gpui_kit::component::{ActiveTheme, Icon, IconName, Placement, Sizable, WindowExt};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 use workbench_core::host::Host;
@@ -22,22 +22,24 @@ use workbench_core::skills::Source;
 
 use crate::AppSettings;
 use crate::actions::*;
-use crate::claude_panel::ClaudePanel;
+use crate::claude_panel::{ClaudePanel, ClaudePanelEvent};
+use crate::claude_session::{ClaudeSession, SessionEvent};
+use crate::claude_side::{ClaudeSide, ClaudeSideEvent};
 use crate::doc_panel::{DocContext, DocEvent, DocPanel};
 use crate::file_tree::{FileTree, FileTreeEvent};
 use crate::panels::{self, TerminalsList, TerminalsListEvent, doc_key, start_tab_rename, term_key};
-use crate::sessions::{Sessions, SessionsEvent};
 use crate::skills_panel::{SkillsEvent, SkillsPanel};
 use crate::terminal_view::{TerminalEvent, TerminalView};
 
 /// Bumped when the saved layout format changes; older files are ignored.
-const LAYOUT_VERSION: usize = 1;
+const LAYOUT_VERSION: usize = 2;
 
 /// What the panel registry needs to rebuild a saved layout for one window.
 struct Factory {
     files: Entity<FileTree>,
     skills: Entity<SkillsPanel>,
-    sessions: Entity<Sessions>,
+    claude: Entity<ClaudePanel>,
+    claude_side: Entity<ClaudeSide>,
     terms_list: Entity<TerminalsList>,
     doc_ctx: DocContext,
     shell: workbench_core::host::CommandSpec,
@@ -67,33 +69,18 @@ fn factory(ctx: &PanelBuildContext, cx: &App) -> Option<Rc<Factory>> {
 /// Register the panel kinds once, so saved layouts can be rebuilt.
 pub fn register_panels(cx: &mut App) {
     cx.set_global(Factories::default());
-    for name in ["Files", "Skills", "Sessions", "Terminals"] {
+    for name in ["Files", "Skills", "Claude", "Terminals", "ClaudeSession"] {
         register_panel(cx, name, move |ctx, _window, cx| {
             let f = factory(&ctx, cx).expect("a workspace for this dock");
             match name {
                 "Files" => panel_handle(f.files.clone()),
                 "Skills" => panel_handle(f.skills.clone()),
-                "Sessions" => panel_handle(f.sessions.clone()),
+                "Claude" => panel_handle(f.claude_side.clone()),
+                "ClaudeSession" => panel_handle(f.claude.clone()),
                 _ => panel_handle(f.terms_list.clone()),
             }
         });
     }
-    register_panel(cx, "ClaudeSession", |ctx, window, cx| {
-        let f = factory(&ctx, cx).expect("a workspace for this dock");
-        let (id, number) = match ctx.info() {
-            PanelInfo::Panel(v) => (
-                v.get("session_id")
-                    .and_then(|s| s.as_str())
-                    .map(str::to_string),
-                v.get("number").and_then(|n| n.as_u64()).unwrap_or(1) as usize,
-            ),
-            _ => (None, 1),
-        };
-        let panel = f
-            .sessions
-            .update(cx, |s, cx| s.restore(id, number, window, cx));
-        panel_handle(panel)
-    });
     register_panel(cx, "Doc", |ctx, window, cx| {
         let f = factory(&ctx, cx).expect("a workspace for this dock");
         let (path, read_only) = match ctx.info() {
@@ -122,6 +109,21 @@ pub fn register_panels(cx: &mut App) {
     });
 }
 
+pub enum WorkspaceEvent {
+    /// Start a new session (pick a folder).
+    NewSession,
+    /// Open an earlier conversation of this folder as a new session tab.
+    Resume {
+        chat: Box<workbench_core::conversation::Conversation>,
+        fork: bool,
+        wait_for: Option<u32>,
+    },
+    /// This session's Claude wrote or edited a file.
+    ClaudeEdited(PathBuf),
+}
+
+impl EventEmitter<WorkspaceEvent> for Workspace {}
+
 pub struct Workspace {
     host: Arc<dyn Host>,
     root: PathBuf,
@@ -130,7 +132,12 @@ pub struct Workspace {
     _skin: Rc<DockSkin>,
     files: Entity<FileTree>,
     skills: Entity<SkillsPanel>,
-    pub sessions: Entity<Sessions>,
+    /// This session's one Claude conversation.
+    pub session: Entity<ClaudeSession>,
+    pub claude: Entity<ClaudePanel>,
+    claude_side: Entity<ClaudeSide>,
+    /// Shown on the session tab: a git worktree made for this session.
+    pub worktree: Option<String>,
     terms_list: Entity<TerminalsList>,
     terminals: Rc<RefCell<Vec<Entity<TerminalView>>>>,
     next_term: usize,
@@ -153,13 +160,23 @@ impl Workspace {
     pub fn new(
         host: Arc<dyn Host>,
         root: PathBuf,
+        session: ClaudeSession,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let names = cx.global::<panels::Names>().0.clone();
         let files = cx.new(|cx| FileTree::new(host.clone(), root.clone(), cx));
         let skills = cx.new(|cx| SkillsPanel::new(host.clone(), root.clone(), cx));
-        let sessions = cx.new(|cx| Sessions::new(host.clone(), root.clone(), names, cx));
+        let session = cx.new(|_| session);
+        let claude = cx.new(|cx| ClaudePanel::new(session.clone(), window, cx));
+        let claude_side = cx.new(|cx| {
+            ClaudeSide::new(
+                host.clone(),
+                root.clone(),
+                session.clone(),
+                claude.clone(),
+                cx,
+            )
+        });
         let terminals = Rc::new(RefCell::new(Vec::new()));
         let terms_list = cx.new(|cx| TerminalsList::new(terminals.clone(), cx));
         let doc_ctx = DocContext {
@@ -191,38 +208,55 @@ impl Workspace {
                 FileTreeEvent::Indexed(index) => {
                     *ws.doc_ctx.index.borrow_mut() = index.clone();
                     ws.build_symbols(index.clone(), cx);
-                    ws.sessions
-                        .update(cx, |s, cx| s.set_index(index.clone(), cx));
+                    ws.claude.update(cx, |p, cx| {
+                        p.index = index.clone();
+                        cx.notify();
+                    });
                 }
             },
         ));
         subs.push(cx.subscribe_in(
-            &sessions,
+            &claude,
             window,
-            |ws, _, ev: &SessionsEvent, window, cx| match ev {
-                SessionsEvent::OpenFile(path, line) => {
+            |ws, _, ev: &ClaudePanelEvent, window, cx| match ev {
+                ClaudePanelEvent::OpenFile(path, line) => {
                     ws.open(path.clone(), *line, false, true, window, cx)
                 }
-                SessionsEvent::FileChanged(path) => {
+                ClaudePanelEvent::NewSession => cx.emit(WorkspaceEvent::NewSession),
+                ClaudePanelEvent::Closed | ClaudePanelEvent::Activated => {}
+            },
+        ));
+        subs.push(cx.subscribe_in(
+            &session,
+            window,
+            |ws, _, ev: &SessionEvent, window, cx| match ev {
+                SessionEvent::FileChanged(path) => {
                     ws.file_changed(path, window, cx);
                     if path.ends_with("SKILL.md")
                         || path.components().any(|c| c.as_os_str() == ".claude")
                     {
                         ws.skills.update(cx, |s, cx| s.refresh(None, cx));
                     }
+                    cx.emit(WorkspaceEvent::ClaudeEdited(path.clone()));
                 }
-                SessionsEvent::TurnEnded => ws.files.update(cx, |t, cx| t.refresh(cx)),
-                SessionsEvent::Added(panel) => ws.place_session(panel.clone(), window, cx),
-                SessionsEvent::Show(panel) => {
-                    ws.show_panel(PanelId::from(panel.entity_id()), window, cx)
-                }
-                SessionsEvent::Remove(panel) => {
-                    let panel = panel.clone();
-                    ws.dock
-                        .update(cx, |a, cx| a.remove_panel(panel, window, cx));
-                }
+                SessionEvent::TurnEnded => ws.files.update(cx, |t, cx| t.refresh(cx)),
             },
         ));
+        // The session tab's dot and name follow the conversation.
+        subs.push(cx.observe(&session, |_, _, cx| cx.notify()));
+        subs.push(
+            cx.subscribe(&claude_side, |_, _, ev: &ClaudeSideEvent, cx| match ev {
+                ClaudeSideEvent::Resume {
+                    chat,
+                    fork,
+                    wait_for,
+                } => cx.emit(WorkspaceEvent::Resume {
+                    chat: chat.clone(),
+                    fork: *fork,
+                    wait_for: *wait_for,
+                }),
+            }),
+        );
         subs.push(cx.subscribe_in(
             &terms_list,
             window,
@@ -253,7 +287,10 @@ impl Workspace {
             _skin: skin,
             files,
             skills,
-            sessions,
+            session,
+            claude,
+            claude_side,
+            worktree: None,
             terms_list,
             terminals,
             next_term: 1,
@@ -277,6 +314,72 @@ impl Workspace {
         this
     }
 
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    pub fn host(&self) -> Arc<dyn Host> {
+        self.host.clone()
+    }
+
+    /// The session tab's automatic name: folder and branch, then the first message.
+    pub fn auto_name(&self, cx: &App) -> String {
+        let mut name = self
+            .root
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        if let Some(b) = &self.branch {
+            name.push_str(&format!(" ({b})"));
+        }
+        if self.host.is_remote() {
+            name = format!("{}: {name}", self.host.label());
+        }
+        match self.session.read(cx).chat.title(28) {
+            Some(t) => format!("{name}: {t}"),
+            None => name,
+        }
+    }
+
+    /// Whether a file is open here.
+    pub fn has_open(&self, path: &Path, cx: &App) -> bool {
+        self.docs.iter().any(|d| d.read(cx).path == path)
+    }
+
+    /// Another session in the same folder just edited a file open here: say so on its tab
+    /// and as a notification.
+    pub fn warn_edited_elsewhere(
+        &mut self,
+        path: &Path,
+        by: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        for d in self.docs.clone() {
+            if d.read(cx).path == path {
+                let by = by.to_string();
+                d.update(cx, |d, cx| d.edited_by_other(by, cx));
+            }
+        }
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        window.push_notification(format!("{name} was just edited by Claude in the session \"{by}\", which shares this folder."), cx);
+    }
+
+    pub fn toggle_sidebar_pub(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.toggle_sidebar(window, cx);
+    }
+
+    pub fn split_right(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.split(Placement::Right, window, cx);
+    }
+
+    pub fn focus_main(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.claude.update(cx, |p, cx| p.focus_input(window, cx));
+    }
+
     // ----- layout -----
 
     fn layout_file(&self) -> Option<PathBuf> {
@@ -291,23 +394,10 @@ impl Workspace {
     fn default_layout(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.loading = true;
         let settings = cx.global::<AppSettings>().0.borrow().layout.clone();
-        if self.sessions.read(cx).tabs.is_empty() {
-            self.sessions.update(cx, |s, cx| {
-                s.adopt(
-                    crate::claude_session::ClaudeSession::new(s.host(), s.root()),
-                    None,
-                    window,
-                    cx,
-                );
-            });
-        }
         if self.terminals.borrow().is_empty() && self.docs.is_empty() {
             self.spawn_terminal(window, cx);
         }
-        let mut claude = DockLayout::tabs();
-        for t in &self.sessions.read(cx).tabs {
-            claude = claude.panel_view(panel_handle(t.panel.clone()), cx);
-        }
+        let claude = DockLayout::tabs().panel_view(panel_handle(self.claude.clone()), cx);
         let mut code = DockLayout::tabs();
         for d in &self.docs {
             code = code.panel_view(panel_handle(d.clone()), cx);
@@ -332,7 +422,7 @@ impl Workspace {
                 Some(px(110.)),
             )
             .child(
-                DockLayout::tabs().panel_view(panel_handle(self.sessions.clone()), cx),
+                DockLayout::tabs().panel_view(panel_handle(self.claude_side.clone()), cx),
                 Some(px(200.)),
             );
         self.dock.update(cx, |a, cx| {
@@ -344,9 +434,7 @@ impl Workspace {
             }
         });
         self.loading = false;
-        if let Some(t) = self.sessions.read(cx).tabs.first().map(|t| t.panel.clone()) {
-            t.update(cx, |p, cx| p.focus_input(window, cx));
-        }
+        self.claude.update(cx, |p, cx| p.focus_input(window, cx));
     }
 
     pub fn reset_layout(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -372,7 +460,8 @@ impl Workspace {
         let f = Rc::new(Factory {
             files: self.files.clone(),
             skills: self.skills.clone(),
-            sessions: self.sessions.clone(),
+            claude: self.claude.clone(),
+            claude_side: self.claude_side.clone(),
             terms_list: self.terms_list.clone(),
             doc_ctx: self.doc_ctx.clone(),
             shell: self.host.shell_command(&self.root),
@@ -397,8 +486,9 @@ impl Workspace {
                 Made::Terminal(view) => self.adopt_terminal(view, window, cx),
             }
         }
-        if self.sessions.read(cx).tabs.is_empty() {
-            self.sessions.update(cx, |s, cx| s.new_session(window, cx));
+        if !self.in_dock(PanelId::from(self.claude.entity_id()), cx) {
+            let view = panel_handle(self.claude.clone());
+            self.place(view, None, None, window, cx);
         }
         true
     }
@@ -538,28 +628,8 @@ impl Workspace {
     }
 
     fn any_session_panel(&self, cx: &App) -> Option<PanelId> {
-        let s = self.sessions.read(cx);
-        s.active_tab()
-            .into_iter()
-            .chain(s.tabs.iter())
-            .map(|t| PanelId::from(t.panel.entity_id()))
-            .find(|id| self.in_dock(*id, cx))
-    }
-
-    fn place_session(
-        &mut self,
-        panel: Entity<ClaudePanel>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.loading {
-            return;
-        }
-        let id = PanelId::from(panel.entity_id());
-        let anchor = self.any_session_panel(cx).filter(|a| *a != id);
-        let beside = self.recent_code_panel(cx).map(|c| (c, Placement::Left));
-        self.place(panel_handle(panel.clone()), anchor, beside, window, cx);
-        panel.update(cx, |p, cx| p.focus_input(window, cx));
+        let id = PanelId::from(self.claude.entity_id());
+        self.in_dock(id, cx).then_some(id)
     }
 
     fn place_code(
@@ -908,10 +978,9 @@ impl Workspace {
     }
 
     fn focus_claude(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(panel) = self.sessions.read(cx).active_tab().map(|t| t.panel.clone()) {
-            self.show_panel(PanelId::from(panel.entity_id()), window, cx);
-            panel.update(cx, |p, cx| p.focus_input(window, cx));
-        }
+        let panel = self.claude.clone();
+        self.show_panel(PanelId::from(panel.entity_id()), window, cx);
+        panel.update(cx, |p, cx| p.focus_input(window, cx));
     }
 
     /// The panel with keyboard focus: a doc, a terminal or a session.
@@ -933,20 +1002,7 @@ impl Workspace {
             let v = t.read(cx);
             return Some((PanelId::from(t.entity_id()), term_key(v), v.auto_name()));
         }
-        let s = self.sessions.read(cx);
-        s.tabs
-            .iter()
-            .find(|t| t.panel.read(cx).contains_focus(window, cx))
-            .map(|t| {
-                let p = t.panel.read(cx);
-                let auto = t
-                    .session
-                    .read(cx)
-                    .chat
-                    .title(32)
-                    .unwrap_or_else(|| format!("Session {}", t.number));
-                (PanelId::from(t.panel.entity_id()), p.name_key.clone(), auto)
-            })
+        None
     }
 
     fn rename_focused(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -969,15 +1025,6 @@ impl Workspace {
             .filter(|t| t.read(cx).focus.contains_focused(window, cx))
         {
             self.dock.update(cx, |a, cx| a.remove_panel(t, window, cx));
-        } else if let Some(p) = self
-            .sessions
-            .read(cx)
-            .tabs
-            .iter()
-            .find(|t| t.panel.read(cx).contains_focus(window, cx))
-            .map(|t| t.panel.clone())
-        {
-            self.dock.update(cx, |a, cx| a.remove_panel(p, window, cx));
         }
     }
 
@@ -1055,54 +1102,34 @@ impl Workspace {
                 window,
                 cx,
             ),
-            "session" => {
-                if arg == "new" {
-                    self.sessions.update(cx, |s, cx| s.new_session(window, cx));
-                } else if let Ok(n) = arg.parse::<usize>() {
-                    self.sessions
-                        .update(cx, |s, cx| s.switch(n.saturating_sub(1), window, cx));
-                }
-            }
             "send" | "allow" | "deny" => {
-                if let Some(session) = self
-                    .sessions
-                    .read(cx)
-                    .active_tab()
-                    .map(|t| t.session.clone())
-                {
-                    let text = arg.to_string();
-                    session.update(cx, |s, cx| match cmd {
-                        "send" => s.send(&text, cx),
-                        c => s.answer_first(c == "allow", cx),
-                    });
-                }
+                let text = arg.to_string();
+                self.session.update(cx, |s, cx| match cmd {
+                    "send" => s.send(&text, cx),
+                    c => s.answer_first(c == "allow", cx),
+                });
             }
             "earlier" => {
-                let s = self.sessions.read(cx);
+                let s = self.claude_side.read(cx);
                 return s
                     .earlier
                     .iter()
                     .enumerate()
                     .map(|(i, e)| {
-                        format!(
-                            "{}:{}:{}:{}",
-                            i + 1,
-                            e.info.messages,
-                            if e.running_pid.is_some() {
-                                "running"
-                            } else {
-                                "idle"
-                            },
-                            e.info.title
-                        )
+                        let state = if e.running_pid.is_some() {
+                            "running"
+                        } else {
+                            "idle"
+                        };
+                        format!("{}:{}:{}:{}", i + 1, e.info.messages, state, e.info.title)
                     })
                     .collect::<Vec<_>>()
                     .join(" | ");
             }
-            "scan" => self.sessions.update(cx, |s, cx| s.scan(cx)),
+            "scan" => self.claude_side.update(cx, |s, cx| s.scan(cx)),
             "resume" | "fork" | "takeover" => {
                 let n = arg.parse::<usize>().unwrap_or(1).saturating_sub(1);
-                let found = self.sessions.read(cx).earlier.get(n).cloned();
+                let found = self.claude_side.read(cx).earlier.get(n).cloned();
                 let Some(e) = found else {
                     return "no such earlier session".into();
                 };
@@ -1111,29 +1138,23 @@ impl Workspace {
                     "takeover" => (false, e.running_pid),
                     _ => (false, None),
                 };
-                self.sessions
+                self.claude_side
                     .update(cx, |s, cx| s.resume(&e.info.id, fork, wait, window, cx));
             }
             "expand" => {
-                if let Some((session, panel)) = self
-                    .sessions
+                let ids: Vec<String> = self
+                    .session
                     .read(cx)
-                    .active_tab()
-                    .map(|t| (t.session.clone(), t.panel.clone()))
-                {
-                    let ids: Vec<String> = session
-                        .read(cx)
-                        .chat
-                        .agents
-                        .iter()
-                        .map(|a| a.tool_use_id.clone())
-                        .collect();
-                    panel.update(cx, |p, cx| {
-                        for id in &ids {
-                            p.expand_agent(id, cx);
-                        }
-                    });
-                }
+                    .chat
+                    .agents
+                    .iter()
+                    .map(|a| a.tool_use_id.clone())
+                    .collect();
+                self.claude.update(cx, |p, cx| {
+                    for id in &ids {
+                        p.expand_agent(id, cx);
+                    }
+                });
             }
             "fold" => self.toggle_sidebar(window, cx),
             "reset" => self.reset_layout(window, cx),
@@ -1144,12 +1165,7 @@ impl Workspace {
                 };
                 self.toggle_zoom(id, window, cx);
             }
-            "rename-session" => {
-                let name = arg.to_string();
-                self.sessions.update(cx, |s, cx| s.rename_active(&name, cx));
-            }
             "state" => {
-                let ss = self.sessions.read(cx);
                 let a = self.dock.read(cx);
                 let groups = a.layout(DockPlacement::Center).map(|t| {
                     let mut n = 0;
@@ -1161,9 +1177,7 @@ impl Workspace {
                     n
                 });
                 return format!(
-                    "sessions={} active={} docs={} terminals={} center_groups={:?} left_open={} zoomed={} focused={}",
-                    ss.tabs.len(),
-                    ss.active + 1,
+                    "docs={} terminals={} center_groups={:?} left_open={} zoomed={} focused={}",
                     self.docs.len(),
                     self.terminals.borrow().len(),
                     groups,
@@ -1178,30 +1192,6 @@ impl Workspace {
     }
 
     // ----- rendering -----
-
-    fn title_button(
-        &self,
-        id: &'static str,
-        icon: IconName,
-        tip: &'static str,
-        cx: &mut Context<Self>,
-    ) -> Stateful<Div> {
-        let hover = cx.theme().secondary_hover;
-        let muted = cx.theme().muted_foreground;
-        div()
-            .id(id)
-            .size(px(22.))
-            .flex()
-            .flex_none()
-            .items_center()
-            .justify_center()
-            .rounded_sm()
-            .hover(|d| d.bg(hover))
-            .child(Icon::new(icon).small().text_color(muted))
-            .tooltip(move |window, cx| {
-                gpui_kit::component::tooltip::Tooltip::new(tip).build(window, cx)
-            })
-    }
 
     /// The thin strip shown when the sidebar dock is folded: one icon per list.
     fn render_strip(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -1230,8 +1220,8 @@ impl Workspace {
             ),
             (
                 IconName::Bot,
-                "Claude sessions",
-                PanelId::from(self.sessions.entity_id()),
+                "Claude: subagents and earlier sessions",
+                PanelId::from(self.claude_side.entity_id()),
             ),
         ];
         let mut col = div()
@@ -1295,44 +1285,7 @@ impl Render for Workspace {
         }
         let left_open = self.dock.read(cx).is_dock_open(DockPlacement::Left);
 
-        let top = TitleBar::new().h(px(30.)).pl(px(76.)).child(
-            div()
-                .size_full()
-                .flex()
-                .items_center()
-                .gap_1()
-                .child(
-                    self.title_button("t-sidebar", IconName::PanelLeft, "Sidebar (Cmd+B)", cx)
-                        .on_click(cx.listener(|ws, _, window, cx| ws.toggle_sidebar(window, cx))),
-                )
-                .child(
-                    div()
-                        .flex_none()
-                        .px_1()
-                        .text_size(px(12.))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(fg)
-                        .child(place),
-                )
-                .child(div().flex_1())
-                .child(
-                    self.title_button(
-                        "t-split",
-                        IconName::PanelRight,
-                        "Split the shown file or terminal (Cmd+\\)",
-                        cx,
-                    )
-                    .on_click(
-                        cx.listener(|ws, _, window, cx| ws.split(Placement::Right, window, cx)),
-                    ),
-                )
-                .child(
-                    self.title_button("t-reset", IconName::RotateCw, "Reset layout", cx)
-                        .on_click(cx.listener(|ws, _, window, cx| ws.reset_layout(window, cx))),
-                )
-                .child(div().w(px(4.))),
-        );
-        let _ = muted;
+        let _ = (muted, place);
 
         div()
             .size_full()
@@ -1368,18 +1321,8 @@ impl Render for Workspace {
             .on_action(cx.listener(|ws, _: &SplitRight, w, cx| ws.split(Placement::Right, w, cx)))
             .on_action(cx.listener(|ws, _: &SplitDown, w, cx| ws.split(Placement::Bottom, w, cx)))
             .on_action(cx.listener(|ws, _: &ResetLayout, w, cx| ws.reset_layout(w, cx)))
-            .on_action(cx.listener(|ws, _: &NewSession, w, cx| {
-                ws.sessions.update(cx, |s, cx| s.new_session(w, cx))
-            }))
-            .on_action(cx.listener(|ws, _: &CloseSession, w, cx| {
-                ws.sessions.update(cx, |s, cx| {
-                    let ix = s.active;
-                    s.close(ix, w, cx)
-                })
-            }))
             .on_action(cx.listener(|ws, _: &NewTerminal, w, cx| ws.new_terminal(w, cx)))
             .on_action(cx.listener(|ws, _: &AskClaude, w, cx| ws.focus_claude(w, cx)))
-            .child(top)
             .child(
                 div()
                     .flex_1()

@@ -58,6 +58,8 @@ pub struct DocPanel {
     pending_line: Option<u32>,
     opened_at: std::time::Instant,
     pub focus: FocusHandle,
+    /// Another session in the same folder just edited this file (its name).
+    edited_by: Option<String>,
     _sub: Option<Subscription>,
 }
 
@@ -85,6 +87,7 @@ impl DocPanel {
             pending_line: line,
             opened_at: std::time::Instant::now(),
             focus: cx.focus_handle(),
+            edited_by: None,
             _sub: None,
         };
         this.load(window, cx);
@@ -104,6 +107,12 @@ impl DocPanel {
             return format!("{} (skill)", dir.to_string_lossy());
         }
         name
+    }
+
+    /// Another session sharing the folder just edited this file.
+    pub fn edited_by_other(&mut self, by: String, cx: &mut Context<Self>) {
+        self.edited_by = Some(by);
+        cx.notify();
     }
 
     pub fn root(&self) -> PathBuf {
@@ -353,6 +362,7 @@ impl DocPanel {
     fn render_header(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
         let (muted, border, hover) = (theme.muted_foreground, theme.border, theme.secondary_hover);
+        let warn = theme.warning;
         let preview = self.preview;
         div()
             .h(px(20.))
@@ -366,6 +376,22 @@ impl DocPanel {
             .border_b_1()
             .border_color(border)
             .child(div().flex_1().truncate().child(self.relative()))
+            .when_some(self.edited_by.clone(), |d, by| {
+                d.child(
+                    div()
+                        .id("edited-by")
+                        .px_1()
+                        .rounded_sm()
+                        .bg(warn.opacity(0.18))
+                        .text_color(warn)
+                        .cursor_pointer()
+                        .child(format!("also edited by session \"{by}\"; click to dismiss"))
+                        .on_click(cx.listener(|doc, _, _, cx| {
+                            doc.edited_by = None;
+                            cx.notify();
+                        })),
+                )
+            })
             .when(self.read_only, |d| d.child("read-only"))
             .when(self.markdown, |d| {
                 d.child(

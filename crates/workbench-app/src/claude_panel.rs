@@ -31,9 +31,8 @@ pub enum ClaudePanelEvent {
 
 pub struct ClaudePanel {
     pub session: Entity<ClaudeSession>,
-    /// The session's number and the key of its saved name.
+    /// The session's number (saved with the layout).
     pub number: usize,
-    pub name_key: String,
     focus: FocusHandle,
     input: Entity<TextareaState>,
     scroll: ScrollHandle,
@@ -120,7 +119,6 @@ impl ClaudePanel {
         Self {
             session,
             number: 0,
-            name_key: String::new(),
             focus: cx.focus_handle(),
             input,
             scroll: ScrollHandle::new(),
