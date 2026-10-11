@@ -49,6 +49,11 @@ impl FileIndex {
         self.relative.len()
     }
 
+    /// Absolute paths of every indexed file.
+    pub fn files(&self) -> impl Iterator<Item = PathBuf> + '_ {
+        self.relative.iter().map(|r| self.root.join(r))
+    }
+
     pub fn is_empty(&self) -> bool {
         self.relative.is_empty()
     }

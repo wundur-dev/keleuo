@@ -34,7 +34,12 @@ pub struct TerminalPanel {
 }
 
 impl TerminalPanel {
-    pub fn new(host: Arc<dyn Host>, root: PathBuf, names: Rc<RefCell<NameStore>>, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        host: Arc<dyn Host>,
+        root: PathBuf,
+        names: Rc<RefCell<NameStore>>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let strip = cx.new(|_| TabStrip::new("term-tabs", names));
         let sub = cx.subscribe(&strip, |panel, _, ev: &TabStripEvent, cx| match ev {
             TabStripEvent::Activate(id) => {
@@ -63,7 +68,9 @@ impl TerminalPanel {
         let host = self.host.clone();
         let root = self.root.clone();
         cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
-            let branch = cx.background_spawn(async move { host.git_branch(&root) }).await;
+            let branch = cx
+                .background_spawn(async move { host.git_branch(&root) })
+                .await;
             let _ = this.update(cx, |p, cx| {
                 p.branch = branch;
                 p.sync_strip(cx);
@@ -79,16 +86,25 @@ impl TerminalPanel {
         let obs = cx.observe(&view, |panel, _, cx| panel.sync_strip(cx));
         let id = self.next_id;
         self.next_id += 1;
-        self.tabs.push(Tab { id, view, _obs: obs });
+        self.tabs.push(Tab {
+            id,
+            view,
+            _obs: obs,
+        });
         self.active = Some(id);
         self.sync_strip(cx);
     }
 
     fn close(&mut self, id: u64, cx: &mut Context<Self>) {
-        let Some(ix) = self.tabs.iter().position(|t| t.id == id) else { return };
+        let Some(ix) = self.tabs.iter().position(|t| t.id == id) else {
+            return;
+        };
         self.tabs.remove(ix);
         if self.active == Some(id) {
-            self.active = self.tabs.get(ix.min(self.tabs.len().saturating_sub(1))).map(|t| t.id);
+            self.active = self
+                .tabs
+                .get(ix.min(self.tabs.len().saturating_sub(1)))
+                .map(|t| t.id);
         }
         self.sync_strip(cx);
         cx.notify();
@@ -102,7 +118,12 @@ impl TerminalPanel {
             .map(|(i, t)| {
                 let view = t.view.read(cx);
                 let program = view.pty.as_ref().and_then(|p| p.foreground_program());
-                let mut name = auto_name(&self.root, self.branch.as_deref(), program.as_deref(), &self.shell);
+                let mut name = auto_name(
+                    &self.root,
+                    self.branch.as_deref(),
+                    program.as_deref(),
+                    &self.shell,
+                );
                 if view.exited {
                     name.push_str(" (exited)");
                 }
@@ -120,7 +141,10 @@ impl TerminalPanel {
             let s = self.strip.read(cx);
             s.active != self.active
                 || s.tabs.len() != tabs.len()
-                || s.tabs.iter().zip(&tabs).any(|(a, b)| a.auto_name != b.auto_name || a.tooltip != b.tooltip)
+                || s.tabs
+                    .iter()
+                    .zip(&tabs)
+                    .any(|(a, b)| a.auto_name != b.auto_name || a.tooltip != b.tooltip)
         };
         if changed {
             let active = self.active;
@@ -130,7 +154,10 @@ impl TerminalPanel {
     }
 
     pub fn active_view(&self) -> Option<Entity<TerminalView>> {
-        self.tabs.iter().find(|t| Some(t.id) == self.active).map(|t| t.view.clone())
+        self.tabs
+            .iter()
+            .find(|t| Some(t.id) == self.active)
+            .map(|t| t.view.clone())
     }
 
     pub fn focus(&self, window: &mut Window, cx: &mut App) {
@@ -141,12 +168,15 @@ impl TerminalPanel {
     }
 
     pub fn contains_focus(&self, window: &Window, cx: &App) -> bool {
-        self.tabs.iter().any(|t| t.view.read(cx).focus.contains_focused(window, cx))
+        self.tabs
+            .iter()
+            .any(|t| t.view.read(cx).focus.contains_focused(window, cx))
     }
 
     pub fn rename_active(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(id) = self.active {
-            self.strip.update(cx, |s, cx| s.start_rename(id, window, cx));
+            self.strip
+                .update(cx, |s, cx| s.start_rename(id, window, cx));
         }
     }
 }
@@ -171,7 +201,11 @@ impl Render for TerminalPanel {
                     .flex()
                     .items_center()
                     .hover(|d| d.bg(theme.secondary_hover))
-                    .child(Icon::new(IconName::Plus).xsmall().text_color(theme.muted_foreground))
+                    .child(
+                        Icon::new(IconName::Plus)
+                            .xsmall()
+                            .text_color(theme.muted_foreground),
+                    )
                     .on_click(cx.listener(|panel, _, window, cx| {
                         panel.new_tab(cx);
                         panel.focus(window, cx);
@@ -188,6 +222,11 @@ impl Render for TerminalPanel {
                 .child("No terminal. Press + to start one.")
                 .into_any_element(),
         };
-        div().size_full().flex().flex_col().child(header).child(body)
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .child(header)
+            .child(body)
     }
 }

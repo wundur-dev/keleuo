@@ -39,24 +39,32 @@ impl EventEmitter<ClaudePanelEvent> for ClaudePanel {}
 const MONO: &str = "Menlo";
 
 impl ClaudePanel {
-    pub fn new(session: Entity<ClaudeSession>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        session: Entity<ClaudeSession>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let input = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .auto_grow(1, 10)
                 .placeholder("Message Claude (Enter sends, Shift+Enter new line)")
                 .submit_on_enter(true)
         });
-        let s1 = cx.subscribe_in(&input, window, |panel, input, ev: &InputEvent, window, cx| {
-            if let InputEvent::PressEnter { shift: false, .. } = ev {
-                let text = input.read(cx).value().to_string();
-                if text.trim().is_empty() {
-                    return;
+        let s1 = cx.subscribe_in(
+            &input,
+            window,
+            |panel, input, ev: &InputEvent, window, cx| {
+                if let InputEvent::PressEnter { shift: false, .. } = ev {
+                    let text = input.read(cx).value().to_string();
+                    if text.trim().is_empty() {
+                        return;
+                    }
+                    input.update(cx, |s, cx| s.set_value("", window, cx));
+                    panel.follow = true;
+                    panel.session.update(cx, |s, cx| s.send(&text, cx));
                 }
-                input.update(cx, |s, cx| s.set_value("", window, cx));
-                panel.follow = true;
-                panel.session.update(cx, |s, cx| s.send(&text, cx));
-            }
-        });
+            },
+        );
         let s2 = cx.observe(&session, |panel, session, cx| {
             let rev = session.read(cx).chat.revision;
             if rev != panel.last_revision {
@@ -83,16 +91,16 @@ impl ClaudePanel {
         self.input.update(cx, |s, cx| s.focus(window, cx));
     }
 
-    pub fn contains_focus(&self, window: &Window, cx: &App) -> bool {
-        let _ = (window, cx);
-        false
-    }
-
     fn open(&self, path: PathBuf, line: Option<u32>, cx: &mut Context<Self>) {
         cx.emit(ClaudePanelEvent::OpenFile(path, line));
     }
 
-    fn markdown(&self, id: (&'static str, usize), text: &str, cx: &mut Context<Self>) -> AnyElement {
+    fn markdown(
+        &self,
+        id: (&'static str, usize),
+        text: &str,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let md = self.index.linkify_markdown(text);
         let entity = cx.entity().downgrade();
         TextView::markdown(id, md)
@@ -109,26 +117,43 @@ impl ClaudePanel {
     }
 
     /// Plain text where file references are clickable spans.
-    fn linked_text(&self, id: SharedString, text: &str, color: Hsla, cx: &mut Context<Self>) -> AnyElement {
+    fn linked_text(
+        &self,
+        id: SharedString,
+        text: &str,
+        color: Hsla,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let found = self.index.find_links(text);
         if found.is_empty() {
             return div().child(text.to_string()).into_any_element();
         }
         let link_color = cx.theme().link;
         let ranges: Vec<std::ops::Range<usize>> = found.iter().map(|l| l.start..l.end).collect();
-        let targets: Vec<(PathBuf, Option<u32>)> = found.into_iter().map(|l| (l.path, l.line)).collect();
+        let targets: Vec<(PathBuf, Option<u32>)> =
+            found.into_iter().map(|l| (l.path, l.line)).collect();
         let mut highlights = Vec::new();
         for r in &ranges {
             highlights.push((
                 r.clone(),
                 HighlightStyle {
                     color: Some(link_color),
-                    underline: Some(UnderlineStyle { thickness: px(1.), color: Some(link_color), wavy: false }),
+                    underline: Some(UnderlineStyle {
+                        thickness: px(1.),
+                        color: Some(link_color),
+                        wavy: false,
+                    }),
                     ..Default::default()
                 },
             ));
         }
-        let styled = StyledText::new(text.to_string()).with_default_highlights(&TextStyle { color, ..Default::default() }, highlights);
+        let style = TextStyle {
+            color,
+            font_family: MONO.into(),
+            font_size: px(11.).into(),
+            ..Default::default()
+        };
+        let styled = StyledText::new(text.to_string()).with_default_highlights(&style, highlights);
         let entity = cx.entity().downgrade();
         InteractiveText::new(id, styled)
             .on_click(ranges, move |ix, _, cx| {
@@ -141,8 +166,14 @@ impl ClaudePanel {
 
     fn render_diff(&self, key: &str, diff: &FileDiff, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
-        let (green, red, muted, border) = (theme.green, theme.red, theme.muted_foreground, theme.border);
-        let mut col = div().flex().flex_col().font_family(MONO).text_size(px(11.5)).line_height(px(16.));
+        let (green, red, muted, border) =
+            (theme.green, theme.red, theme.muted_foreground, theme.border);
+        let mut col = div()
+            .flex()
+            .flex_col()
+            .font_family(MONO)
+            .text_size(px(11.5))
+            .line_height(px(16.));
         let max_lines = 400;
         let mut shown = 0;
         for hunk in &diff.hunks {
@@ -166,7 +197,11 @@ impl ClaudePanel {
                     LineKind::Removed => ("-", red.opacity(0.16), red),
                     LineKind::Context => (" ", transparent_black(), muted),
                 };
-                let number = if line.kind == LineKind::Removed { String::new() } else { new_line.to_string() };
+                let number = if line.kind == LineKind::Removed {
+                    String::new()
+                } else {
+                    new_line.to_string()
+                };
                 if line.kind != LineKind::Removed {
                     new_line += 1;
                 }
@@ -178,23 +213,49 @@ impl ClaudePanel {
                         .flex()
                         .bg(bg)
                         .cursor_pointer()
-                        .on_click(cx.listener(move |p, _, _, cx| p.open(path.clone(), target_line, cx)))
-                        .child(div().w(px(32.)).flex_none().text_right().pr_1().text_color(muted.opacity(0.7)).child(number))
+                        .on_click(
+                            cx.listener(move |p, _, _, cx| p.open(path.clone(), target_line, cx)),
+                        )
+                        .child(
+                            div()
+                                .w(px(32.))
+                                .flex_none()
+                                .text_right()
+                                .pr_1()
+                                .text_color(muted.opacity(0.7))
+                                .child(number),
+                        )
                         .child(div().w(px(12.)).flex_none().text_color(fg).child(sign))
-                        .child(div().flex_1().whitespace_nowrap().overflow_hidden().child(line.text.clone())),
+                        .child(
+                            div()
+                                .flex_1()
+                                .whitespace_nowrap()
+                                .overflow_hidden()
+                                .child(line.text.clone()),
+                        ),
                 );
             }
         }
         if shown > max_lines {
-            col = col.child(div().px_1().text_color(muted).child(format!("... {} more lines", shown - max_lines)));
+            col = col.child(
+                div()
+                    .px_1()
+                    .text_color(muted)
+                    .child(format!("... {} more lines", shown - max_lines)),
+            );
         }
         col.into_any_element()
     }
 
     fn render_tool(&self, ix: usize, tool: &ToolCall, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
-        let (fg, muted, border, card_bg, hover) =
-            (theme.foreground, theme.muted_foreground, theme.border, theme.secondary, theme.secondary_hover);
+        let (fg, muted, border, card_bg, hover) = (
+            theme.foreground,
+            theme.muted_foreground,
+            theme.border,
+            theme.secondary,
+            theme.secondary_hover,
+        );
         let (green, red) = (theme.green, theme.red);
         // Diffs start open; other cards start closed.
         let default_open = tool.diff.is_some();
@@ -215,7 +276,12 @@ impl ClaudePanel {
                 .child(div().text_color(green).child(format!("+{}", d.added())))
                 .child(div().text_color(red).child(format!("-{}", d.removed())))
         });
-        let summary_el = self.linked_text(SharedString::from(format!("sum-{}", tool.id)), &tool.summary, muted, cx);
+        let summary_el = self.linked_text(
+            SharedString::from(format!("sum-{}", tool.id)),
+            &tool.summary,
+            muted,
+            cx,
+        );
         let header = div()
             .id(SharedString::from(format!("tool-h-{}", tool.id)))
             .h(px(22.))
@@ -226,11 +292,34 @@ impl ClaudePanel {
             .text_xs()
             .cursor_pointer()
             .hover(|d| d.bg(hover))
-            .child(Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight }).xsmall().text_color(muted))
+            .child(
+                Icon::new(if open {
+                    IconName::ChevronDown
+                } else {
+                    IconName::ChevronRight
+                })
+                .xsmall()
+                .text_color(muted),
+            )
             .child(status)
-            .child(div().flex_none().font_weight(FontWeight::SEMIBOLD).text_color(fg).child(tool.name.clone()))
-            .when(tool.parent.is_some(), |d| d.child(div().text_color(muted).child("(subagent)")))
-            .child(div().flex_1().min_w_0().truncate().font_family(MONO).child(summary_el))
+            .child(
+                div()
+                    .flex_none()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(fg)
+                    .child(tool.name.clone()),
+            )
+            .when(tool.parent.is_some(), |d| {
+                d.child(div().text_color(muted).child("(subagent)"))
+            })
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .font_family(MONO)
+                    .child(summary_el),
+            )
             .children(stats)
             .on_click(cx.listener(move |p, _, _, cx| {
                 if !p.toggled.remove(&id) {
@@ -279,11 +368,29 @@ impl ClaudePanel {
                         .font_family(MONO)
                         .text_size(px(11.))
                         .text_color(if tool.is_error { red } else { fg })
-                        .child(self.linked_text(SharedString::from(format!("res-{}", tool.id)), &text, fg, cx))
-                        .when(more > 0, |d| d.child(div().text_color(muted).child(format!("... {more} more lines")))),
+                        .child(self.linked_text(
+                            SharedString::from(format!("res-{}", tool.id)),
+                            &text,
+                            fg,
+                            cx,
+                        ))
+                        .when(more > 0, |d| {
+                            d.child(
+                                div()
+                                    .text_color(muted)
+                                    .child(format!("... {more} more lines")),
+                            )
+                        }),
                 );
             } else if let (Some(result), true) = (&tool.result, tool.is_error) {
-                body = body.child(div().px_2().py_1().text_xs().text_color(red).child(one_line(result, 300)));
+                body = body.child(
+                    div()
+                        .px_2()
+                        .py_1()
+                        .text_xs()
+                        .text_color(red)
+                        .child(one_line(result, 300)),
+                );
             }
             card = card.child(body);
         }
@@ -292,7 +399,12 @@ impl ClaudePanel {
 
     fn render_permission(&self, p: &PermissionPrompt, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
-        let (warning, muted, fg, border) = (theme.warning, theme.muted_foreground, theme.foreground, theme.border);
+        let (warning, muted, fg, border) = (
+            theme.warning,
+            theme.muted_foreground,
+            theme.foreground,
+            theme.border,
+        );
         let mut card = div()
             .flex()
             .flex_col()
@@ -307,10 +419,24 @@ impl ClaudePanel {
                     .flex()
                     .gap_1()
                     .items_center()
-                    .child(Icon::new(IconName::TriangleAlert).xsmall().text_color(warning))
-                    .child(div().font_weight(FontWeight::SEMIBOLD).text_color(fg).child(format!("Allow {}?", p.tool_name))),
+                    .child(
+                        Icon::new(IconName::TriangleAlert)
+                            .xsmall()
+                            .text_color(warning),
+                    )
+                    .child(
+                        div()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(fg)
+                            .child(format!("Allow {}?", p.tool_name)),
+                    ),
             )
-            .child(div().font_family(MONO).text_color(fg).child(p.summary.clone()));
+            .child(
+                div()
+                    .font_family(MONO)
+                    .text_color(fg)
+                    .child(p.summary.clone()),
+            );
         if let Some(d) = &p.description
             && d != &p.summary
         {
@@ -319,31 +445,44 @@ impl ClaudePanel {
         match p.answer {
             None => {
                 let (rid1, rid2) = (p.request_id.clone(), p.request_id.clone());
-                card = card.child(
-                    div()
-                        .flex()
-                        .gap_2()
-                        .pt_1()
-                        .child(
-                            gpui_kit::component::button::Button::new(SharedString::from(format!("allow-{}", p.request_id)))
+                card =
+                    card.child(
+                        div()
+                            .flex()
+                            .gap_2()
+                            .pt_1()
+                            .child(
+                                gpui_kit::component::button::Button::new(SharedString::from(
+                                    format!("allow-{}", p.request_id),
+                                ))
                                 .xsmall()
                                 .label("Allow")
-                                .on_click(cx.listener(move |panel, _, _, cx| {
-                                    panel.session.update(cx, |s, cx| s.answer(&rid1, true, cx))
-                                })),
-                        )
-                        .child(
-                            gpui_kit::component::button::Button::new(SharedString::from(format!("deny-{}", p.request_id)))
+                                .on_click(cx.listener(
+                                    move |panel, _, _, cx| {
+                                        panel.session.update(cx, |s, cx| s.answer(&rid1, true, cx))
+                                    },
+                                )),
+                            )
+                            .child(
+                                gpui_kit::component::button::Button::new(SharedString::from(
+                                    format!("deny-{}", p.request_id),
+                                ))
                                 .xsmall()
                                 .label("Deny")
-                                .on_click(cx.listener(move |panel, _, _, cx| {
-                                    panel.session.update(cx, |s, cx| s.answer(&rid2, false, cx))
-                                })),
-                        ),
-                );
+                                .on_click(cx.listener(
+                                    move |panel, _, _, cx| {
+                                        panel.session.update(cx, |s, cx| s.answer(&rid2, false, cx))
+                                    },
+                                )),
+                            ),
+                    );
             }
             Some(allowed) => {
-                card = card.child(div().text_color(muted).child(if allowed { "Allowed" } else { "Denied" }));
+                card = card.child(div().text_color(muted).child(if allowed {
+                    "Allowed"
+                } else {
+                    "Denied"
+                }));
             }
         }
         card.into_any_element()
@@ -351,10 +490,19 @@ impl ClaudePanel {
 
     fn render_header(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
-        let (muted, hover, border, warning) = (theme.muted_foreground, theme.secondary_hover, theme.border, theme.warning);
+        let (muted, hover, border, warning) = (
+            theme.muted_foreground,
+            theme.secondary_hover,
+            theme.border,
+            theme.warning,
+        );
         let session = self.session.read(cx);
         let chat = &session.chat;
-        let model = chat.model.clone().or_else(|| session.model.clone()).unwrap_or_else(|| "default model".into());
+        let model = chat
+            .model
+            .clone()
+            .or_else(|| session.model.clone())
+            .unwrap_or_else(|| "default model".into());
         let model = model.trim_start_matches("claude-").to_string();
         let mode = session.permission_mode.clone();
         let busy = chat.busy;
@@ -384,7 +532,13 @@ impl ClaudePanel {
             .border_b_1()
             .border_color(border)
             .child(Icon::new(IconName::Bot).xsmall())
-            .child(div().flex_1().min_w_0().truncate().child(status.join(" · ")))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .child(status.join(" · ")),
+            )
             .child(
                 div()
                     .id("perm-mode")
@@ -395,8 +549,13 @@ impl ClaudePanel {
                     .hover(|d| d.bg(hover))
                     .child(if accept { "accept edits" } else { "ask first" })
                     .on_click(cx.listener(move |p, _, _, cx| {
-                        let next = if accept { None } else { Some("acceptEdits".to_string()) };
-                        p.session.update(cx, |s, cx| s.set_permission_mode(next, cx));
+                        let next = if accept {
+                            None
+                        } else {
+                            Some("acceptEdits".to_string())
+                        };
+                        p.session
+                            .update(cx, |s, cx| s.set_permission_mode(next, cx));
                     })),
             )
             .when(busy, |d| {
@@ -408,7 +567,11 @@ impl ClaudePanel {
                         .cursor_pointer()
                         .hover(|d| d.bg(hover))
                         .child("stop")
-                        .on_click(cx.listener(|p, _, _, cx| p.session.update(cx, |s, cx| s.interrupt(cx)))),
+                        .on_click(
+                            cx.listener(|p, _, _, cx| {
+                                p.session.update(cx, |s, cx| s.interrupt(cx))
+                            }),
+                        ),
                 )
             })
             .child(
@@ -430,9 +593,15 @@ impl ClaudePanel {
 
 impl Render for ClaudePanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let started = std::time::Instant::now();
         let theme = cx.theme();
-        let (fg, muted, red, user_bg, border) =
-            (theme.foreground, theme.muted_foreground, theme.red, theme.secondary, theme.border);
+        let (fg, muted, red, user_bg, border) = (
+            theme.foreground,
+            theme.muted_foreground,
+            theme.red,
+            theme.secondary,
+            theme.border,
+        );
         let items = self.session.read(cx).chat.items.clone();
         let mut list = div().flex().flex_col().gap_2().px_2().py_2();
         if items.is_empty() {
@@ -453,15 +622,27 @@ impl Render for ClaudePanel {
                     .text_color(fg)
                     .child(text.clone())
                     .into_any_element(),
-                Item::Assistant { text, .. } => div().text_color(fg).child(self.markdown(("msg", ix), text, cx)).into_any_element(),
+                Item::Assistant { text, .. } => div()
+                    .text_color(fg)
+                    .child(self.markdown(("msg", ix), text, cx))
+                    .into_any_element(),
                 Item::Tool(tool) => self.render_tool(ix, tool, cx),
                 Item::Permission(p) => self.render_permission(p, cx),
-                Item::Notice(t) => div().text_size(px(11.)).text_color(muted).child(t.clone()).into_any_element(),
-                Item::Error(t) => div().text_xs().text_color(red).child(t.clone()).into_any_element(),
+                Item::Notice(t) => div()
+                    .text_size(px(11.))
+                    .text_color(muted)
+                    .child(t.clone())
+                    .into_any_element(),
+                Item::Error(t) => div()
+                    .text_xs()
+                    .text_color(red)
+                    .child(t.clone())
+                    .into_any_element(),
             };
             list = list.child(el);
         }
         let scroll = self.scroll.clone();
+        crate::perf::record("chat build (elements)", started.elapsed());
         div()
             .size_full()
             .flex()

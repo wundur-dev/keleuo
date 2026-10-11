@@ -49,7 +49,9 @@ pub fn resolve(color: Color, overrides: &Colors, is_fg: bool) -> u32 {
                 NamedColor::DimForeground => 0x9a9a9a,
                 n if (n as usize) < 16 => ANSI[n as usize],
                 // Dim colours: halve the normal ones.
-                n if (NamedColor::DimBlack as usize..=NamedColor::DimWhite as usize).contains(&(n as usize)) => {
+                n if (NamedColor::DimBlack as usize..=NamedColor::DimWhite as usize)
+                    .contains(&(n as usize)) =>
+                {
                     let base = ANSI[n as usize - NamedColor::DimBlack as usize];
                     let half = |s: u32| ((base >> s) & 0xff) * 2 / 3;
                     (half(16) << 16) | (half(8) << 8) | half(0)

@@ -60,28 +60,35 @@ impl FileTree {
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
         let host = self.host.clone();
         let root = self.root.clone();
-        self._task = Some(cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
-            let (nodes, index) = cx
-                .background_spawn(async move {
-                    let list = host.list_files(&root, files::MAX_ENTRIES);
-                    let index = FileIndex::new(&root, &list);
-                    (files::tree_from_list(&root, list), index)
-                })
-                .await;
-            let _ = this.update(cx, |tree, cx| {
-                tree.nodes = nodes;
-                tree.loading = false;
-                tree.rebuild_rows();
-                cx.emit(FileTreeEvent::Indexed(Arc::new(index)));
-                cx.notify();
-            });
-        }));
+        self._task = Some(
+            cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+                let (nodes, index) = cx
+                    .background_spawn(async move {
+                        let list = host.list_files(&root, files::MAX_ENTRIES);
+                        let index = FileIndex::new(&root, &list);
+                        (files::tree_from_list(&root, list), index)
+                    })
+                    .await;
+                let _ = this.update(cx, |tree, cx| {
+                    tree.nodes = nodes;
+                    tree.loading = false;
+                    tree.rebuild_rows();
+                    cx.emit(FileTreeEvent::Indexed(Arc::new(index)));
+                    cx.notify();
+                });
+            }),
+        );
     }
 
     fn rebuild_rows(&mut self) {
         fn walk(nodes: &[Node], depth: usize, expanded: &HashSet<PathBuf>, out: &mut Vec<Row>) {
             for n in nodes {
-                out.push(Row { depth, name: n.name.clone(), path: n.path.clone(), is_dir: n.is_dir() });
+                out.push(Row {
+                    depth,
+                    name: n.name.clone(),
+                    path: n.path.clone(),
+                    is_dir: n.is_dir(),
+                });
                 if let Some(children) = &n.children
                     && expanded.contains(&n.path)
                 {
@@ -131,10 +138,19 @@ impl FileTree {
 impl Render for FileTree {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let (fg, muted, sel_bg, hover) =
-            (theme.foreground, theme.muted_foreground, theme.accent, theme.secondary_hover);
+        let (fg, muted, sel_bg, hover) = (
+            theme.foreground,
+            theme.muted_foreground,
+            theme.accent,
+            theme.secondary_hover,
+        );
         if self.loading {
-            return div().p_2().text_xs().text_color(muted).child("Listing files...").into_any_element();
+            return div()
+                .p_2()
+                .text_xs()
+                .text_color(muted)
+                .child("Listing files...")
+                .into_any_element();
         }
         let rows = self.rows.clone();
         let selected = self.selected.clone();
@@ -145,7 +161,11 @@ impl Render for FileTree {
                     let row = &rows[ix];
                     let is_sel = selected.as_ref() == Some(&row.path);
                     let entity = entity.clone();
-                    let icon = if row.is_dir { IconName::Folder } else { IconName::File };
+                    let icon = if row.is_dir {
+                        IconName::Folder
+                    } else {
+                        IconName::File
+                    };
                     div()
                         .id(ix)
                         .h(px(20.))

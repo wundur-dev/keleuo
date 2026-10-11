@@ -38,13 +38,11 @@ impl ClaudeSession {
             cwd,
             process: None,
             permission_mode: None,
-            model: std::env::var("WORKBENCH_MODEL").ok().filter(|m| !m.is_empty()),
+            model: std::env::var("WORKBENCH_MODEL")
+                .ok()
+                .filter(|m| !m.is_empty()),
             _reader: None,
         }
-    }
-
-    pub fn running(&self) -> bool {
-        self.process.is_some()
     }
 
     fn start(&mut self, cx: &mut Context<Self>) -> anyhow::Result<()> {
@@ -61,23 +59,25 @@ impl ClaudeSession {
             let _ = tx.send_blocking(m);
         })?;
         self.process = Some(process);
-        self._reader = Some(cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
-            while let Ok(first) = rx.recv().await {
-                let mut batch = vec![first];
-                while let Ok(more) = rx.try_recv() {
-                    batch.push(more);
-                }
-                let ok = this.update(cx, |session, cx| {
-                    for m in batch {
-                        session.handle(m, cx);
+        self._reader = Some(
+            cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+                while let Ok(first) = rx.recv().await {
+                    let mut batch = vec![first];
+                    while let Ok(more) = rx.try_recv() {
+                        batch.push(more);
                     }
-                    cx.notify();
-                });
-                if ok.is_err() {
-                    break;
+                    let ok = this.update(cx, |session, cx| {
+                        for m in batch {
+                            session.handle(m, cx);
+                        }
+                        cx.notify();
+                    });
+                    if ok.is_err() {
+                        break;
+                    }
                 }
-            }
-        }));
+            }),
+        );
         Ok(())
     }
 
@@ -102,7 +102,8 @@ impl ClaudeSession {
                     p.kill();
                 }
                 if self.chat.busy {
-                    self.chat.push_error("Claude Code stopped before the turn finished.");
+                    self.chat
+                        .push_error("Claude Code stopped before the turn finished.");
                 }
                 self.chat.process_ended();
             }
@@ -126,7 +127,8 @@ impl ClaudeSession {
         if let Some(p) = self.process.as_mut()
             && let Err(e) = p.send_user(text)
         {
-            self.chat.push_error(format!("Could not send to Claude Code: {e}"));
+            self.chat
+                .push_error(format!("Could not send to Claude Code: {e}"));
         }
         cx.notify();
     }
@@ -156,7 +158,9 @@ impl ClaudeSession {
         self.stop();
         self.chat.push_notice(format!(
             "Permission mode: {}. Applies from the next message.",
-            self.permission_mode.as_deref().unwrap_or("ask before acting")
+            self.permission_mode
+                .as_deref()
+                .unwrap_or("ask before acting")
         ));
         cx.notify();
     }

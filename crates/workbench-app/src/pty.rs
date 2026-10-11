@@ -47,7 +47,7 @@ impl EventListener for Listener {
             _ => return,
         };
         // Coalesce: a pending wakeup already covers this one.
-        if matches!(ev, PtyEvent::Wakeup) && self.tx.len() > 0 {
+        if matches!(ev, PtyEvent::Wakeup) && !self.tx.is_empty() {
             return;
         }
         let _ = self.tx.try_send(ev);
@@ -76,7 +76,12 @@ impl Dimensions for GridSize {
 
 impl GridSize {
     fn window_size(self) -> WindowSize {
-        WindowSize { num_lines: self.rows, num_cols: self.cols, cell_width: self.cell_w, cell_height: self.cell_h }
+        WindowSize {
+            num_lines: self.rows,
+            num_cols: self.cols,
+            cell_width: self.cell_w,
+            cell_height: self.cell_h,
+        }
     }
 }
 
@@ -86,15 +91,23 @@ pub struct Pty {
     size: std::cell::Cell<GridSize>,
     #[cfg(unix)]
     master_fd: i32,
-    pub shell_pid: u32,
 }
 
 impl Pty {
-    pub fn spawn(spec: &CommandSpec, size: GridSize) -> anyhow::Result<(Self, async_channel::Receiver<PtyEvent>)> {
+    pub fn spawn(
+        spec: &CommandSpec,
+        size: GridSize,
+    ) -> anyhow::Result<(Self, async_channel::Receiver<PtyEvent>)> {
         let (tx, rx) = async_channel::unbounded();
         let writer = Arc::new(FairMutex::new(None));
-        let listener = Listener { tx, writer: writer.clone() };
-        let config = Config { scrolling_history: 10_000, ..Config::default() };
+        let listener = Listener {
+            tx,
+            writer: writer.clone(),
+        };
+        let config = Config {
+            scrolling_history: 10_000,
+            ..Config::default()
+        };
         let term = Arc::new(FairMutex::new(Term::new(config, &size, listener.clone())));
         let mut env = std::collections::HashMap::new();
         env.insert("TERM".to_string(), "xterm-256color".to_string());
@@ -117,10 +130,6 @@ impl Pty {
             use std::os::fd::AsRawFd;
             pty.file().as_raw_fd()
         };
-        #[cfg(unix)]
-        let shell_pid = pty.child().id();
-        #[cfg(not(unix))]
-        let shell_pid = 0;
         let event_loop = EventLoop::new(term.clone(), listener, pty, true, false)?;
         let sender = event_loop.channel();
         *writer.lock() = Some(sender.clone());
@@ -132,7 +141,6 @@ impl Pty {
                 size: std::cell::Cell::new(size),
                 #[cfg(unix)]
                 master_fd,
-                shell_pid,
             },
             rx,
         ))
@@ -171,7 +179,9 @@ impl Pty {
         #[cfg(target_os = "linux")]
         unsafe {
             let pgid = libc::tcgetpgrp(self.master_fd);
-            std::fs::read_to_string(format!("/proc/{pgid}/comm")).ok().map(|s| s.trim().to_string())
+            std::fs::read_to_string(format!("/proc/{pgid}/comm"))
+                .ok()
+                .map(|s| s.trim().to_string())
         }
         #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         None

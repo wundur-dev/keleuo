@@ -19,6 +19,8 @@ actions!(
         RenameTab,
         AskClaude,
         NewTerminal,
+        GoBack,
+        GoForward,
     ]
 );
 
@@ -39,6 +41,8 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("f2", RenameTab, None),
         KeyBinding::new("cmd-l", AskClaude, None),
         KeyBinding::new("cmd-t", NewTerminal, None),
+        KeyBinding::new("ctrl--", GoBack, None),
+        KeyBinding::new("ctrl-shift--", GoForward, None),
     ]);
 }
 
@@ -62,6 +66,9 @@ pub fn menus() -> Vec<Menu> {
             MenuItem::action("Focus on Claude", FocusClaude),
             MenuItem::action("Markdown: Edit or Preview", TogglePreview),
             MenuItem::action("Ask Claude", AskClaude),
+            MenuItem::separator(),
+            MenuItem::action("Back", GoBack),
+            MenuItem::action("Forward", GoForward),
         ]),
     ]
 }

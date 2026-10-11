@@ -8931,6 +8931,7 @@ dependencies = [
  "async-channel",
  "gpui-kit",
  "libc",
+ "lsp-types",
  "serde_json",
  "workbench-core",
 ]

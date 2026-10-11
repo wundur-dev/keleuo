@@ -41,11 +41,22 @@ impl EventEmitter<TabStripEvent> for TabStrip {}
 
 impl TabStrip {
     pub fn new(id: &str, names: Rc<RefCell<NameStore>>) -> Self {
-        Self { id: id.to_string().into(), tabs: Vec::new(), active: None, names, editing: None, _subs: Vec::new() }
+        Self {
+            id: id.to_string().into(),
+            tabs: Vec::new(),
+            active: None,
+            names,
+            editing: None,
+            _subs: Vec::new(),
+        }
     }
 
     pub fn display_name(&self, tab: &TabSpec) -> String {
-        self.names.borrow().get(&tab.key).map(str::to_string).unwrap_or_else(|| tab.auto_name.clone())
+        self.names
+            .borrow()
+            .get(&tab.key)
+            .map(str::to_string)
+            .unwrap_or_else(|| tab.auto_name.clone())
     }
 
     pub fn is_renamed(&self, tab: &TabSpec) -> bool {
@@ -59,24 +70,32 @@ impl TabStrip {
     }
 
     pub fn start_rename(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(tab) = self.tabs.iter().find(|t| t.id == id).cloned() else { return };
+        let Some(tab) = self.tabs.iter().find(|t| t.id == id).cloned() else {
+            return;
+        };
         let name = self.display_name(&tab);
         let input = cx.new(|cx| InputState::new(window, cx).default_value(name));
         input.update(cx, |s, cx| {
             s.focus(window, cx);
             s.select_all(window, cx);
         });
-        let sub = cx.subscribe_in(&input, window, move |strip, _, ev: &InputEvent, _window, cx| match ev {
-            InputEvent::PressEnter { .. } | InputEvent::Blur => strip.commit(cx),
-            _ => {}
-        });
+        let sub = cx.subscribe_in(
+            &input,
+            window,
+            move |strip, _, ev: &InputEvent, _window, cx| match ev {
+                InputEvent::PressEnter { .. } | InputEvent::Blur => strip.commit(cx),
+                _ => {}
+            },
+        );
         self._subs = vec![sub];
         self.editing = Some((id, input));
         cx.notify();
     }
 
     fn commit(&mut self, cx: &mut Context<Self>) {
-        let Some((id, input)) = self.editing.take() else { return };
+        let Some((id, input)) = self.editing.take() else {
+            return;
+        };
         let text = input.read(cx).value().to_string();
         if let Some(tab) = self.tabs.iter().find(|t| t.id == id) {
             let text = text.trim();
@@ -105,16 +124,31 @@ impl TabStrip {
 impl Render for TabStrip {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let (fg, muted, active_bg, border, hover) =
-            (theme.foreground, theme.muted_foreground, theme.tab_active, theme.border, theme.secondary_hover);
+        let (fg, muted, active_bg, border, hover) = (
+            theme.foreground,
+            theme.muted_foreground,
+            theme.tab_active,
+            theme.border,
+            theme.secondary_hover,
+        );
         let entity = cx.entity().downgrade();
-        let mut row = div().id(self.id.clone()).h_full().flex().items_center().overflow_x_scroll().min_w_0();
+        let mut row = div()
+            .id(self.id.clone())
+            .h_full()
+            .flex()
+            .items_center()
+            .overflow_x_scroll()
+            .min_w_0();
         for tab in &self.tabs {
             let id = tab.id;
             let is_active = self.active == Some(id);
             let name = self.display_name(tab);
             let renamed = self.is_renamed(tab);
-            let editing = self.editing.as_ref().filter(|(eid, _)| *eid == id).map(|(_, input)| input.clone());
+            let editing = self
+                .editing
+                .as_ref()
+                .filter(|(eid, _)| *eid == id)
+                .map(|(_, input)| input.clone());
             let e1 = entity.clone();
             let e2 = entity.clone();
             let e_menu = entity.clone();
@@ -133,12 +167,16 @@ impl Render for TabStrip {
                 .text_color(if is_active { fg } else { muted })
                 .when(is_active, |d| d.bg(active_bg))
                 .hover(|d| d.bg(hover))
-                .when_some(tab.tooltip.clone(), |d, tip| d.tooltip(move |window, cx| {
-                    gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
-                }))
+                .when_some(tab.tooltip.clone(), |d, tip| {
+                    d.tooltip(move |window, cx| {
+                        gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
+                    })
+                })
                 .on_click(move |ev: &ClickEvent, window, cx| {
                     let _ = e1.update(cx, |strip, cx| {
                         if ev.click_count() >= 2 {
+                            // The strip sits in the title bar: keep the double click from zooming the window.
+                            cx.stop_propagation();
                             strip.start_rename(id, window, cx);
                         } else {
                             cx.emit(TabStripEvent::Activate(id));
@@ -159,8 +197,16 @@ impl Render for TabStrip {
                         .child(Input::new(&input).xsmall()),
                 ),
                 None => el
-                    .child(div().max_w(px(220.)).truncate().when(renamed, |d| d.italic()).child(name))
-                    .when(tab.dirty, |d| d.child(div().size(px(6.)).rounded_full().bg(fg))),
+                    .child(
+                        div()
+                            .max_w(px(220.))
+                            .truncate()
+                            .when(renamed, |d| d.italic())
+                            .child(name),
+                    )
+                    .when(tab.dirty, |d| {
+                        d.child(div().size(px(6.)).rounded_full().bg(fg))
+                    }),
             };
             el = el.child(
                 div()

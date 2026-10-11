@@ -39,7 +39,7 @@ pub fn parse(text: &str) -> Frontmatter {
 }
 
 /// `(header, body)` when the text starts with a `---` line and has a closing one.
-fn split(text: &str) -> Option<(&str, &str)> {
+pub fn split(text: &str) -> Option<(&str, &str)> {
     let rest = text.strip_prefix("---")?;
     let rest = rest
         .strip_prefix("\r\n")

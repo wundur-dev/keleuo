@@ -46,29 +46,31 @@ impl SkillsPanel {
     pub fn refresh(&mut self, open: Option<PathBuf>, cx: &mut Context<Self>) {
         let host = self.host.clone();
         let project = self.project.clone();
-        self._task = Some(cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
-            let catalog = cx
-                .background_spawn(async move {
-                    let home = skills::claude_home(host.as_ref());
-                    skills::discover(host.as_ref(), &project, home.as_deref())
-                })
-                .await;
-            let _ = this.update(cx, |panel, cx| {
-                if panel.catalog.is_none() {
-                    for (name, _) in &catalog.plugins {
-                        panel.collapsed.insert(format!("plugin:{name}"));
+        self._task = Some(
+            cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+                let catalog = cx
+                    .background_spawn(async move {
+                        let home = skills::claude_home(host.as_ref());
+                        skills::discover(host.as_ref(), &project, home.as_deref())
+                    })
+                    .await;
+                let _ = this.update(cx, |panel, cx| {
+                    if panel.catalog.is_none() {
+                        for (name, _) in &catalog.plugins {
+                            panel.collapsed.insert(format!("plugin:{name}"));
+                        }
                     }
-                }
-                if let Some(path) = open
-                    && let Some(entry) = catalog.all().find(|e| e.path == path).cloned()
-                {
-                    panel.selected = Some(path);
-                    cx.emit(SkillsEvent::Open(entry));
-                }
-                panel.catalog = Some(Arc::new(catalog));
-                cx.notify();
-            });
-        }));
+                    if let Some(path) = open
+                        && let Some(entry) = catalog.all().find(|e| e.path == path).cloned()
+                    {
+                        panel.selected = Some(path);
+                        cx.emit(SkillsEvent::Open(entry));
+                    }
+                    panel.catalog = Some(Arc::new(catalog));
+                    cx.notify();
+                });
+            }),
+        );
     }
 
     fn new_skill(&mut self, cx: &mut Context<Self>) {
@@ -76,7 +78,9 @@ impl SkillsPanel {
         let project = self.project.clone();
         cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
             let made = cx
-                .background_spawn(async move { skills::create_project_skill(host.as_ref(), &project, "new skill") })
+                .background_spawn(async move {
+                    skills::create_project_skill(host.as_ref(), &project, "new skill")
+                })
                 .await;
             let _ = this.update(cx, |panel, cx| match made {
                 Ok(path) => panel.refresh(Some(path), cx),
@@ -86,9 +90,20 @@ impl SkillsPanel {
         .detach();
     }
 
-    fn group(&self, key: &str, title: String, entries: &[Entry], cx: &mut Context<Self>) -> AnyElement {
+    fn group(
+        &self,
+        key: &str,
+        title: String,
+        entries: &[Entry],
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let theme = cx.theme();
-        let (muted, fg, sel_bg, hover) = (theme.muted_foreground, theme.foreground, theme.accent, theme.secondary_hover);
+        let (muted, fg, sel_bg, hover) = (
+            theme.muted_foreground,
+            theme.foreground,
+            theme.accent,
+            theme.secondary_hover,
+        );
         let folded = self.collapsed.contains(key);
         let key_owned = key.to_string();
         let header = div()
@@ -102,7 +117,14 @@ impl SkillsPanel {
             .font_weight(FontWeight::SEMIBOLD)
             .text_color(muted)
             .hover(|d| d.bg(hover))
-            .child(Icon::new(if folded { IconName::ChevronRight } else { IconName::ChevronDown }).xsmall())
+            .child(
+                Icon::new(if folded {
+                    IconName::ChevronRight
+                } else {
+                    IconName::ChevronDown
+                })
+                .xsmall(),
+            )
             .child(div().flex_1().truncate().child(title))
             .child(div().child(entries.len().to_string()))
             .on_click(cx.listener(move |panel, _, _, cx| {
@@ -157,17 +179,40 @@ impl SkillsPanel {
 impl Render for SkillsPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let muted = cx.theme().muted_foreground;
-        let mut list = div().id("skills-list").flex().flex_col().flex_1().overflow_y_scroll();
+        let mut list = div()
+            .id("skills-list")
+            .flex()
+            .flex_col()
+            .flex_1()
+            .overflow_y_scroll();
         match self.catalog.clone() {
-            None => list = list.child(div().p_2().text_xs().text_color(muted).child("Scanning skills...")),
+            None => {
+                list = list.child(
+                    div()
+                        .p_2()
+                        .text_xs()
+                        .text_color(muted)
+                        .child("Scanning skills..."),
+                )
+            }
             Some(cat) => {
                 list = list.child(self.group("project", "Project".into(), &cat.project, cx));
                 if !cat.project_docs.is_empty() {
-                    list = list.child(self.group("docs", "CLAUDE.md, agents, commands".into(), &cat.project_docs, cx));
+                    list = list.child(self.group(
+                        "docs",
+                        "CLAUDE.md, agents, commands".into(),
+                        &cat.project_docs,
+                        cx,
+                    ));
                 }
                 list = list.child(self.group("user", "User".into(), &cat.user, cx));
                 for (name, entries) in &cat.plugins {
-                    list = list.child(self.group(&format!("plugin:{name}"), format!("Plugin: {name}"), entries, cx));
+                    list = list.child(self.group(
+                        &format!("plugin:{name}"),
+                        format!("Plugin: {name}"),
+                        entries,
+                        cx,
+                    ));
                 }
             }
         }
@@ -176,17 +221,28 @@ impl Render for SkillsPanel {
             .flex()
             .flex_col()
             .child(
-                div().h(px(24.)).px_1().flex().items_center().justify_between().child(
-                    div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(muted).child("SKILLS"),
-                ).child(
-                    Button::new("new-skill")
-                        .ghost()
-                        .xsmall()
-                        .icon(IconName::Plus)
-                        .label("New")
-                        .tooltip("New project skill")
-                        .on_click(cx.listener(|panel, _, _, cx| panel.new_skill(cx))),
-                ),
+                div()
+                    .h(px(24.))
+                    .px_1()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(muted)
+                            .child("SKILLS"),
+                    )
+                    .child(
+                        Button::new("new-skill")
+                            .ghost()
+                            .xsmall()
+                            .icon(IconName::Plus)
+                            .label("New")
+                            .tooltip("New project skill")
+                            .on_click(cx.listener(|panel, _, _, cx| panel.new_skill(cx))),
+                    ),
             )
             .child(list)
     }

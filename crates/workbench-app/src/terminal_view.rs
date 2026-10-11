@@ -41,7 +41,12 @@ pub struct TerminalView {
 impl TerminalView {
     pub fn new(spec: workbench_core::host::CommandSpec, cx: &mut Context<Self>) -> Self {
         let focus = cx.focus_handle();
-        let initial = GridSize { cols: 100, rows: 12, cell_w: 8, cell_h: 16 };
+        let initial = GridSize {
+            cols: 100,
+            rows: 12,
+            cell_w: 8,
+            cell_h: 16,
+        };
         let (pty, error, events) = match Pty::spawn(&spec, initial) {
             Ok((pty, rx)) => {
                 let task = cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
@@ -54,9 +59,11 @@ impl TerminalView {
                         let alive = this.update(cx, |view, cx| {
                             for ev in batch {
                                 match ev {
-                                    PtyEvent::Wakeup => {}
+                                    PtyEvent::Wakeup => crate::perf::pty_output(),
                                     PtyEvent::Title(t) => view.title = Some(t),
-                                    PtyEvent::Copy(text) => cx.write_to_clipboard(ClipboardItem::new_string(text)),
+                                    PtyEvent::Copy(text) => {
+                                        cx.write_to_clipboard(ClipboardItem::new_string(text))
+                                    }
                                     PtyEvent::Exited => view.exited = true,
                                 }
                             }
@@ -85,7 +92,10 @@ impl TerminalView {
     }
 
     fn mode(&self) -> TermMode {
-        self.pty.as_ref().map(|p| *p.term.lock().mode()).unwrap_or(TermMode::empty())
+        self.pty
+            .as_ref()
+            .map(|p| *p.term.lock().mode())
+            .unwrap_or(TermMode::empty())
     }
 
     fn write_str(&self, s: &str) {
@@ -113,7 +123,9 @@ impl TerminalView {
     }
 
     fn paste(&self, cx: &mut Context<Self>) {
-        let Some(text) = cx.read_from_clipboard().and_then(|c| c.text()) else { return };
+        let Some(text) = cx.read_from_clipboard().and_then(|c| c.text()) else {
+            return;
+        };
         let text = text.replace("\r\n", "\r").replace('\n', "\r");
         if self.mode().contains(TermMode::BRACKETED_PASTE) {
             self.write_str(&format!("\x1b[200~{}\x1b[201~", text.replace('\x1b', "")));
@@ -158,6 +170,7 @@ impl TerminalView {
             self.scroll_to_bottom();
             if let Some(pty) = &self.pty {
                 pty.term.lock().selection = None;
+                crate::perf::key_pressed();
                 pty.write(bytes);
             }
             cx.stop_propagation();
@@ -171,8 +184,14 @@ impl TerminalView {
         let y = (position.y - b.origin.y).max(px(0.));
         let col = (x / c.width) as usize;
         let row = (y / c.height) as usize;
-        let side = if (x / c.width).fract() < 0.5 { Side::Left } else { Side::Right };
-        let Some(pty) = &self.pty else { return (GridPoint::new(Line(0), Column(0)), side) };
+        let side = if (x / c.width).fract() < 0.5 {
+            Side::Left
+        } else {
+            Side::Right
+        };
+        let Some(pty) = &self.pty else {
+            return (GridPoint::new(Line(0), Column(0)), side);
+        };
         let term = pty.term.lock();
         let offset = term.grid().display_offset() as i32;
         let row = row.min(term.screen_lines().saturating_sub(1));
@@ -326,7 +345,10 @@ fn key_bytes(ks: &Keystroke, mode: TermMode) -> Option<Vec<u8>> {
                 v
             } else {
                 // Option on macOS composes characters (key_char); Alt elsewhere is Meta.
-                let text = ks.key_char.clone().or_else(|| (key.chars().count() == 1).then(|| key.to_string()))?;
+                let text = ks
+                    .key_char
+                    .clone()
+                    .or_else(|| (key.chars().count() == 1).then(|| key.to_string()))?;
                 let mut v = Vec::new();
                 if m.alt && !cfg!(target_os = "macos") {
                     v.push(0x1b);
@@ -376,7 +398,10 @@ impl Render for TerminalView {
                     let font = font(FONT_FAMILY);
                     let ts = window.text_system();
                     let font_id = ts.resolve_font(&font);
-                    let cw = ts.advance(font_id, font_size, 'm').map(|s| s.width).unwrap_or(px(7.5));
+                    let cw = ts
+                        .advance(font_id, font_size, 'm')
+                        .map(|s| s.width)
+                        .unwrap_or(px(7.5));
                     let ch = (font_size * 1.35).round();
                     cell_cell.set(size(cw, ch));
                     if let Some(pty) = &pty {
@@ -392,7 +417,10 @@ impl Render for TerminalView {
                 },
                 move |bounds, (), window, cx| {
                     let Some(pty) = &pty_paint else { return };
+                    let start = std::time::Instant::now();
                     paint_grid(pty, bounds, cell_paint.get(), focused, window, cx);
+                    crate::perf::record("terminal paint", start.elapsed());
+                    crate::perf::terminal_painted();
                 },
             )
             .size_full(),
@@ -400,7 +428,14 @@ impl Render for TerminalView {
     }
 }
 
-fn paint_grid(pty: &Pty, bounds: Bounds<Pixels>, cell: Size<Pixels>, focused: bool, window: &mut Window, cx: &mut App) {
+fn paint_grid(
+    pty: &Pty,
+    bounds: Bounds<Pixels>,
+    cell: Size<Pixels>,
+    focused: bool,
+    window: &mut Window,
+    cx: &mut App,
+) {
     let term = pty.term.lock();
     let content = term.renderable_content();
     let colors = content.colors;
@@ -433,7 +468,11 @@ fn paint_grid(pty: &Pty, bounds: Bounds<Pixels>, cell: Size<Pixels>, focused: bo
         for col in 0..cols {
             let gp = GridPoint::new(line, Column(col));
             let c = &grid[gp];
-            let mut fg_color = if c.flags.contains(Flags::BOLD) { palette::brighten(c.fg) } else { c.fg };
+            let mut fg_color = if c.flags.contains(Flags::BOLD) {
+                palette::brighten(c.fg)
+            } else {
+                c.fg
+            };
             let mut bg_color = c.bg;
             if c.flags.contains(Flags::INVERSE) {
                 std::mem::swap(&mut fg_color, &mut bg_color);
@@ -452,10 +491,16 @@ fn paint_grid(pty: &Pty, bounds: Bounds<Pixels>, cell: Size<Pixels>, focused: bo
                 None => bg_start = Some((col, bg)),
                 _ => {}
             }
-            if c.flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER) {
+            if c.flags
+                .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
+            {
                 continue;
             }
-            let ch = if c.c == '\t' || c.c == '\0' || c.flags.contains(Flags::HIDDEN) { ' ' } else { c.c };
+            let ch = if c.c == '\t' || c.c == '\0' || c.flags.contains(Flags::HIDDEN) {
+                ' '
+            } else {
+                c.c
+            };
             let before = text.len();
             text.push(ch);
             if let Some(zw) = c.zerowidth() {
@@ -473,17 +518,28 @@ fn paint_grid(pty: &Pty, bounds: Bounds<Pixels>, cell: Size<Pixels>, focused: bo
             if c.flags.contains(Flags::DIM) {
                 color.a = 0.7;
             }
-            let underline = c.flags.intersects(Flags::ALL_UNDERLINES).then(|| UnderlineStyle {
-                thickness: px(1.),
-                color: Some(color),
-                wavy: c.flags.contains(Flags::UNDERCURL),
-            });
+            let underline = c
+                .flags
+                .intersects(Flags::ALL_UNDERLINES)
+                .then(|| UnderlineStyle {
+                    thickness: px(1.),
+                    color: Some(color),
+                    wavy: c.flags.contains(Flags::UNDERCURL),
+                });
             let strike = c
                 .flags
                 .contains(Flags::STRIKEOUT)
-                .then(|| StrikethroughStyle { thickness: px(1.), color: Some(color) });
+                .then(|| StrikethroughStyle {
+                    thickness: px(1.),
+                    color: Some(color),
+                });
             match runs.last_mut() {
-                Some(r) if r.font == f && r.color == color && r.underline == underline && r.strikethrough == strike => {
+                Some(r)
+                    if r.font == f
+                        && r.color == color
+                        && r.underline == underline
+                        && r.strikethrough == strike =>
+                {
                     r.len += len
                 }
                 _ => runs.push(TextRun {
@@ -515,8 +571,18 @@ fn paint_grid(pty: &Pty, bounds: Bounds<Pixels>, cell: Size<Pixels>, focused: bo
             kept.push(r);
         }
         text.truncate(trimmed);
-        let shaped = window.text_system().shape_line(text.into(), font_size, &kept, Some(cell.width));
-        let _ = shaped.paint(point(bounds.origin.x, y), cell.height, TextAlign::Left, None, window, cx);
+        let shaped =
+            window
+                .text_system()
+                .shape_line(text.into(), font_size, &kept, Some(cell.width));
+        let _ = shaped.paint(
+            point(bounds.origin.x, y),
+            cell.height,
+            TextAlign::Left,
+            None,
+            window,
+            cx,
+        );
     }
 
     // Cursor.
@@ -534,9 +600,13 @@ fn paint_grid(pty: &Pty, bounds: Bounds<Pixels>, cell: Size<Pixels>, focused: bo
                 window.paint_quad(outline(block, color, BorderStyle::Solid));
             } else {
                 match cursor.shape {
-                    CursorShape::Beam => window.paint_quad(fill(Bounds::new(origin, size(px(2.), cell.height)), color)),
+                    CursorShape::Beam => window
+                        .paint_quad(fill(Bounds::new(origin, size(px(2.), cell.height)), color)),
                     CursorShape::Underline => window.paint_quad(fill(
-                        Bounds::new(point(origin.x, origin.y + cell.height - px(2.)), size(cell.width, px(2.))),
+                        Bounds::new(
+                            point(origin.x, origin.y + cell.height - px(2.)),
+                            size(cell.width, px(2.)),
+                        ),
                         color,
                     )),
                     _ => {
