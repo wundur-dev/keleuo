@@ -9,7 +9,8 @@
 //! - [`summary`]: the one-line summary on a tool card;
 //! - [`claude`]: the `claude` subprocess itself;
 //! - [`host`]: where the project lives (this machine or over SSH); every operation goes through it;
-//! - [`tabs`]: automatic and user-given tab names.
+//! - [`tabs`]: automatic and user-given tab names;
+//! - [`links`]: `path:line` references in text, resolved to project files.
 
 pub mod claude;
 pub mod conversation;
@@ -17,6 +18,7 @@ pub mod diff;
 pub mod files;
 pub mod frontmatter;
 pub mod host;
+pub mod links;
 pub mod skills;
 pub mod stream;
 pub mod summary;
