@@ -20,6 +20,7 @@ use crate::claude_session::ClaudeSession;
 
 pub enum ClaudePanelEvent {
     OpenFile(PathBuf, Option<u32>),
+    NewSession,
 }
 
 pub struct ClaudePanel {
@@ -582,10 +583,7 @@ impl ClaudePanel {
                     .cursor_pointer()
                     .hover(|d| d.bg(hover))
                     .child("new")
-                    .on_click(cx.listener(|p, _, _, cx| {
-                        p.toggled.clear();
-                        p.session.update(cx, |s, cx| s.new_conversation(cx))
-                    })),
+                    .on_click(cx.listener(|_, _, _, cx| cx.emit(ClaudePanelEvent::NewSession))),
             )
             .into_any_element()
     }

@@ -8,6 +8,15 @@ use serde::{Deserialize, Serialize};
 /// Recent folders kept at most.
 pub const MAX_RECENT: usize = 12;
 
+/// Where Workbench keeps its files: `WORKBENCH_CONFIG_DIR` when set (tests), else
+/// `workbench` in the user's config folder.
+pub fn config_dir() -> Option<PathBuf> {
+    match std::env::var_os("WORKBENCH_CONFIG_DIR") {
+        Some(d) if !d.is_empty() => Some(PathBuf::from(d)),
+        _ => dirs::config_dir().map(|d| d.join("workbench")),
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Layout {
@@ -37,9 +46,9 @@ pub struct Settings {
 }
 
 impl Settings {
-    /// `.../workbench/settings.json` in the user's config folder.
+    /// `settings.json` in [`config_dir`].
     pub fn default_path() -> Option<PathBuf> {
-        dirs::config_dir().map(|d| d.join("workbench/settings.json"))
+        config_dir().map(|d| d.join("settings.json"))
     }
 
     /// Load from `path`; missing or unreadable gives the defaults. `None` keeps it in memory.

@@ -150,7 +150,7 @@ fn permission_prompt_is_reported_and_answered() {
         reply["response"]["response"]["updatedInput"]["command"],
         "echo workbench-test > note.txt"
     );
-    assert!(chat.needs_input() == false);
+    assert!(!chat.needs_input());
     assert_eq!(chat.title(10).as_deref(), None);
     assert_eq!(chat.pending_permissions().count(), 0);
     assert!(

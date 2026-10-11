@@ -50,7 +50,7 @@ pub struct NameStore {
 impl NameStore {
     /// The store in the user's config folder (`.../workbench/tab-names.json`).
     pub fn open_default() -> Self {
-        Self::open(dirs::config_dir().map(|d| d.join("workbench/tab-names.json")))
+        Self::open(crate::settings::config_dir().map(|d| d.join("tab-names.json")))
     }
 
     /// Load from `path` (missing or unreadable means empty). `None` keeps names in memory only.

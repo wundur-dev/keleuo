@@ -31,6 +31,8 @@ pub struct TerminalView {
     pub focus: FocusHandle,
     pub title: Option<String>,
     pub exited: bool,
+    /// Output arrived since the user last looked (the sidebar shows a dot).
+    pub unseen: bool,
     error: Option<String>,
     bounds: Rc<Cell<Bounds<Pixels>>>,
     cell: Rc<Cell<Size<Pixels>>>,
@@ -59,7 +61,10 @@ impl TerminalView {
                         let alive = this.update(cx, |view, cx| {
                             for ev in batch {
                                 match ev {
-                                    PtyEvent::Wakeup => crate::perf::pty_output(),
+                                    PtyEvent::Wakeup => {
+                                        crate::perf::pty_output();
+                                        view.unseen = true;
+                                    }
                                     PtyEvent::Title(t) => view.title = Some(t),
                                     PtyEvent::Copy(text) => {
                                         cx.write_to_clipboard(ClipboardItem::new_string(text))
@@ -83,6 +88,7 @@ impl TerminalView {
             focus,
             title: None,
             exited: false,
+            unseen: false,
             error,
             bounds: Rc::new(Cell::new(Bounds::default())),
             cell: Rc::new(Cell::new(size(px(8.), px(16.)))),

@@ -5,7 +5,6 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::{ActiveTheme, Icon, IconName, Sizable};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
@@ -73,7 +72,7 @@ impl SkillsPanel {
         );
     }
 
-    fn new_skill(&mut self, cx: &mut Context<Self>) {
+    pub fn new_skill(&mut self, cx: &mut Context<Self>) {
         let host = self.host.clone();
         let project = self.project.clone();
         cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
@@ -216,34 +215,6 @@ impl Render for SkillsPanel {
                 }
             }
         }
-        div()
-            .size_full()
-            .flex()
-            .flex_col()
-            .child(
-                div()
-                    .h(px(24.))
-                    .px_1()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .child(
-                        div()
-                            .text_xs()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(muted)
-                            .child("SKILLS"),
-                    )
-                    .child(
-                        Button::new("new-skill")
-                            .ghost()
-                            .xsmall()
-                            .icon(IconName::Plus)
-                            .label("New")
-                            .tooltip("New project skill")
-                            .on_click(cx.listener(|panel, _, _, cx| panel.new_skill(cx))),
-                    ),
-            )
-            .child(list)
+        list.size_full()
     }
 }

@@ -18,30 +18,49 @@ cargo run -p workbench-app --release -- /path/to/project   # for speed measureme
 cargo test -p workbench-core
 ```
 
-With no folder it opens the current directory. File > Open Folder (Cmd+O) switches folder.
+With no folder (or one that does not exist) a folder picker with recent folders opens.
+File > Open Folder (Cmd+O) opens another folder in a new window.
 
 Remote over SSH (first steps, see below): `cargo run -p workbench-app -- --ssh host:/path/on/host`.
 
 ## Layout and keys
 
-One thin title bar carries the panel switches, the editor tabs, the folder and git branch.
-Below it: skills | files | code | Claude, over the terminal. Panels resize with splitters.
+    +------+------------------------+--------------------------+
+    | side | Claude                 | files, skills, terminals |
+    | bar  | (sessions)             | (tabs; can split)        |
+    +------+------------------------+--------------------------+
+
+- Sidebar: Files, Skills, Terminals and Claude sessions, each a collapsible section.
+  Terminals show a dot for unseen output; sessions show blue while working, amber when a
+  permission prompt waits, white for unseen activity. Double-click or right-click a row to
+  rename it. Cmd+B folds the sidebar to an icon strip.
+- Claude: the main column. Several sessions; the sidebar switches between them.
+- Right area: one tab row for files, skills and terminals. Links and diffs in Claude open
+  here. Drag a tab to the right or bottom half to split, or use Cmd+\ (beside) and
+  Cmd+Shift+\ (below); Cmd+Alt+\ moves the tab to the other half.
+- Column widths and the folded sidebar are remembered (`settings.json`, with the recent
+  folders, in `~/Library/Application Support/workbench`).
+- With no folder, or a folder that does not exist, a picker with recent folders opens.
 
 | Keys | What |
 | --- | --- |
-| Cmd+1 / Cmd+2 / Cmd+3 / Cmd+J | Show or hide skills / files / Claude / terminal (sizes are kept) |
-| Cmd+Shift+E / Cmd+Shift+C | Focus mode: only the editor / only Claude (again to leave) |
+| Cmd+B | Fold or unfold the sidebar |
+| Cmd+N / Cmd+Shift+W | New Claude session / close it |
+| Cmd+T | New terminal tab |
+| Cmd+\ / Cmd+Shift+\ / Cmd+Alt+\ | Split beside / below (again to unsplit) / move tab to the other half |
+| Cmd+Shift+C / Cmd+Shift+E | Focus mode: only Claude / only the right area |
 | Cmd+O | Open a folder in a new window |
 | Cmd+S, Cmd+W | Save, close tab |
 | Cmd+E | Markdown: rendered or editor |
-| F2, double-click, right-click | Rename a tab in place (Enter saves, Escape cancels); "Reset name" in the menu |
-| Cmd+click (or F12) in code | Go to definition (quick symbol index) |
+| F2, double-click, right-click | Rename a tab in place; "Reset name" in the menu |
+| Cmd+click in code | Go to definition (quick symbol index) |
 | Ctrl+- / Ctrl+Shift+- | Back / forward through jumps |
-| Cmd+L | Ask Claude (focus the message box) |
-| Cmd+T | New terminal tab |
+| Cmd+L | Focus the message box |
 
-`WORKBENCH_MODEL=haiku` picks the model for Claude; `WORKBENCH_PERF=1` prints paint times,
-key-to-glyph latency and file open times to stderr.
+Environment: `WORKBENCH_MODEL=haiku` picks the model; `WORKBENCH_PERF=1` prints timings;
+`WORKBENCH_CONTROL=<fifo>` accepts test commands (`open`, `term`, `type`, `split`, `send`,
+`allow`, `session new`, `fold`, `state`, ...; see `control.rs`); `WORKBENCH_BACKGROUND=1`
+opens windows without taking focus; `WORKBENCH_CONFIG_DIR` moves the settings folder.
 
 ## Layout of the code
 
@@ -50,6 +69,8 @@ key-to-glyph latency and file open times to stderr.
   diffs, cost), the `claude` subprocess, `path:line` link detection, tab names, and the
   `Host` interface every project operation goes through. Tested with recorded streams in
   `tests/fixtures`.
+- `crates/workbench-core` also holds the `Agent` trait (start, send, answer permission,
+  interrupt, stop) that a chat session talks to; `ClaudeCode` is the only implementation.
 - `crates/workbench-app`: the gpui window.
 
 ## How Claude runs

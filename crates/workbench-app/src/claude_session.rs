@@ -1,18 +1,18 @@
-//! The Claude Code process for the open project and the chat state it feeds. No drawing here.
+//! One chat session: an agent (Claude Code) and the conversation it feeds. No drawing here.
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use gpui_kit::prelude::*;
 use gpui_kit::*;
-use workbench_core::claude::{Message, Options, Process};
+use workbench_core::agent::{Agent, ClaudeCode, Message, StartOptions};
 use workbench_core::conversation::Conversation;
 use workbench_core::host::Host;
 
 /// Something the rest of the window should react to.
 #[derive(Clone, Debug)]
 pub enum SessionEvent {
-    /// Claude wrote or edited this file.
+    /// The agent wrote or edited this file.
     FileChanged(PathBuf),
     TurnEnded,
 }
@@ -21,10 +21,12 @@ pub struct ClaudeSession {
     host: Arc<dyn Host>,
     pub cwd: PathBuf,
     pub chat: Conversation,
-    process: Option<Process>,
+    agent: Box<dyn Agent>,
     /// `None` is Claude's default mode (it asks); `Some("acceptEdits")` etc.
     pub permission_mode: Option<String>,
     pub model: Option<String>,
+    /// Something happened since the user last looked at this session.
+    pub unseen: bool,
     _reader: Option<Task<()>>,
 }
 
@@ -36,29 +38,31 @@ impl ClaudeSession {
             host,
             chat: Conversation::new(cwd.to_string_lossy().to_string()),
             cwd,
-            process: None,
+            agent: Box::new(ClaudeCode::new()),
             permission_mode: None,
             model: std::env::var("WORKBENCH_MODEL")
                 .ok()
                 .filter(|m| !m.is_empty()),
+            unseen: false,
             _reader: None,
         }
     }
 
     fn start(&mut self, cx: &mut Context<Self>) -> anyhow::Result<()> {
-        let options = Options {
-            program: None,
+        let options = StartOptions {
             cwd: self.cwd.clone(),
             model: self.model.clone(),
             permission_mode: self.permission_mode.clone(),
             resume: self.chat.session_id.clone(),
         };
-        let spec = self.host.claude_command(&options);
         let (tx, rx) = async_channel::unbounded::<Message>();
-        let process = Process::spawn(&spec, move |m| {
-            let _ = tx.send_blocking(m);
-        })?;
-        self.process = Some(process);
+        self.agent.start(
+            self.host.as_ref(),
+            &options,
+            Arc::new(move |m| {
+                let _ = tx.send_blocking(m);
+            }),
+        )?;
         self._reader = Some(
             cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
                 while let Ok(first) = rx.recv().await {
@@ -70,6 +74,7 @@ impl ClaudeSession {
                         for m in batch {
                             session.handle(m, cx);
                         }
+                        session.unseen = true;
                         cx.notify();
                     });
                     if ok.is_err() {
@@ -94,29 +99,30 @@ impl ClaudeSession {
             }
             Message::Stderr(line) => {
                 if !line.trim().is_empty() {
-                    self.chat.push_notice(format!("claude: {line}"));
+                    self.chat
+                        .push_notice(format!("{}: {line}", self.agent.name()));
                 }
             }
             Message::Closed => {
-                if let Some(mut p) = self.process.take() {
-                    p.kill();
-                }
+                self.agent.stop();
                 if self.chat.busy {
-                    self.chat
-                        .push_error("Claude Code stopped before the turn finished.");
+                    self.chat.push_error(format!(
+                        "{} stopped before the turn finished.",
+                        self.agent.name()
+                    ));
                 }
                 self.chat.process_ended();
             }
         }
     }
 
-    /// Send a user turn, starting Claude Code when needed.
+    /// Send a user turn, starting the agent when needed.
     pub fn send(&mut self, text: &str, cx: &mut Context<Self>) {
         let text = text.trim();
         if text.is_empty() {
             return;
         }
-        if self.process.is_none()
+        if !self.agent.running()
             && let Err(e) = self.start(cx)
         {
             self.chat.push_error(e.to_string());
@@ -124,28 +130,34 @@ impl ClaudeSession {
             return;
         }
         self.chat.push_user(text);
-        if let Some(p) = self.process.as_mut()
-            && let Err(e) = p.send_user(text)
-        {
+        if let Err(e) = self.agent.send(text) {
             self.chat
-                .push_error(format!("Could not send to Claude Code: {e}"));
+                .push_error(format!("Could not send to {}: {e}", self.agent.name()));
         }
         cx.notify();
     }
 
     pub fn answer(&mut self, request_id: &str, allow: bool, cx: &mut Context<Self>) {
-        if let Some(line) = self.chat.answer_permission(request_id, allow)
-            && let Some(p) = self.process.as_mut()
-        {
-            let _ = p.send_line(&line);
+        if let Some(input) = self.chat.answer_permission(request_id, allow) {
+            let _ = self.agent.answer_permission(request_id, allow, &input);
         }
         cx.notify();
     }
 
-    pub fn interrupt(&mut self, cx: &mut Context<Self>) {
-        if let Some(p) = self.process.as_mut() {
-            let _ = p.interrupt();
+    /// Answer the oldest open permission prompt (for the control channel).
+    pub fn answer_first(&mut self, allow: bool, cx: &mut Context<Self>) {
+        let id = self
+            .chat
+            .pending_permissions()
+            .next()
+            .map(|p| p.request_id.clone());
+        if let Some(id) = id {
+            self.answer(&id, allow, cx);
         }
+    }
+
+    pub fn interrupt(&mut self, cx: &mut Context<Self>) {
+        let _ = self.agent.interrupt();
         cx.notify();
     }
 
@@ -166,17 +178,9 @@ impl ClaudeSession {
     }
 
     pub fn stop(&mut self) {
-        if let Some(mut p) = self.process.take() {
-            p.kill();
-        }
+        self.agent.stop();
         self._reader = None;
         self.chat.process_ended();
-    }
-
-    pub fn new_conversation(&mut self, cx: &mut Context<Self>) {
-        self.stop();
-        self.chat = Conversation::new(self.cwd.to_string_lossy().to_string());
-        cx.notify();
     }
 }
 

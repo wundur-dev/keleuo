@@ -21,6 +21,33 @@ pub struct TabSpec {
     pub auto_name: String,
     pub dirty: bool,
     pub tooltip: Option<String>,
+    /// Shown with a terminal icon.
+    pub terminal: bool,
+}
+
+/// A tab being dragged (to split the area or move it to the other half).
+#[derive(Clone, Debug)]
+pub struct DraggedTab {
+    pub id: u64,
+    pub name: String,
+}
+
+struct DragPreview(String);
+
+impl Render for DragPreview {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        div()
+            .px_2()
+            .py_1()
+            .rounded_md()
+            .text_xs()
+            .bg(theme.secondary)
+            .border_1()
+            .border_color(theme.ring)
+            .text_color(theme.foreground)
+            .child(self.0.clone())
+    }
 }
 
 pub enum TabStripEvent {
@@ -167,6 +194,13 @@ impl Render for TabStrip {
                 .text_color(if is_active { fg } else { muted })
                 .when(is_active, |d| d.bg(active_bg))
                 .hover(|d| d.bg(hover))
+                .on_drag(
+                    DraggedTab {
+                        id,
+                        name: name.clone(),
+                    },
+                    |tab, _, _, cx| cx.new(|_| DragPreview(tab.name.clone())),
+                )
                 .when_some(tab.tooltip.clone(), |d, tip| {
                     d.tooltip(move |window, cx| {
                         gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
@@ -197,6 +231,13 @@ impl Render for TabStrip {
                         .child(Input::new(&input).xsmall()),
                 ),
                 None => el
+                    .when(tab.terminal, |d| {
+                        d.child(
+                            Icon::new(IconName::SquareTerminal)
+                                .xsmall()
+                                .text_color(muted),
+                        )
+                    })
                     .child(
                         div()
                             .max_w(px(220.))
