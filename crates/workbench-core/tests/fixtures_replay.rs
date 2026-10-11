@@ -137,16 +137,21 @@ fn permission_prompt_is_reported_and_answered() {
     assert_eq!(pending[0].summary, "echo workbench-test > note.txt");
     assert_eq!(chat.status.as_deref(), Some("waiting for permission"));
 
-    let reply = chat
+    let input = chat
         .answer_permission(&pending[0].request_id, true)
         .unwrap();
-    let reply: serde_json::Value = serde_json::from_str(&reply).unwrap();
+    let reply: serde_json::Value = serde_json::from_str(
+        &workbench_core::stream::permission_response(&pending[0].request_id, true, &input),
+    )
+    .unwrap();
     assert_eq!(reply["type"], "control_response");
     assert_eq!(reply["response"]["response"]["behavior"], "allow");
     assert_eq!(
         reply["response"]["response"]["updatedInput"]["command"],
         "echo workbench-test > note.txt"
     );
+    assert!(chat.needs_input() == false);
+    assert_eq!(chat.title(10).as_deref(), None);
     assert_eq!(chat.pending_permissions().count(), 0);
     assert!(
         chat.answer_permission(&pending[0].request_id, true)

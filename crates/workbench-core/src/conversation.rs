@@ -114,6 +114,19 @@ impl Conversation {
         self.revision += 1;
     }
 
+    /// Waiting for the user: a permission prompt is open.
+    pub fn needs_input(&self) -> bool {
+        self.pending_permissions().next().is_some()
+    }
+
+    /// A short title: the first user message, cut to `max` characters.
+    pub fn title(&self, max: usize) -> Option<String> {
+        self.items.iter().find_map(|i| match i {
+            Item::User(t) => Some(one_line(t, max)),
+            _ => None,
+        })
+    }
+
     /// The process ended: the next one reports its cost from zero again.
     pub fn process_ended(&mut self) {
         self.cost_base = self.total_cost_usd;
@@ -123,19 +136,16 @@ impl Conversation {
         self.revision += 1;
     }
 
-    /// Answer a permission prompt; returns the line to write to Claude's stdin.
-    pub fn answer_permission(&mut self, request_id: &str, allow: bool) -> Option<String> {
+    /// Mark a permission prompt answered; returns the tool input it asked about (the agent
+    /// sends the answer). `None` when there is no such open prompt.
+    pub fn answer_permission(&mut self, request_id: &str, allow: bool) -> Option<Value> {
         let prompt = self.items.iter_mut().find_map(|i| match i {
             Item::Permission(p) if p.request_id == request_id && p.answer.is_none() => Some(p),
             _ => None,
         })?;
         prompt.answer = Some(allow);
         self.revision += 1;
-        Some(stream::permission_response(
-            request_id,
-            allow,
-            &prompt.input,
-        ))
+        Some(prompt.input.clone())
     }
 
     /// Permission prompts still waiting for an answer.
