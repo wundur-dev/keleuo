@@ -209,6 +209,23 @@ impl Pty {
     }
 }
 
+impl Pty {
+    /// End what runs in it, as closing a terminal window does: hang up on its foreground
+    /// process group, ask it to quit, and stop reading. Other handles to the terminal may
+    /// keep it on screen; its program is gone either way.
+    pub fn hang_up(&self) {
+        #[cfg(unix)]
+        unsafe {
+            let group = libc::tcgetpgrp(self.master_fd);
+            if group > 0 {
+                libc::killpg(group, libc::SIGHUP);
+                libc::killpg(group, libc::SIGTERM);
+            }
+        }
+        let _ = self.sender.send(Msg::Shutdown);
+    }
+}
+
 impl Drop for Pty {
     fn drop(&mut self) {
         let _ = self.sender.send(Msg::Shutdown);

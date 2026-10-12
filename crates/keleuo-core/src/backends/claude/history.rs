@@ -200,6 +200,9 @@ fn merge_into(from: &Path, to: &Path) -> std::io::Result<()> {
         let target = to.join(entry.file_name());
         if !target.exists() {
             std::fs::rename(entry.path(), &target)?;
+        } else if entry.path().is_file() && std::fs::read(entry.path()).ok() == std::fs::read(&target).ok() {
+            // The same file in both: one copy is enough.
+            let _ = std::fs::remove_file(entry.path());
         } else if entry.path().is_dir() && target.is_dir() {
             merge_into(&entry.path(), &target)?;
             let _ = std::fs::remove_dir(entry.path());
@@ -855,6 +858,7 @@ mod tests {
         std::fs::create_dir_all(from.join("memory")).unwrap();
         std::fs::write(from.join("a.jsonl"), "a").unwrap();
         std::fs::write(from.join("memory/note.md"), "n").unwrap();
+        std::fs::write(from.join("memory/same.md"), "s").unwrap();
         // A sibling whose name starts the same way is left alone.
         let sibling = project_sessions_dir(&home, Path::new("/work/keleion-site"));
         std::fs::create_dir_all(&sibling).unwrap();
@@ -863,11 +867,13 @@ mod tests {
         std::fs::create_dir_all(to.join("memory")).unwrap();
         std::fs::write(to.join("b.jsonl"), "b").unwrap();
         std::fs::write(to.join("memory/note.md"), "kept").unwrap();
+        std::fs::write(to.join("memory/same.md"), "s").unwrap();
         move_project(&home, old, new).unwrap();
         assert!(to.join("a.jsonl").exists() && to.join("b.jsonl").exists());
         assert_eq!(std::fs::read_to_string(to.join("memory/note.md")).unwrap(), "kept", "the newer copy stays");
         assert!(sibling.exists());
         assert!(from.join("memory/note.md").exists(), "what could not move stays where it was");
+        assert!(!from.join("memory/same.md").exists(), "an identical copy is not kept twice");
         // Nothing there: nothing to do.
         move_project(&home, Path::new("/work/none"), Path::new("/work/other")).unwrap();
         let _ = std::fs::remove_dir_all(home);

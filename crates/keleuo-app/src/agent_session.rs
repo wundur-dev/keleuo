@@ -540,13 +540,13 @@ impl AgentSession {
                 self.restart_after_turn = true;
                 self.chat.push_notice(format!("Model: {model}. Applies when this turn ends."));
             } else {
-                self.stop();
+                self.stop(cx);
                 self.restarting = Some(format!("with {model}"));
                 self.start_terminal(cx);
                 self.chat.push_notice(format!("Model: {model}."));
             }
         } else {
-            self.stop();
+            self.stop(cx);
             self.chat.push_notice(format!("Model: {model}. Applies from the next message."));
         }
         cx.notify();
@@ -702,7 +702,7 @@ impl AgentSession {
                     cx.emit(SessionEvent::TurnEnded);
                 }
                 if std::mem::take(&mut self.restart_after_turn) {
-                    self.stop();
+                    self.stop(cx);
                     self.restarting = self.model.as_ref().map(|m| format!("with {m}"));
                     self.start_terminal(cx);
                 }
@@ -905,7 +905,7 @@ impl AgentSession {
         }
         self.permission_mode = mode;
         let now = self.interactive() && self.running(cx) && !self.chat.busy;
-        self.stop();
+        self.stop(cx);
         if now {
             self.restarting = Some("in the new permission mode".into());
             self.start_terminal(cx);
@@ -946,7 +946,19 @@ impl AgentSession {
         }
     }
 
-    pub fn stop(&mut self) {
+    /// End the session's agent: its process (the terminal interface is hung up on, not just
+    /// let go: other handles may keep its view alive) and the following of its file.
+    pub fn stop(&mut self, cx: &mut App) {
+        if let Some(run) = self.terminal.take()
+            && let Some(pty) = run.view.read(cx).pty.clone()
+        {
+            pty.hang_up();
+        }
+        self.release();
+    }
+
+    /// Let go of the agent and the file following (all a drop can do, with no app at hand).
+    fn release(&mut self) {
         self.terminal = None;
         self.following = None;
         self.ready = false;
@@ -1017,6 +1029,6 @@ fn new_session_id() -> String {
 
 impl Drop for AgentSession {
     fn drop(&mut self) {
-        self.stop();
+        self.release();
     }
 }

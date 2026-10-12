@@ -452,17 +452,27 @@ impl Shell {
         };
         Some(
             div()
+                .id("folder-rename")
                 .absolute()
                 .inset_0()
                 .flex()
+                // Only as tall as what it holds, near the top.
+                .items_start()
                 .justify_center()
                 .pt(px(90.))
                 .bg(gpui_kit::black().opacity(0.25))
                 .occlude()
+                // Escape cancels, wherever the focus is in it.
+                .capture_key_down(cx.listener(|s, ev: &KeyDownEvent, _, cx| {
+                    if ev.keystroke.key == "escape" {
+                        s.folder_rename = None;
+                        cx.stop_propagation();
+                        cx.notify();
+                    }
+                }))
                 .child(
                     div()
                         .w(px(440.))
-                        .h_auto()
                         .p_4()
                         .flex()
                         .flex_col()
@@ -559,7 +569,7 @@ impl Shell {
             return;
         }
         let tab = self.tabs.remove(ix);
-        tab.ws.update(cx, |w, cx| w.session.update(cx, |s, _| s.stop()));
+        tab.ws.update(cx, |w, cx| w.session.update(cx, |s, cx| s.stop(cx)));
         self.subs.remove(&tab.ws.entity_id());
         if self.tabs.is_empty() {
             // Nothing left: back to the browser rather than an empty window.
@@ -1247,7 +1257,19 @@ impl Render for Shell {
                 )
                 .child(
                     // Kept clear of the appearance switch in the middle.
-                    div().flex_1().min_w_0().child(div().max_w(relative(0.32)).truncate().text_xs().text_color(muted).px_2().child(title)),
+                    div().flex_1().min_w_0().child(
+                        div()
+                            .max_w(relative(0.36))
+                            .px_2()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .text_xs()
+                            .text_color(muted)
+                            .child(div().flex_none().font_weight(FontWeight::SEMIBOLD).text_color(fg).child("Keleuo"))
+                            .child(div().flex_none().child("·"))
+                            .child(div().min_w_0().truncate().child(title)),
+                    ),
                 )
                 .child(div().absolute().inset_0().flex().items_center().justify_center().child(appearance))
                 .when(has_session, |d| {
