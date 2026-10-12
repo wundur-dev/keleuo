@@ -446,8 +446,13 @@ pub fn load_conversation(text: &str, cwd: &str) -> Conversation {
 }
 
 /// Add a subagent's own transcript (`<session>/subagents/agent-<id>.jsonl`) to a rebuilt chat,
-/// under the Agent tool call `tool_use_id` (from the agent's `.meta.json`).
+/// under the Agent tool call `tool_use_id` (from the agent's `.meta.json`). A call the chat does
+/// not hold (it came before a compaction, so only its stretch's placeholder is loaded) is left
+/// out: its agent would show without a name and never finish.
 pub fn attach_subagent(chat: &mut Conversation, tool_use_id: &str, text: &str) {
+    if chat.agent(tool_use_id).is_none() {
+        return;
+    }
     chat.replaying = true;
     let mut mapper = Mapper::new(chat.cwd.clone());
     let mut tally = Tally::default();
@@ -631,6 +636,9 @@ pub fn load_session(host: &dyn Host, path: &Path, cwd: &str) -> std::io::Result<
             }) else {
                 continue;
             };
+            if chat.agent(&tool_use_id).is_none() {
+                continue;
+            }
             let transcript = dir.join(e.name.replace(".meta.json", ".jsonl"));
             if let Ok(text) = host.read_to_string(&transcript) {
                 attach_subagent(&mut chat, &tool_use_id, &text);
@@ -1100,6 +1108,17 @@ mod tests {
         assert_eq!(chat.agents.len(), 2);
         assert!(chat.agents.iter().all(|a| !a.running()));
         assert!(!chat.busy);
+    }
+
+    #[test]
+    fn a_transcript_whose_agent_call_is_not_in_the_chat_is_left_out() {
+        // Its Agent call came before a compaction: attaching it would make a nameless agent
+        // that never finishes.
+        let mut chat = load_conversation(&fixture("session_history.jsonl"), "/tmp/wb-proj");
+        let before = chat.agents.len();
+        attach_subagent(&mut chat, "toolu_before_the_compaction", &fixture("subagent_transcript.jsonl"));
+        assert_eq!(chat.agents.len(), before);
+        assert!(chat.agent("toolu_before_the_compaction").is_none());
     }
 
     #[test]
