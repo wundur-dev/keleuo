@@ -95,6 +95,7 @@ impl DockAreaRenderer for WorkbenchSkin {
             inner: self.inner.tab_group_renderer(),
             strip: Rc::new(StripState::default()),
             scroll: ScrollHandle::new(),
+            last_shown: std::cell::Cell::new(None),
         })
     }
 }
@@ -103,6 +104,8 @@ struct SheetGroup {
     inner: Rc<dyn TabGroupRenderer>,
     strip: Rc<StripState>,
     scroll: ScrollHandle,
+    /// The shown tab last frame: when it changes, the strip scrolls it into view.
+    last_shown: std::cell::Cell<Option<usize>>,
 }
 
 fn is_tool_group(group: &TabGroupContext, cx: &App) -> bool {
@@ -322,6 +325,11 @@ impl SheetGroup {
             .track_scroll(&self.scroll)
             .pl(px(4.));
         let tabs_count = group.panels().len();
+        if self.last_shown.replace(shown) != shown
+            && let Some(pos) = shown.and_then(|ix| visible(group, cx).iter().position(|v| *v == ix))
+        {
+            self.scroll.scroll_to_item(pos);
+        }
         for (n, ix) in visible(group, cx).into_iter().enumerate() {
             let panel = group.panels()[ix].clone();
             let is_shown = Some(ix) == shown && !collapsed;

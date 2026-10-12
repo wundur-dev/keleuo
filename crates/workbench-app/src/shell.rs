@@ -511,7 +511,10 @@ impl Shell {
             let place = if w.host().is_remote() { format!("{}: {place}", w.host().label()) } else { place };
             let worktree = w.worktree.clone();
             let activity = s.chat.last_activity(80);
-            let cost = (s.chat.total_cost_usd > 0.0).then(|| format!("${:.2}", s.chat.total_cost_usd));
+            let cost = (s.chat.total_cost_usd > 0.0).then(|| match s.chat.total_cost_usd {
+                c if c < 0.1 => format!("${c:.3}"),
+                c => format!("${c:.2}"),
+            });
             let dot = self.dot(ix, cx);
             let key = self.key(ix);
             let auto = self.list_name(ix, cx);
