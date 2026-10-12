@@ -223,8 +223,7 @@ For reading and navigating code in the editor (not for the Claude panel).
   hover, no find references, no outline view yet.
 - Editor: no "save changes?" prompt on close; a file changed on disk while it has unsaved
   edits is not reloaded and not flagged.
-- Claude: images in tool results show as `[image]`; the chat renders the last 150 items
-  and older ones on request, but is not virtualized.
+- Claude: images in tool results show as `[image]`.
 - Sessions: the open session tabs are not restored after a restart (each folder's dock
   layout is); worktree sessions are local only; the shared-folder warning covers edits by
   Claude, not edits typed in another session's editor.

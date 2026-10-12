@@ -39,14 +39,15 @@ pub struct ChatPanel {
     pub number: usize,
     focus: FocusHandle,
     input: Entity<TextareaState>,
-    scroll: ScrollHandle,
+    /// The conversation as a virtual list: only the items on screen (and a margin) are built
+    /// and laid out; it follows the end while the view is at the bottom.
+    list: ListState,
+    /// How many items the list knows of.
+    list_len: usize,
     /// Tool cards the user opened (or closed, for diffs which start open).
     toggled: HashSet<String>,
     pub index: Arc<FileIndex>,
-    follow: bool,
     last_revision: u64,
-    /// How many of the latest items are rendered (long histories render lazily).
-    shown: usize,
     /// Redraws once a second while subagents run (their elapsed time).
     ticker: Option<Task<()>>,
     /// The Chat and Terminal view tabs.
@@ -54,8 +55,10 @@ pub struct ChatPanel {
     _subs: Vec<Subscription>,
 }
 
-/// Items rendered at first; "Show earlier" adds this many more.
-const PAGE: usize = 150;
+/// How far beyond the visible area the list builds items, so scrolling shows them at once.
+const OVERDRAW: f32 = 600.;
+/// Items at the end measured again on every change (text streaming in, a result arriving).
+const TAIL: usize = 4;
 
 impl EventEmitter<ChatPanelEvent> for ChatPanel {}
 
@@ -87,7 +90,8 @@ impl ChatPanel {
                         return;
                     }
                     input.update(cx, |s, cx| s.set_value("", window, cx));
-                    panel.follow = true;
+                    // Sending goes back to the end and follows it.
+                    panel.list.set_follow_mode(FollowMode::Tail);
                     panel.session.update(cx, |s, cx| s.send(&text, cx));
                 }
             },
@@ -96,9 +100,7 @@ impl ChatPanel {
             let rev = session.read(cx).chat.revision;
             if rev != panel.last_revision {
                 panel.last_revision = rev;
-                if panel.follow {
-                    panel.scroll.scroll_to_bottom();
-                }
+                panel.sync_list(session.read(cx).chat.items.len());
                 let running = session.read(cx).chat.running_agents().next().is_some();
                 if running && panel.ticker.is_none() {
                     panel.ticker = Some(cx.spawn(
@@ -132,12 +134,15 @@ impl ChatPanel {
             number: 0,
             focus: cx.focus_handle(),
             input,
-            scroll: ScrollHandle::new(),
+            list: {
+                let list = ListState::new(0, ListAlignment::Top, px(OVERDRAW));
+                list.set_follow_mode(FollowMode::Tail);
+                list
+            },
+            list_len: 0,
             toggled: HashSet::new(),
             index: Arc::new(FileIndex::default()),
-            follow: true,
             last_revision: 0,
-            shown: PAGE,
             ticker: None,
             views: Rc::new(StripState::default()),
             _subs: vec![s1, s2],
@@ -154,17 +159,37 @@ impl ChatPanel {
                 .contains_focused(window, cx)
     }
 
-    /// Tests: show every item, or scroll by `dy` pixels (down is positive).
+    /// Tests: scroll by `dy` pixels (down is positive). Every item is reachable already.
     pub fn test_command(&mut self, cmd: &str, dy: f32, cx: &mut Context<Self>) {
-        match cmd {
-            "all" => self.shown = usize::MAX,
-            _ => {
-                let o = self.scroll.offset();
-                self.follow = false;
-                self.scroll.set_offset(point(o.x, o.y - px(dy)));
-            }
+        if cmd == "scroll" {
+            self.list.scroll_by(px(dy));
         }
         cx.notify();
+    }
+
+    /// Tell the list what changed: new items at the end, and the last few measured again
+    /// (they may have grown). A shorter conversation (reloaded) starts over.
+    fn sync_list(&mut self, len: usize) {
+        if len < self.list_len {
+            self.list.reset(len);
+        } else {
+            let from = self.list_len.saturating_sub(TAIL);
+            self.list.splice(from..self.list_len, len - from);
+        }
+        self.list_len = len;
+    }
+
+    /// One item of the conversation, for the list.
+    fn render_entry(&mut self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
+        let item = self.session.read(cx).chat.items.get(ix).cloned();
+        let Some(item) = item else { return div().into_any_element() };
+        let last = ix + 1 == self.list_len;
+        div()
+            .px_2()
+            .pt_2()
+            .when(last, |d| d.pb_2())
+            .children(self.render_items(std::slice::from_ref(&item), &format!("main{ix}"), cx))
+            .into_any_element()
     }
 
     pub fn focus_input(&self, window: &mut Window, cx: &mut App) {
@@ -174,6 +199,7 @@ impl ChatPanel {
     /// Show a subagent's messages (from the sidebar tree or the strip).
     pub fn expand_agent(&mut self, tool_use_id: &str, cx: &mut Context<Self>) {
         self.toggled.insert(format!("agent:{tool_use_id}"));
+        self.list.remeasure();
         cx.notify();
     }
 
@@ -186,6 +212,8 @@ impl ChatPanel {
         if !self.toggled.remove(&key) {
             self.toggled.insert(key);
         }
+        // A card changed height: measure again (the scroll position stays on its item).
+        self.list.remeasure();
         cx.notify();
     }
 
@@ -423,6 +451,7 @@ impl ChatPanel {
                 if !p.toggled.remove(&id) {
                     p.toggled.insert(id.clone());
                 }
+                p.list.remeasure();
                 cx.notify();
             }));
         let mut card = div()
@@ -1082,39 +1111,12 @@ impl Render for ChatPanel {
             theme.secondary,
             theme.border,
         );
-        let items = self.session.read(cx).chat.items.clone();
         let backend_name = self.session.read(cx).backend.name();
-        let mut list = div().flex().flex_col().gap_2().px_2().py_2();
-        if items.is_empty() {
-            list = list.child(
-                div()
-                    .text_xs()
-                    .text_color(muted)
-                    .child(format!("{backend_name} runs in this folder. Ask for something; tool calls, diffs and permission prompts show here.")),
-            );
+        if self.list_len != self.session.read(cx).chat.items.len() {
+            self.sync_list(self.session.read(cx).chat.items.len());
         }
-        let hidden = items.len().saturating_sub(self.shown);
-        if hidden > 0 {
-            list = list.child(
-                div()
-                    .id("show-earlier")
-                    .text_xs()
-                    .text_color(muted)
-                    .cursor_pointer()
-                    .child(format!("Show {} earlier messages", hidden.min(PAGE)))
-                    .on_click(cx.listener(|p, _, _, cx| {
-                        p.shown += PAGE;
-                        p.follow = false;
-                        cx.notify();
-                    })),
-            );
-        }
-        let first = hidden;
-        for el in self.render_items(&items[first..], &format!("main{first}"), cx) {
-            list = list.child(el);
-        }
+        let empty = self.list_len == 0;
         let _ = (fg, red, user_bg);
-        let scroll = self.scroll.clone();
         let terminal = {
             let s = self.session.read(cx);
             (s.view == View::Terminal).then(|| s.terminal_view()).flatten()
@@ -1137,17 +1139,18 @@ impl Render for ChatPanel {
             })
             .when(terminal.is_none(), |d| d.child(
                 div()
-                    .id("chat-scroll")
                     .flex_1()
                     .min_h_0()
-                    .overflow_y_scroll()
-                    .track_scroll(&self.scroll)
-                    .on_scroll_wheel(cx.listener(move |p, _, _, _| {
-                        // Follow new output only while the view is at the bottom.
-                        let max = scroll.max_offset().y;
-                        p.follow = scroll.offset().y <= -max + px(24.);
-                    }))
-                    .child(list),
+                    .when(empty, |d| d.p_2().child(
+                        div()
+                            .text_xs()
+                            .text_color(muted)
+                            .child(format!("{backend_name} runs in this folder. Ask for something; tool calls, diffs and permission prompts show here.")),
+                    ))
+                    .when(!empty, |d| d.child(
+                        list(self.list.clone(), cx.processor(|this, ix, _window, cx| this.render_entry(ix, cx)))
+                            .size_full(),
+                    )),
             )
             .child(
                 div()
