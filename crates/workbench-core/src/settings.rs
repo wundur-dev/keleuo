@@ -88,6 +88,15 @@ impl Settings {
     }
 }
 
+/// A folder as a file name: every character that is not a letter or digit becomes `-`.
+pub fn encode_folder(folder: &std::path::Path) -> String {
+    folder
+        .to_string_lossy()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

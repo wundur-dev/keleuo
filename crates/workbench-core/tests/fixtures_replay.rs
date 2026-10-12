@@ -3,7 +3,14 @@
 
 use workbench_core::conversation::{Conversation, Item};
 use workbench_core::diff::LineKind;
-use workbench_core::stream::{Event, parse_line};
+use workbench_core::backends::claude::map::Mapper;
+use workbench_core::backends::claude::stream::{Event, parse_line};
+use workbench_core::conversation::Applied;
+
+/// Recorded Claude Code lines, mapped onto neutral events and applied.
+fn apply_lines(chat: &mut Conversation, m: &mut Mapper, text: &str) -> Vec<Applied> {
+    m.map_lines(text).into_iter().map(|e| chat.apply(e)).collect()
+}
 
 fn fixture(name: &str) -> String {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -56,8 +63,9 @@ fn edit_turn_streams_text_and_builds_a_diff() {
     );
 
     let mut chat = Conversation::new("");
+    let mut m = Mapper::new("");
     chat.push_user("change the greeting");
-    let applied = chat.apply_lines(&text);
+    let applied = apply_lines(&mut chat, &mut m, &text);
     assert!(!chat.busy);
     assert!(applied.iter().any(|a| a.turn_ended));
     let changed: Vec<_> = applied
@@ -120,6 +128,7 @@ fn edit_turn_streams_text_and_builds_a_diff() {
 fn permission_prompt_is_reported_and_answered() {
     let text = fixture("permission_bash_turn.jsonl");
     let mut chat = Conversation::new("");
+    let mut m = Mapper::new("");
     // Up to the permission request: the turn waits.
     let upto: Vec<&str> = text
         .lines()
@@ -129,8 +138,8 @@ fn permission_prompt_is_reported_and_answered() {
         .lines()
         .find(|l| l.contains("\"control_request\""))
         .unwrap();
-    chat.apply_lines(&upto.join("\n"));
-    chat.apply_lines(request);
+    apply_lines(&mut chat, &mut m, &upto.join("\n"));
+    apply_lines(&mut chat, &mut m, request);
     let pending: Vec<_> = chat.pending_permissions().cloned().collect();
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].tool_name, "Bash");
@@ -141,7 +150,7 @@ fn permission_prompt_is_reported_and_answered() {
         .answer_permission(&pending[0].request_id, true)
         .unwrap();
     let reply: serde_json::Value = serde_json::from_str(
-        &workbench_core::stream::permission_response(&pending[0].request_id, true, &input),
+        &workbench_core::backends::claude::stream::permission_response(&pending[0].request_id, true, &input),
     )
     .unwrap();
     assert_eq!(reply["type"], "control_response");
@@ -164,7 +173,7 @@ fn permission_prompt_is_reported_and_answered() {
         .skip_while(|l| !l.contains("\"control_request\""))
         .skip(1)
         .collect();
-    chat.apply_lines(&rest.join("\n"));
+    apply_lines(&mut chat, &mut m, &rest.join("\n"));
     let bash = chat
         .items
         .iter()
@@ -180,7 +189,8 @@ fn permission_prompt_is_reported_and_answered() {
 #[test]
 fn write_turn_gives_a_created_file_diff() {
     let mut chat = Conversation::new("");
-    let applied = chat.apply_lines(&fixture("write_turn.jsonl"));
+    let mut m = Mapper::new("");
+    let applied = apply_lines(&mut chat, &mut m, &fixture("write_turn.jsonl"));
     let write = chat
         .items
         .iter()
@@ -224,6 +234,7 @@ fn subagents_are_tracked_live() {
     use workbench_core::conversation::AgentStatus;
     let text = fixture("subagents_turn.jsonl");
     let mut chat = Conversation::new("");
+    let mut m = Mapper::new("");
     chat.push_user("launch two subagents");
     // Replay up to the first progress report: both running, one using Read.
     let lines: Vec<&str> = text.lines().collect();
@@ -231,7 +242,7 @@ fn subagents_are_tracked_live() {
         .iter()
         .position(|l| l.contains("\"task_progress\""))
         .unwrap();
-    chat.apply_lines(&lines[..=first_progress].join("\n"));
+    apply_lines(&mut chat, &mut m, &lines[..=first_progress].join("\n"));
     assert_eq!(chat.agents.len(), 2);
     assert!(chat.agents.iter().all(|a| a.running()));
     assert_eq!(chat.agents[0].description, "Read greet.py function name");
@@ -239,7 +250,7 @@ fn subagents_are_tracked_live() {
     assert_eq!(chat.agents[0].current_tool.as_deref(), Some("Read"));
     assert_eq!(chat.running_agents().count(), 2);
     // The rest of the turn: both done, with their own tool calls and token counts.
-    chat.apply_lines(&lines[first_progress + 1..].join("\n"));
+    apply_lines(&mut chat, &mut m, &lines[first_progress + 1..].join("\n"));
     assert!(chat.agents.iter().all(|a| a.status == AgentStatus::Done));
     assert_eq!(chat.running_agents().count(), 0);
     assert_eq!(chat.turn_agents().len(), 2);

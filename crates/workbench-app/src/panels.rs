@@ -1,5 +1,5 @@
-//! Everything in the window is a dock panel: the Files, Skills, Terminals and Claude sessions
-//! lists, every Claude session, every open file and every terminal. This module gives each the
+//! Everything in the window is a dock panel: the Files, Skills, Terminals and agent (subagents
+//! and earlier sessions) lists, the session's chat, every open file and every terminal. This module gives each the
 //! two dock traits (behavior from gpui-base, presentation from gpui-component), the names
 //! shown on their tabs, and in-place renaming of a tab.
 
@@ -15,8 +15,8 @@ use gpui_kit::prelude::*;
 use gpui_kit::*;
 use workbench_core::tabs::NameStore;
 
-use crate::claude_panel::{ClaudePanel, ClaudePanelEvent};
-use crate::claude_side::ClaudeSide;
+use crate::chat_panel::{ChatPanel, ChatPanelEvent};
+use crate::agent_side::AgentSide;
 use crate::doc_panel::{DocEvent, DocPanel};
 use crate::file_tree::FileTree;
 use crate::skills_panel::SkillsPanel;
@@ -155,7 +155,7 @@ macro_rules! list_panel {
 
 list_panel!(FileTree, "Files", "Files", IconName::FolderOpen);
 list_panel!(SkillsPanel, "Skills", "Skills", IconName::BookOpen);
-list_panel!(ClaudeSide, "Claude", "Claude", IconName::Bot);
+list_panel!(AgentSide, "Agent", "Agent", IconName::Bot);
 list_panel!(
     TerminalsList,
     "Terminals",
@@ -207,7 +207,7 @@ impl Panel for SkillsPanel {
     }
 }
 
-impl Panel for ClaudeSide {
+impl Panel for AgentSide {
     fn title(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         list_title(IconName::Bot, "Subagents and earlier sessions")
     }
@@ -353,33 +353,38 @@ pub fn session_key(number: usize) -> String {
     format!("session-tab:{number}")
 }
 
-impl EventEmitter<PanelEvent> for ClaudePanel {}
+impl EventEmitter<PanelEvent> for ChatPanel {}
 
-impl BasePanel for ClaudePanel {
+impl BasePanel for ChatPanel {
     fn panel_name(&self) -> &'static str {
-        "ClaudeSession"
+        "Chat"
     }
     /// The session's conversation stays: close the session tab instead.
     fn closable(&self, _: &App) -> bool {
         false
     }
     fn on_removed(&mut self, _: &mut Window, cx: &mut Context<Self>) {
-        cx.emit(ClaudePanelEvent::Closed);
+        cx.emit(ChatPanelEvent::Closed);
     }
     fn set_active(&mut self, active: bool, _: &mut Window, cx: &mut Context<Self>) {
         if active {
-            cx.emit(ClaudePanelEvent::Activated);
+            cx.emit(ChatPanelEvent::Activated);
         }
     }
     fn dump(&self, cx: &App) -> PanelState {
         let mut s = PanelState::new(self.panel_name());
-        let id = self.session.read(cx).chat.session_id.clone();
-        s.info = PanelInfo::panel(serde_json::json!({ "session_id": id, "number": self.number }));
+        let session = self.session.read(cx);
+        // The backend is saved with the session, so it reopens with the same agent.
+        s.info = PanelInfo::panel(serde_json::json!({
+            "session_id": session.chat.session_id,
+            "backend": session.backend.id(),
+            "number": self.number,
+        }));
         s
     }
 }
 
-impl Panel for ClaudePanel {
+impl Panel for ChatPanel {
     fn title(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let (fg, blue, amber) = (theme.foreground, theme.blue, theme.warning);
@@ -397,7 +402,7 @@ impl Panel for ClaudePanel {
             .items_center()
             .gap_1()
             .child(Icon::new(IconName::Bot).xsmall())
-            .child("Claude")
+            .child(s.backend.name())
             .children(dot.map(|c| div().size(px(6.)).rounded_full().bg(c)))
     }
     fn inner_padding(&self, _: &App) -> bool {

@@ -77,14 +77,40 @@ windows without taking focus; `WORKBENCH_CONFIG_DIR` moves the settings folder.
 
 ## Layout of the code
 
-- `crates/workbench-core`: no UI. Skills discovery and frontmatter, the gitignore-aware file
-  tree, the Claude Code `stream-json` parser and chat state (tool calls, permission prompts,
-  diffs, cost), the `claude` subprocess, `path:line` link detection, tab names, and the
-  `Host` interface every project operation goes through. Tested with recorded streams in
-  `tests/fixtures`.
-- `crates/workbench-core` also holds the `Agent` trait (start, send, answer permission,
-  interrupt, stop) that a chat session talks to; `ClaudeCode` is the only implementation.
-- `crates/workbench-app`: the gpui window.
+- `crates/workbench-core`: no UI. The gitignore-aware file tree, skills and frontmatter, the
+  chat state built from agent events (tool calls, permission prompts, diffs, subagents,
+  cost), `path:line` link detection, tab names, and the `Host` interface every project
+  operation and every program goes through.
+  - `agent`: the neutral model: `Event` (text, tool call and result with an optional diff,
+    permission request, subagent start, progress and end, usage and cost, status), the
+    `Agent` trait (start, send, answer a permission prompt, interrupt, stop), `Backend`
+    (what a kind of agent offers) with `Capabilities`, and the `Registry`.
+  - `backends::claude`: Claude Code. Its `stream-json` format, session files under
+    `~/.claude/projects`, skill folders and process discovery live here and nowhere else.
+  - `backends::scripted`: a fake agent for tests that plays a fixed turn of neutral events.
+- `crates/workbench-app`: the gpui window. It only knows `Backend`, `Agent` and `Event`;
+  `src/backends.rs` is the one file that names a backend, and a test fails if another file
+  does.
+
+## Adding an agent backend
+
+1. Add `crates/workbench-core/src/backends/<name>/` (or one file) and list it in
+   `backends/mod.rs`.
+2. Implement `Agent` for one running conversation: build a `ProgramSpec` (program, arguments,
+   environment, folder) and start it with `host.program_command(&spec)`, so it runs locally or
+   over SSH the same way. Read its output on a thread, map each line onto `agent::Event`s and
+   pass them to the `Sink` as `Message::Event`; stderr lines as `Message::Log`; `Message::Closed`
+   when it ends.
+3. Implement `Backend`: an `id` (saved with sessions), a `name` (shown in the window),
+   `capabilities()`, and `new_agent()`. Implement only the optional parts it has: `skills` and
+   `create_skill`, `earlier_sessions`, `session_count`, `load_session`, `running` and
+   `running_elsewhere`. The window hides what `capabilities()` says is missing (skills, earlier
+   sessions, forking, subagents, permission prompts, the accept-edits toggle, models).
+4. Register it in `crates/workbench-app/src/backends.rs`. The new-session browser then offers
+   it.
+5. Test it the way `backends/scripted.rs` and `backends/claude/mod.rs` do: drive the `Agent`
+   through the trait and apply its events to a `Conversation`. Recorded output belongs in
+   `crates/workbench-core/tests/fixtures`.
 
 ## How Claude runs
 

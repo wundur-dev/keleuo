@@ -1,12 +1,25 @@
-//! The chat as Workbench shows it, built by applying stream events in order.
+//! The chat as Workbench shows it, built by applying neutral agent events in order.
 
 use std::path::PathBuf;
 
 use serde_json::Value;
 
-use crate::diff::{self, FileDiff};
-use crate::stream::{self, Block, Event};
-use crate::summary::{one_line, tool_summary};
+use crate::agent::Event;
+use crate::diff::FileDiff;
+
+/// The first line of `text`, cut to `max` characters with an ellipsis.
+pub fn one_line(text: &str, max: usize) -> String {
+    let first = text.lines().next().unwrap_or_default().trim();
+    let more_lines = text.trim().lines().count() > 1;
+    if first.chars().count() > max {
+        let cut: String = first.chars().take(max).collect();
+        format!("{cut}...")
+    } else if more_lines {
+        format!("{first} ...")
+    } else {
+        first.to_string()
+    }
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ToolCall {
@@ -97,15 +110,10 @@ impl SubAgent {
     }
 }
 
-/// Is this tool the one that starts subagents?
-pub fn is_agent_tool(name: &str) -> bool {
-    matches!(name, "Agent" | "Task")
-}
-
 /// What applying an event changed that the window cares about beyond the chat itself.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Applied {
-    /// A file Claude wrote or edited (refresh it if open).
+    /// A file the agent wrote or edited (refresh it if open).
     pub file_changed: Option<PathBuf>,
     /// A turn ended.
     pub turn_ended: bool,
@@ -257,21 +265,7 @@ impl Conversation {
         {
             return &mut self.agents[ix];
         }
-        let (description, kind) = match self.tool(tool_use_id) {
-            Some(t) => (
-                t.input
-                    .get("description")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string(),
-                t.input
-                    .get("subagent_type")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string(),
-            ),
-            None => (String::new(), String::new()),
-        };
+        let (description, kind) = (String::new(), String::new());
         self.agents.push(SubAgent {
             tool_use_id: tool_use_id.to_string(),
             task_id: None,
@@ -287,12 +281,6 @@ impl Conversation {
             items: Vec::new(),
         });
         self.agents.last_mut().unwrap()
-    }
-
-    fn agent_by_task(&mut self, task_id: &str) -> Option<&mut SubAgent> {
-        self.agents
-            .iter_mut()
-            .find(|a| a.task_id.as_deref() == Some(task_id))
     }
 
     /// Subagents still running.
@@ -313,268 +301,122 @@ impl Conversation {
         }
     }
 
-    fn new_tool(&mut self, id: String, name: String, input: Value, parent: Option<String>) {
-        let summary = tool_summary(&name, &input, &self.cwd);
-        self.items.push(Item::Tool(ToolCall {
-            diff: diff::from_input(&name, &input),
-            id,
-            name,
-            input,
-            summary,
-            result: None,
-            is_error: false,
-            parent,
-        }));
-    }
-
-    /// Apply one event from the stream.
+    /// Apply one event.
     pub fn apply(&mut self, event: Event) -> Applied {
         let mut applied = Applied::default();
         self.revision += 1;
         match event {
-            Event::Init {
-                session_id,
-                model,
-                permission_mode,
-                cwd,
-            } => {
-                self.session_id = Some(session_id);
-                self.model = Some(model);
-                self.permission_mode = Some(permission_mode);
-                if !cwd.is_empty() {
+            Event::Started { session_id, model, permission_mode, cwd } => {
+                self.session_id = session_id.or(self.session_id.take());
+                self.model = model.or(self.model.take());
+                self.permission_mode = permission_mode.or(self.permission_mode.take());
+                if let Some(cwd) = cwd.filter(|c| !c.is_empty()) {
                     self.cwd = cwd;
                 }
             }
             Event::Status(status) => self.status = Some(status),
-            Event::BlockStart {
-                kind,
-                tool_name,
-                tool_id,
-                ..
-            } => match kind.as_str() {
-                "text" => {
-                    self.finish_streaming();
-                    self.items.push(Item::Assistant {
-                        text: String::new(),
-                        streaming: true,
-                    });
-                    self.streaming = Some(self.items.len() - 1);
-                }
-                "thinking" => self.status = Some("thinking".into()),
-                "tool_use" => {
-                    self.finish_streaming();
-                    if let (Some(id), Some(name)) = (tool_id, tool_name)
-                        && self.tool(&id).is_none()
-                    {
-                        self.new_tool(id, name, Value::Object(Default::default()), None);
-                    }
-                }
-                _ => {}
-            },
-            Event::TextDelta { text, .. } => {
+            Event::TextStart => {
+                self.finish_streaming();
+                self.items.push(Item::Assistant { text: String::new(), streaming: true });
+                self.streaming = Some(self.items.len() - 1);
+            }
+            Event::TextDelta(text) => {
                 if self.streaming.is_none() {
-                    self.items.push(Item::Assistant {
-                        text: String::new(),
-                        streaming: true,
-                    });
+                    self.items.push(Item::Assistant { text: String::new(), streaming: true });
                     self.streaming = Some(self.items.len() - 1);
                 }
-                if let Some(Item::Assistant { text: t, .. }) =
-                    self.streaming.and_then(|i| self.items.get_mut(i))
-                {
+                if let Some(Item::Assistant { text: t, .. }) = self.streaming.and_then(|i| self.items.get_mut(i)) {
                     t.push_str(&text);
                 }
                 self.status = Some("writing".into());
             }
-            Event::Assistant {
-                model,
-                blocks,
-                parent_tool_use_id,
-                ..
-            } => {
-                if let Some(parent) = parent_tool_use_id {
-                    let cwd = self.cwd.clone();
-                    let agent = self.agent_entry(&parent);
-                    for block in blocks {
-                        match block {
-                            Block::Text(text) if !text.trim().is_empty() => {
-                                agent.items.push(Item::Assistant {
-                                    text,
-                                    streaming: false,
-                                })
-                            }
-                            Block::ToolUse { id, name, input } => {
-                                agent.current_tool = Some(name.clone());
-                                agent.items.push(Item::Tool(ToolCall {
-                                    summary: tool_summary(&name, &input, &cwd),
-                                    diff: diff::from_input(&name, &input),
-                                    id,
-                                    name,
-                                    input,
-                                    result: None,
-                                    is_error: false,
-                                    parent: Some(parent.clone()),
-                                }));
-                            }
-                            _ => {}
-                        }
-                    }
-                    return applied;
-                }
-                if !model.is_empty() {
-                    self.model = Some(model);
-                }
-                for block in blocks {
-                    match block {
-                        Block::Text(text) => {
-                            if let Some(Item::Assistant { text: t, streaming }) =
-                                self.streaming.take().and_then(|i| self.items.get_mut(i))
-                            {
-                                *t = text;
-                                *streaming = false;
-                            } else if !text.trim().is_empty() {
-                                self.items.push(Item::Assistant {
-                                    text,
-                                    streaming: false,
-                                });
-                            }
-                        }
-                        Block::Thinking(_) => {}
-                        Block::ToolUse { id, name, input } => {
-                            self.finish_streaming();
-                            let cwd = self.cwd.clone();
-                            if let Some(tool) = self.tool_mut(&id) {
-                                tool.summary = tool_summary(&name, &input, &cwd);
-                                tool.diff = diff::from_input(&name, &input);
-                                tool.input = input;
-                                tool.parent = parent_tool_use_id.clone();
-                            } else {
-                                let agent_tool = is_agent_tool(&name);
-                                self.new_tool(id.clone(), name, input, None);
-                                if agent_tool {
-                                    self.agent_entry(&id);
-                                }
-                            }
-                            self.status = Some("running tool".into());
-                        }
-                    }
+            Event::Text { text, parent: Some(parent) } => {
+                if !text.trim().is_empty() {
+                    self.agent_entry(&parent).items.push(Item::Assistant { text, streaming: false });
                 }
             }
-            Event::ToolResult {
-                tool_use_id,
-                content,
-                is_error,
-                structured,
-                parent_tool_use_id,
-            } => {
-                if let Some(parent) = &parent_tool_use_id
+            Event::Text { text, parent: None } => {
+                if let Some(Item::Assistant { text: t, streaming }) =
+                    self.streaming.take().and_then(|i| self.items.get_mut(i))
+                {
+                    *t = text;
+                    *streaming = false;
+                } else if !text.trim().is_empty() {
+                    self.items.push(Item::Assistant { text, streaming: false });
+                }
+            }
+            Event::UserText(text) => {
+                self.finish_streaming();
+                self.items.push(Item::User(text));
+                self.turn_agents_from = self.agents.len();
+            }
+            Event::ToolCall { id, name, summary, input, diff, parent } => {
+                if parent.is_none() {
+                    self.finish_streaming();
+                    self.status = Some("running tool".into());
+                }
+                if let Some(tool) = self.tool_mut(&id) {
+                    tool.summary = summary;
+                    tool.input = input;
+                    if diff.is_some() {
+                        tool.diff = diff;
+                    }
+                    tool.name = name;
+                    return applied;
+                }
+                let tool = Item::Tool(ToolCall {
+                    id,
+                    name: name.clone(),
+                    input,
+                    summary,
+                    result: None,
+                    is_error: false,
+                    diff,
+                    parent: parent.clone(),
+                });
+                match parent {
+                    Some(p) => {
+                        let agent = self.agent_entry(&p);
+                        agent.current_tool = Some(name);
+                        agent.items.push(tool);
+                    }
+                    None => self.items.push(tool),
+                }
+            }
+            Event::ToolResult { id, output, is_error, diff, file_changed, parent } => {
+                if let Some(parent) = &parent
                     && let Some(agent) = self.agents.iter_mut().find(|a| &a.tool_use_id == parent)
                 {
                     agent.current_tool = None;
                 }
-                // The Agent tool's own result: the subagent is done.
-                if let Some(agent) = self
-                    .agents
-                    .iter_mut()
-                    .find(|a| a.tool_use_id == tool_use_id)
+                // The result of the call that started a subagent: it is done.
+                if let Some(agent) = self.agents.iter_mut().find(|a| a.tool_use_id == id)
                     && agent.running()
                 {
-                    agent.status = if is_error {
-                        AgentStatus::Failed
-                    } else {
-                        AgentStatus::Done
-                    };
+                    agent.status = if is_error { AgentStatus::Failed } else { AgentStatus::Done };
                     agent.current_tool = None;
                     if agent.duration_ms.is_none() {
                         agent.duration_ms = agent.started.map(|t| t.elapsed().as_millis() as u64);
                     }
                 }
-                if let Some(tool) = self.tool_mut(&tool_use_id) {
-                    if !is_error
-                        && let Some(d) =
-                            diff::from_tool(&tool.name, &tool.input, structured.as_ref())
-                    {
-                        applied.file_changed = Some(d.path.clone());
-                        tool.diff = Some(d);
-                    }
+                if !is_error {
+                    applied.file_changed = file_changed;
+                }
+                if let Some(tool) = self.tool_mut(&id) {
                     if is_error {
                         tool.diff = None;
+                    } else if diff.is_some() {
+                        tool.diff = diff;
                     }
-                    tool.result = Some(content);
+                    tool.result = Some(output);
                     tool.is_error = is_error;
                 }
             }
-            Event::UserText(_) => {}
-            Event::TaskStarted {
-                tool_use_id,
-                task_id,
-                description,
-                subagent_type,
-            } => {
-                let agent = self.agent_entry(&tool_use_id);
-                agent.task_id = Some(task_id);
-                if !description.is_empty() {
-                    agent.description = description;
-                }
-                if !subagent_type.is_empty() {
-                    agent.kind = subagent_type;
-                }
-            }
-            Event::TaskProgress {
-                tool_use_id,
-                task_id,
-                last_tool,
-                total_tokens,
-                tool_uses,
-                duration_ms,
-                ..
-            } => {
-                let agent = self.agent_entry(&tool_use_id);
-                agent.task_id.get_or_insert(task_id);
-                if last_tool.is_some() {
-                    agent.current_tool = last_tool;
-                }
-                agent.total_tokens = total_tokens.or(agent.total_tokens);
-                agent.tool_uses = tool_uses.or(agent.tool_uses);
-                agent.duration_ms = duration_ms.or(agent.duration_ms);
-            }
-            Event::TaskDone {
-                tool_use_id,
-                task_id,
-                status,
-                summary,
-                total_tokens,
-                duration_ms,
-            } => {
-                let agent = match tool_use_id {
-                    Some(id) => Some(self.agent_entry(&id)),
-                    None => self.agent_by_task(&task_id),
-                };
-                if let Some(agent) = agent {
-                    agent.status = match status.as_str() {
-                        "failed" | "error" | "killed" | "cancelled" => AgentStatus::Failed,
-                        _ => AgentStatus::Done,
-                    };
-                    agent.current_tool = None;
-                    agent.summary = summary.or(agent.summary.take());
-                    agent.total_tokens = total_tokens.or(agent.total_tokens);
-                    agent.duration_ms = duration_ms
-                        .or(agent.duration_ms)
-                        .or_else(|| agent.started.map(|t| t.elapsed().as_millis() as u64));
-                }
-            }
-            Event::PermissionRequest {
-                request_id,
-                tool_name,
-                input,
-                description,
-                ..
-            } => {
+            Event::Permission { request_id, tool, summary, description, input } => {
                 self.finish_streaming();
-                let summary = tool_summary(&tool_name, &input, &self.cwd);
                 self.items.push(Item::Permission(PermissionPrompt {
                     request_id,
-                    tool_name,
+                    tool_name: tool,
                     summary,
                     description,
                     input,
@@ -582,54 +424,83 @@ impl Conversation {
                 }));
                 self.status = Some("waiting for permission".into());
             }
-            Event::Result {
-                is_error,
-                subtype,
-                text,
-                total_cost_usd,
-                duration_ms,
-                input_tokens,
-                output_tokens,
-                session_id,
-                ..
-            } => {
+            Event::SubagentStarted { id, description, kind } => {
+                let agent = self.agent_entry(&id);
+                if !description.is_empty() {
+                    agent.description = description;
+                }
+                if !kind.is_empty() {
+                    agent.kind = kind;
+                }
+            }
+            Event::SubagentProgress { id, current_tool, tokens, tool_uses, duration_ms } => {
+                let agent = self.agent_entry(&id);
+                if current_tool.is_some() {
+                    agent.current_tool = current_tool;
+                }
+                agent.total_tokens = tokens.or(agent.total_tokens);
+                agent.tool_uses = tool_uses.or(agent.tool_uses);
+                agent.duration_ms = duration_ms.or(agent.duration_ms);
+            }
+            Event::SubagentEnded { id, failed, summary, tokens, duration_ms } => {
+                let agent = self.agent_entry(&id);
+                agent.status = if failed { AgentStatus::Failed } else { AgentStatus::Done };
+                agent.current_tool = None;
+                agent.summary = summary.or(agent.summary.take());
+                agent.total_tokens = tokens.or(agent.total_tokens);
+                agent.duration_ms =
+                    duration_ms.or(agent.duration_ms).or_else(|| agent.started.map(|t| t.elapsed().as_millis() as u64));
+            }
+            Event::TurnEnded { error, cost_total_usd, input_tokens, output_tokens, duration_ms, session_id } => {
                 self.finish_streaming();
                 self.busy = false;
                 self.status = None;
                 applied.turn_ended = true;
-                if !session_id.is_empty() {
-                    self.session_id = Some(session_id);
+                if let Some(id) = session_id.filter(|s| !s.is_empty()) {
+                    self.session_id = Some(id);
                 }
-                if let Some(total) = total_cost_usd {
+                if let Some(total) = cost_total_usd {
                     let total = self.cost_base + total;
                     self.last_turn_cost_usd = Some((total - self.total_cost_usd).max(0.0));
                     self.total_cost_usd = total;
                 }
                 self.last_turn_tokens = Some((input_tokens, output_tokens));
                 self.last_turn_ms = duration_ms;
-                if is_error {
-                    let detail = text.unwrap_or(subtype);
-                    self.items.push(Item::Error(format!(
-                        "The turn ended with an error: {}",
-                        one_line(&detail, 300)
-                    )));
+                if let Some(e) = error {
+                    self.items.push(Item::Error(format!("The turn ended with an error: {}", one_line(&e, 300))));
                 }
             }
-            Event::Unparsed(line) => {
+            Event::Notice(line) => {
                 if !line.trim().is_empty() {
                     self.items.push(Item::Notice(one_line(&line, 300)));
                 }
             }
-            Event::Other(_) => {}
         }
         applied
     }
 
-    /// Apply every line of a recorded stream (tests and replays).
-    pub fn apply_lines(&mut self, text: &str) -> Vec<Applied> {
-        text.lines()
-            .filter_map(stream::parse_line)
-            .map(|e| self.apply(e))
-            .collect()
+    /// Apply a list of events (replays and tests).
+    pub fn apply_all(&mut self, events: impl IntoIterator<Item = Event>) -> Vec<Applied> {
+        events.into_iter().map(|e| self.apply(e)).collect()
+    }
+
+    /// The last thing that happened, as one line: the status while busy, else the agent's last
+    /// words.
+    pub fn last_activity(&self, max: usize) -> Option<String> {
+        if self.needs_input() {
+            return Some("waiting for permission".into());
+        }
+        if self.busy {
+            let tool = self.items.iter().rev().find_map(|i| match i {
+                Item::Tool(t) if !t.done() => Some(format!("{} {}", t.name, t.summary)),
+                _ => None,
+            });
+            return Some(one_line(&tool.or_else(|| self.status.clone()).unwrap_or_else(|| "working".into()), max));
+        }
+        self.items.iter().rev().find_map(|i| match i {
+            Item::Assistant { text, .. } if !text.trim().is_empty() => Some(one_line(text.trim(), max)),
+            Item::Error(e) => Some(one_line(e, max)),
+            _ => None,
+        })
     }
 }

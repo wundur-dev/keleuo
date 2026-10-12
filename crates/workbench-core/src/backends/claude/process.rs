@@ -1,19 +1,18 @@
 //! The `claude` subprocess: started in the project folder with structured input and output,
-//! read on background threads, its lines parsed into [`Event`]s.
+//! its lines read on background threads.
 
 use std::io::{BufRead, BufReader, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Stdio};
 use std::sync::Arc;
 
-use crate::host::CommandSpec;
-
-use crate::stream::{self, Event};
+use super::stream;
+use crate::host::{CommandSpec, ProgramSpec};
 
 /// How to start Claude Code.
 #[derive(Clone, Debug, Default)]
 pub struct Options {
-    /// The `claude` program; found on PATH and in the usual install places when `None`.
+    /// The `claude` program; `claude` (found on the host's PATH) when `None`.
     pub program: Option<PathBuf>,
     pub cwd: PathBuf,
     /// `--model`, when not the user's default.
@@ -27,6 +26,20 @@ pub struct Options {
 }
 
 impl Options {
+    /// What the host runs.
+    pub fn program_spec(&self) -> ProgramSpec {
+        ProgramSpec {
+            program: self
+                .program
+                .as_ref()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_else(|| "claude".into()),
+            args: self.args(),
+            env: Vec::new(),
+            cwd: self.cwd.clone(),
+        }
+    }
+
     /// The command line arguments.
     pub fn args(&self) -> Vec<String> {
         let mut args: Vec<String> = [
@@ -59,15 +72,17 @@ impl Options {
     }
 }
 
-/// What the reader threads report.
+/// What the reader threads report: raw lines.
 #[derive(Debug)]
-pub enum Message {
-    Event(Event),
+pub enum Line {
+    Stdout(String),
     /// A line Claude Code wrote to stderr.
     Stderr(String),
     /// stdout closed: the process has ended (or is about to).
     Closed,
 }
+
+type Message = Line;
 
 /// A running `claude`.
 pub struct Process {
@@ -77,7 +92,7 @@ pub struct Process {
 }
 
 impl Process {
-    /// Start `spec` (from [`crate::host::Host::claude_command`]). Every message is handed to
+    /// Start `spec` (from [`crate::host::Host::program_command`]). Every line is handed to
     /// `sink` on a reader thread; the window turns that into a wake-up, so nothing polls.
     pub fn spawn(
         spec: &CommandSpec,
@@ -96,10 +111,10 @@ impl Process {
         read_lines(
             stdout,
             sink.clone(),
-            |line| stream::parse_line(&line).map(Message::Event),
+            |line| Some(Line::Stdout(line)),
             true,
         );
-        read_lines(stderr, sink, |line| Some(Message::Stderr(line)), false);
+        read_lines(stderr, sink, |line| Some(Line::Stderr(line)), false);
         Ok(Self {
             stdin: child.stdin.take(),
             child,
@@ -170,31 +185,6 @@ fn read_lines<R: std::io::Read + Send + 'static>(
     });
 }
 
-/// Find `claude` on PATH or where its installer puts it (a window started from the Finder does
-/// not get the shell's PATH).
-pub fn find_claude() -> Option<PathBuf> {
-    let exe = if cfg!(windows) {
-        "claude.exe"
-    } else {
-        "claude"
-    };
-    let mut dirs: Vec<PathBuf> = std::env::var_os("PATH")
-        .map(|p| std::env::split_paths(&p).collect())
-        .unwrap_or_default();
-    if let Some(home) = dirs::home_dir() {
-        dirs.push(home.join(".local/bin"));
-        dirs.push(home.join(".claude/local"));
-        dirs.push(home.join(".npm-global/bin"));
-    }
-    dirs.push("/opt/homebrew/bin".into());
-    dirs.push("/usr/local/bin".into());
-    dirs.into_iter().map(|d| d.join(exe)).find(|p| is_file(p))
-}
-
-fn is_file(p: &Path) -> bool {
-    p.is_file()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -237,6 +227,7 @@ mod tests {
     #[test]
     fn spawn_reads_events_from_a_fake_claude() {
         use std::os::unix::fs::PermissionsExt;
+        use std::path::Path;
         let dir = std::env::temp_dir().join(format!("wb-fake-claude-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let script = dir.join("claude");
@@ -255,7 +246,7 @@ mod tests {
             cwd: dir.clone(),
             ..Default::default()
         };
-        let spec = crate::host::Host::claude_command(&crate::host::LocalHost, &options);
+        let spec = crate::host::Host::program_command(&crate::host::LocalHost, &options.program_spec());
         let (tx, rx) = std::sync::mpsc::channel();
         let tx = std::sync::Mutex::new(tx);
         let mut process = Process::spawn(&spec, move |m| {
@@ -270,17 +261,17 @@ mod tests {
         while !(closed && !stderr.is_empty()) && start.elapsed().as_secs() < 10 {
             for m in rx.try_iter() {
                 match m {
-                    Message::Event(e) => events.push(e),
-                    Message::Stderr(s) => stderr.push(s),
-                    Message::Closed => closed = true,
+                    Line::Stdout(l) => events.extend(stream::parse_line(&l)),
+                    Line::Stderr(s) => stderr.push(s),
+                    Line::Closed => closed = true,
                 }
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         assert!(closed);
         assert_eq!(stderr, ["oops"]);
-        assert!(matches!(events.first(), Some(Event::Init { .. })));
-        assert!(matches!(events.last(), Some(Event::Result { .. })));
+        assert!(matches!(events.first(), Some(stream::Event::Init { .. })));
+        assert!(matches!(events.last(), Some(stream::Event::Result { .. })));
         let _ = std::fs::remove_dir_all(dir);
     }
 }

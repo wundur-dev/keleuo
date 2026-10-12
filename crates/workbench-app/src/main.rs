@@ -17,17 +17,20 @@ use workbench_core::host::{Host, LocalHost, SshHost};
 use workbench_core::settings::Settings;
 
 mod actions;
-mod claude_panel;
-mod claude_session;
-mod claude_side;
+mod backends;
+mod chat_panel;
+mod agent_session;
+mod agent_side;
 mod control;
 mod doc_panel;
+mod dock_skin;
 mod file_tree;
 mod palette;
 mod panels;
 mod perf;
 mod picker;
 mod pty;
+mod sheet_tabs;
 mod shell;
 mod skills_panel;
 mod terminal_view;
@@ -148,6 +151,7 @@ fn main() {
                 workbench_core::tabs::NameStore::open_default(),
             ))));
             cx.set_global(panels::Renaming::default());
+            cx.set_global(backends::Backends(backends::registry()));
             workspace::register_panels(cx);
             theme::apply(cx);
             control::start(cx);

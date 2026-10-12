@@ -1,5 +1,5 @@
-//! The skills panel: project, user and plugin skills, plus the project's CLAUDE.md, agents and
-//! commands. Scanned on a background thread through the Host.
+//! The skills panel: the groups of skills, agents, commands and instruction files the session's
+//! backend reads for this project. Scanned on a background thread through the Host.
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -9,7 +9,8 @@ use gpui_kit::component::{ActiveTheme, Icon, IconName, Sizable};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 use workbench_core::host::Host;
-use workbench_core::skills::{self, Catalog, Entry, Kind};
+use workbench_core::agent::Backend;
+use workbench_core::skills::{Catalog, Entry, Kind};
 
 pub enum SkillsEvent {
     Open(Entry),
@@ -18,6 +19,7 @@ pub enum SkillsEvent {
 pub struct SkillsPanel {
     focus: FocusHandle,
     host: Arc<dyn Host>,
+    backend: Arc<dyn Backend>,
     project: PathBuf,
     catalog: Option<Arc<Catalog>>,
     collapsed: HashSet<String>,
@@ -28,10 +30,11 @@ pub struct SkillsPanel {
 impl EventEmitter<SkillsEvent> for SkillsPanel {}
 
 impl SkillsPanel {
-    pub fn new(host: Arc<dyn Host>, project: PathBuf, cx: &mut Context<Self>) -> Self {
+    pub fn new(host: Arc<dyn Host>, backend: Arc<dyn Backend>, project: PathBuf, cx: &mut Context<Self>) -> Self {
         let mut this = Self {
             focus: cx.focus_handle(),
             host,
+            backend,
             project,
             catalog: None,
             // Plugin groups start folded: there can be dozens of skills.
@@ -46,19 +49,17 @@ impl SkillsPanel {
     /// Rescan; when `open` is set, open that file once the scan is done.
     pub fn refresh(&mut self, open: Option<PathBuf>, cx: &mut Context<Self>) {
         let host = self.host.clone();
+        let backend = self.backend.clone();
         let project = self.project.clone();
         self._task = Some(
             cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
                 let catalog = cx
-                    .background_spawn(async move {
-                        let home = skills::claude_home(host.as_ref());
-                        skills::discover(host.as_ref(), &project, home.as_deref())
-                    })
+                    .background_spawn(async move { backend.skills(host.as_ref(), &project) })
                     .await;
                 let _ = this.update(cx, |panel, cx| {
                     if panel.catalog.is_none() {
-                        for (name, _) in &catalog.plugins {
-                            panel.collapsed.insert(format!("plugin:{name}"));
+                        for g in catalog.groups.iter().filter(|g| g.folded) {
+                            panel.collapsed.insert(g.key.clone());
                         }
                     }
                     if let Some(path) = open
@@ -76,12 +77,11 @@ impl SkillsPanel {
 
     pub fn new_skill(&mut self, cx: &mut Context<Self>) {
         let host = self.host.clone();
+        let backend = self.backend.clone();
         let project = self.project.clone();
         cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
             let made = cx
-                .background_spawn(async move {
-                    skills::create_project_skill(host.as_ref(), &project, "new skill")
-                })
+                .background_spawn(async move { backend.create_skill(host.as_ref(), &project, "new skill") })
                 .await;
             let _ = this.update(cx, |panel, cx| match made {
                 Ok(path) => panel.refresh(Some(path), cx),
@@ -203,23 +203,8 @@ impl Render for SkillsPanel {
                 )
             }
             Some(cat) => {
-                list = list.child(self.group("project", "Project".into(), &cat.project, cx));
-                if !cat.project_docs.is_empty() {
-                    list = list.child(self.group(
-                        "docs",
-                        "CLAUDE.md, agents, commands".into(),
-                        &cat.project_docs,
-                        cx,
-                    ));
-                }
-                list = list.child(self.group("user", "User".into(), &cat.user, cx));
-                for (name, entries) in &cat.plugins {
-                    list = list.child(self.group(
-                        &format!("plugin:{name}"),
-                        format!("Plugin: {name}"),
-                        entries,
-                        cx,
-                    ));
+                for g in &cat.groups {
+                    list = list.child(self.group(&g.key, g.title.clone(), &g.entries, cx));
                 }
             }
         }

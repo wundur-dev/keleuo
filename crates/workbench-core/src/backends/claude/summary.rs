@@ -40,19 +40,7 @@ pub fn tool_summary(name: &str, input: &Value, cwd: &str) -> String {
     one_line(&text, 120)
 }
 
-/// The first line of `text`, cut to `max` characters with an ellipsis.
-pub fn one_line(text: &str, max: usize) -> String {
-    let first = text.lines().next().unwrap_or_default().trim();
-    let more_lines = text.trim().lines().count() > 1;
-    if first.chars().count() > max {
-        let cut: String = first.chars().take(max).collect();
-        format!("{cut}...")
-    } else if more_lines {
-        format!("{first} ...")
-    } else {
-        first.to_string()
-    }
-}
+pub use crate::conversation::one_line;
 
 fn relative(path: &str, cwd: &str) -> String {
     if cwd.is_empty() {

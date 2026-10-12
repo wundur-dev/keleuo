@@ -14,7 +14,7 @@ use workbench_core::host::{Host, LocalHost};
 
 use crate::AppSettings;
 use crate::actions::*;
-use crate::claude_session::ClaudeSession;
+use crate::agent_session::AgentSession;
 use crate::panels::{self, start_tab_rename};
 use crate::workspace::{Workspace, WorkspaceEvent};
 
@@ -55,7 +55,7 @@ impl Shell {
             focus: cx.focus_handle(),
             subs: HashMap::new(),
         };
-        let session = ClaudeSession::new(host.clone(), root.clone());
+        let session = AgentSession::new(host.clone(), crate::backends::backend(None, cx), root.clone());
         this.add_session(host, root, session, None, None, window, cx);
         this
     }
@@ -70,7 +70,7 @@ impl Shell {
         &mut self,
         host: Arc<dyn Host>,
         root: PathBuf,
-        session: ClaudeSession,
+        session: AgentSession,
         worktree: Option<String>,
         wait_for: Option<u32>,
         window: &mut Window,
@@ -85,17 +85,17 @@ impl Shell {
         ws.update(cx, |w, _| w.worktree = worktree);
         if let Some(pid) = wait_for {
             let session = ws.read(cx).session.clone();
-            crate::claude_side::watch_takeover(session, host, root, pid, cx);
+            crate::agent_side::watch_takeover(session, host, root, pid, cx);
         }
         let subs = vec![
             cx.subscribe_in(&ws, window, |shell, ws, ev: &WorkspaceEvent, window, cx| match ev {
                 WorkspaceEvent::NewSession => shell.open_chooser(cx),
                 WorkspaceEvent::Resume { chat, fork, wait_for } => {
-                    let (host, root) = {
+                    let (host, root, backend) = {
                         let w = ws.read(cx);
-                        (w.host(), w.root().to_path_buf())
+                        (w.host(), w.root().to_path_buf(), w.session.read(cx).backend.clone())
                     };
-                    let mut session = ClaudeSession::resumed(host.clone(), root.clone(), (**chat).clone(), *fork);
+                    let mut session = AgentSession::resumed(host.clone(), backend, root.clone(), (**chat).clone(), *fork);
                     if let Some(pid) = wait_for {
                         session.waiting_for = Some(*pid);
                         session.chat.push_notice(format!(
@@ -104,7 +104,7 @@ impl Shell {
                     }
                     shell.add_session(host, root, session, None, *wait_for, window, cx);
                 }
-                WorkspaceEvent::ClaudeEdited(path) => shell.edited(ws.clone(), path.clone(), window, cx),
+                WorkspaceEvent::AgentEdited(path) => shell.edited(ws.clone(), path.clone(), window, cx),
             }),
             // The tab's name and dot follow the session.
             cx.observe(&ws, |_, _, cx| cx.notify()),
@@ -217,7 +217,7 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let session = ClaudeSession::new(host.clone(), root.clone());
+        let session = AgentSession::new(host.clone(), crate::backends::backend(None, cx), root.clone());
         self.add_session(host, root, session, None, None, window, cx);
     }
 
@@ -239,7 +239,7 @@ impl Shell {
             return Err("worktrees over SSH are not supported yet".into());
         }
         let (path, branch) = make_worktree(&root)?;
-        let session = ClaudeSession::new(Arc::new(LocalHost), path.clone());
+        let session = AgentSession::new(Arc::new(LocalHost), crate::backends::backend(None, cx), path.clone());
         self.add_session(
             Arc::new(LocalHost),
             path,

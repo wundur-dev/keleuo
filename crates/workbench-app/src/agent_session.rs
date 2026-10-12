@@ -1,11 +1,11 @@
-//! One chat session: an agent (Claude Code) and the conversation it feeds. No drawing here.
+//! One chat session: an agent (from its backend) and the conversation it feeds. No drawing here.
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use gpui_kit::prelude::*;
 use gpui_kit::*;
-use workbench_core::agent::{Agent, ClaudeCode, Message, StartOptions};
+use workbench_core::agent::{Agent, Backend, Message, StartOptions};
 use workbench_core::conversation::Conversation;
 use workbench_core::host::Host;
 
@@ -17,32 +17,34 @@ pub enum SessionEvent {
     TurnEnded,
 }
 
-pub struct ClaudeSession {
+pub struct AgentSession {
     host: Arc<dyn Host>,
     pub cwd: PathBuf,
     pub chat: Conversation,
+    pub backend: Arc<dyn Backend>,
     agent: Box<dyn Agent>,
-    /// `None` is Claude's default mode (it asks); `Some("acceptEdits")` etc.
+    /// `None` is the backend's default mode (it asks); otherwise its own mode name.
     pub permission_mode: Option<String>,
     pub model: Option<String>,
     /// Something happened since the user last looked at this session.
     pub unseen: bool,
     /// The next start forks the resumed session (`--fork-session`).
     fork_next: bool,
-    /// Waiting for a `claude` process elsewhere (this pid) to exit before resuming here.
+    /// Waiting for an agent process elsewhere (this pid) to exit before resuming here.
     pub waiting_for: Option<u32>,
     _reader: Option<Task<()>>,
 }
 
-impl EventEmitter<SessionEvent> for ClaudeSession {}
+impl EventEmitter<SessionEvent> for AgentSession {}
 
-impl ClaudeSession {
-    pub fn new(host: Arc<dyn Host>, cwd: PathBuf) -> Self {
+impl AgentSession {
+    pub fn new(host: Arc<dyn Host>, backend: Arc<dyn Backend>, cwd: PathBuf) -> Self {
         Self {
+            agent: backend.new_agent(),
+            backend,
             host,
             chat: Conversation::new(cwd.to_string_lossy().to_string()),
             cwd,
-            agent: Box::new(ClaudeCode::new()),
             permission_mode: None,
             model: std::env::var("WORKBENCH_MODEL")
                 .ok()
@@ -56,8 +58,14 @@ impl ClaudeSession {
 
     /// A session continuing an earlier one, its history already rebuilt from the file.
     /// `fork`: continue in a copy (the original runs elsewhere).
-    pub fn resumed(host: Arc<dyn Host>, cwd: PathBuf, chat: Conversation, fork: bool) -> Self {
-        let mut s = Self::new(host, cwd);
+    pub fn resumed(
+        host: Arc<dyn Host>,
+        backend: Arc<dyn Backend>,
+        cwd: PathBuf,
+        chat: Conversation,
+        fork: bool,
+    ) -> Self {
+        let mut s = Self::new(host, backend, cwd);
         s.chat = chat;
         s.fork_next = fork;
         s.chat.push_notice(if fork {
@@ -118,10 +126,10 @@ impl ClaudeSession {
                     cx.emit(SessionEvent::TurnEnded);
                 }
             }
-            Message::Stderr(line) => {
+            Message::Log(line) => {
                 if !line.trim().is_empty() {
                     self.chat
-                        .push_notice(format!("{}: {line}", self.agent.name()));
+                        .push_notice(format!("{}: {line}", self.backend.name()));
                 }
             }
             Message::Closed => {
@@ -129,7 +137,7 @@ impl ClaudeSession {
                 if self.chat.busy {
                     self.chat.push_error(format!(
                         "{} stopped before the turn finished.",
-                        self.agent.name()
+                        self.backend.name()
                     ));
                 }
                 self.chat.process_ended();
@@ -160,7 +168,7 @@ impl ClaudeSession {
         self.chat.push_user(text);
         if let Err(e) = self.agent.send(text) {
             self.chat
-                .push_error(format!("Could not send to {}: {e}", self.agent.name()));
+                .push_error(format!("Could not send to {}: {e}", self.backend.name()));
         }
         cx.notify();
     }
@@ -212,7 +220,7 @@ impl ClaudeSession {
     }
 }
 
-impl Drop for ClaudeSession {
+impl Drop for AgentSession {
     fn drop(&mut self) {
         self.stop();
     }

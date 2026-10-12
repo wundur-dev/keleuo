@@ -9,10 +9,12 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
-use crate::conversation::{Conversation, Item};
+use super::map::Mapper;
+use super::stream;
+pub use crate::agent::SessionInfo;
+use crate::agent::Event;
+use crate::conversation::{Conversation, one_line};
 use crate::host::Host;
-use crate::stream;
-use crate::summary::one_line;
 
 /// `~/.claude/projects` folder name for a project folder.
 pub fn encode_project_dir(folder: &Path) -> String {
@@ -27,21 +29,6 @@ pub fn project_sessions_dir(claude_home: &Path, folder: &Path) -> PathBuf {
     claude_home
         .join("projects")
         .join(encode_project_dir(folder))
-}
-
-/// One earlier session.
-#[derive(Clone, Debug, PartialEq)]
-pub struct SessionInfo {
-    pub id: String,
-    pub path: PathBuf,
-    /// The first thing the person asked.
-    pub title: String,
-    /// ISO time of the last message.
-    pub last_activity: Option<String>,
-    /// User and assistant messages (not counting subagents).
-    pub messages: usize,
-    /// File modification time, seconds since the epoch, when known.
-    pub modified: Option<u64>,
 }
 
 /// Title, message count and last activity of a session file's text.
@@ -132,22 +119,34 @@ pub fn list_sessions(
         .collect()
 }
 
+/// How many sessions `folder` has and when the newest changed, without reading them.
+pub fn session_count(host: &dyn Host, claude_home: &Path, folder: &Path) -> (usize, Option<u64>) {
+    let dir = project_sessions_dir(claude_home, folder);
+    let Ok(entries) = host.read_dir(&dir) else {
+        return (0, None);
+    };
+    let files: Vec<PathBuf> = entries
+        .into_iter()
+        .filter(|e| !e.is_dir && e.name.ends_with(".jsonl"))
+        .map(|e| dir.join(e.name))
+        .collect();
+    let newest = files.iter().filter_map(|p| host.modified(p)).max();
+    (files.len(), newest)
+}
+
 /// Rebuild the chat of a session from its file.
 pub fn load_conversation(text: &str, cwd: &str) -> Conversation {
     let mut chat = Conversation::new(cwd);
     chat.replaying = true;
+    let mut mapper = Mapper::new(cwd);
+    mapper.history = true;
     for line in text.lines() {
-        let Ok(v) = serde_json::from_str::<Value>(line) else {
-            continue;
-        };
+        let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
         if v.get("isSidechain").and_then(Value::as_bool) == Some(true) {
             continue;
         }
         if chat.session_id.is_none() {
-            chat.session_id = v
-                .get("sessionId")
-                .and_then(Value::as_str)
-                .map(str::to_string);
+            chat.session_id = v.get("sessionId").and_then(Value::as_str).map(str::to_string);
         }
         match v.get("type").and_then(Value::as_str) {
             Some("user") => {
@@ -155,21 +154,17 @@ pub fn load_conversation(text: &str, cwd: &str) -> Conversation {
                     .get("message")
                     .and_then(|m| m.get("content"))
                     .and_then(Value::as_array)
-                    .is_some_and(|b| {
-                        b.iter()
-                            .any(|b| b.get("type").and_then(Value::as_str) == Some("tool_result"))
-                    });
+                    .is_some_and(|b| b.iter().any(|b| b.get("type").and_then(Value::as_str) == Some("tool_result")));
                 if is_result {
-                    chat.apply(stream::parse_value(&v));
+                    chat.apply_all(mapper.map(stream::parse_value(&v)));
                 } else if v.get("isMeta").and_then(Value::as_bool) != Some(true)
                     && let Some(text) = user_text(&v)
                 {
-                    chat.items.push(Item::User(text));
-                    chat.turn_agents_from = chat.agents.len();
+                    chat.apply(Event::UserText(text));
                 }
             }
             Some("assistant") => {
-                chat.apply(stream::parse_value(&v));
+                chat.apply_all(mapper.map(stream::parse_value(&v)));
             }
             _ => {}
         }
@@ -184,18 +179,12 @@ pub fn load_conversation(text: &str, cwd: &str) -> Conversation {
 /// under the Agent tool call `tool_use_id` (from the agent's `.meta.json`).
 pub fn attach_subagent(chat: &mut Conversation, tool_use_id: &str, text: &str) {
     chat.replaying = true;
+    let mut mapper = Mapper::new(chat.cwd.clone());
     for line in text.lines() {
-        let Ok(v) = serde_json::from_str::<Value>(line) else {
-            continue;
-        };
-        let event = match v.get("type").and_then(Value::as_str) {
+        let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
+        let raw = match v.get("type").and_then(Value::as_str) {
             Some("assistant") => match stream::parse_value(&v) {
-                stream::Event::Assistant {
-                    message_id,
-                    model,
-                    blocks,
-                    ..
-                } => stream::Event::Assistant {
+                stream::Event::Assistant { message_id, model, blocks, .. } => stream::Event::Assistant {
                     message_id,
                     model,
                     blocks,
@@ -204,24 +193,20 @@ pub fn attach_subagent(chat: &mut Conversation, tool_use_id: &str, text: &str) {
                 _ => continue,
             },
             Some("user") => match stream::parse_value(&v) {
-                stream::Event::ToolResult {
-                    tool_use_id: id,
-                    content,
-                    is_error,
-                    structured,
-                    ..
-                } => stream::Event::ToolResult {
-                    tool_use_id: id,
-                    content,
-                    is_error,
-                    structured,
-                    parent_tool_use_id: Some(tool_use_id.to_string()),
-                },
+                stream::Event::ToolResult { tool_use_id: id, content, is_error, structured, .. } => {
+                    stream::Event::ToolResult {
+                        tool_use_id: id,
+                        content,
+                        is_error,
+                        structured,
+                        parent_tool_use_id: Some(tool_use_id.to_string()),
+                    }
+                }
                 _ => continue,
             },
             _ => continue,
         };
-        chat.apply(event);
+        chat.apply_all(mapper.map(raw));
     }
     chat.replaying = false;
 }
@@ -307,6 +292,36 @@ pub fn claude_processes_in(folder: &Path, own_pid: u32) -> Vec<ClaudeProcess> {
         .collect()
 }
 
+/// Every `claude` process on this machine except ours, with its folder and start time.
+pub fn claude_processes(own_pid: u32) -> Vec<crate::agent::Running> {
+    let Ok(out) = std::process::Command::new("ps").args(["-axo", "pid=,ppid=,command="]).output() else {
+        return Vec::new();
+    };
+    parse_ps(&String::from_utf8_lossy(&out.stdout))
+        .into_iter()
+        .filter(|p| p.ppid != own_pid && p.pid != own_pid)
+        .filter_map(|p| {
+            Some(crate::agent::Running {
+                pid: p.pid,
+                cwd: process_cwd(p.pid)?,
+                session: p.session_arg().map(str::to_string),
+                since: process_start(p.pid),
+            })
+        })
+        .collect()
+}
+
+/// A process's start time as `HH:MM` (from `ps -o lstart=`: `Sun Oct 11 22:40:00 2026`).
+pub fn process_start(pid: u32) -> Option<String> {
+    let out = std::process::Command::new("ps").args(["-p", &pid.to_string(), "-o", "lstart="]).output().ok()?;
+    lstart_time(&String::from_utf8_lossy(&out.stdout))
+}
+
+fn lstart_time(lstart: &str) -> Option<String> {
+    let time = lstart.split_whitespace().find(|w| w.len() == 8 && w.as_bytes()[2] == b':')?;
+    Some(time[..5].to_string())
+}
+
 /// The working folder of a process (`lsof` on macOS, `/proc` on Linux).
 pub fn process_cwd(pid: u32) -> Option<PathBuf> {
     if cfg!(target_os = "linux") {
@@ -319,14 +334,6 @@ pub fn process_cwd(pid: u32) -> Option<PathBuf> {
     String::from_utf8_lossy(&out.stdout)
         .lines()
         .find_map(|l| l.strip_prefix('n').map(PathBuf::from))
-}
-
-/// Whether a process still exists (asks `ps`; sends no signal).
-pub fn process_alive(pid: u32) -> bool {
-    std::process::Command::new("ps")
-        .args(["-p", &pid.to_string(), "-o", "pid="])
-        .output()
-        .is_ok_and(|o| o.status.success() && !o.stdout.is_empty())
 }
 
 /// Which session each process is writing: the one on its command line, else the most
@@ -364,6 +371,7 @@ pub fn match_processes(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::conversation::Item;
 
     fn fixture(name: &str) -> String {
         std::fs::read_to_string(
@@ -372,6 +380,12 @@ mod tests {
                 .join(name),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn reads_the_start_time() {
+        assert_eq!(lstart_time("Sun Oct 11 22:40:07 2026\n").as_deref(), Some("22:40"));
+        assert_eq!(lstart_time(""), None);
     }
 
     #[test]

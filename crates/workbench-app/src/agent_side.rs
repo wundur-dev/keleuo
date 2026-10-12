@@ -1,6 +1,7 @@
-//! The sidebar's Claude panel for one session: the conversation's subagents (live, as a small
-//! tree) and the folder's earlier Claude Code sessions, which resume as new session tabs. A
-//! session running in another terminal offers "Fork here" or "Take over when it stops".
+//! The sidebar's agent panel for one session: the conversation's subagents (live, as a small
+//! tree) and the folder's earlier sessions of the same backend, which resume as new sessions.
+//! A session running in another terminal offers "Fork here" or "Take over when it stops".
+//! Each part shows only when the backend has it.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -10,20 +11,20 @@ use gpui_kit::component::{ActiveTheme, Icon, IconName, Sizable};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 use workbench_core::conversation::{AgentStatus, Conversation};
-use workbench_core::history::{self, SessionInfo};
-use workbench_core::host::Host;
+use workbench_core::agent::SessionInfo;
+use workbench_core::host::{self, Host};
 
-use crate::claude_panel::ClaudePanel;
-use crate::claude_session::ClaudeSession;
+use crate::chat_panel::ChatPanel;
+use crate::agent_session::AgentSession;
 
-/// An earlier session of the folder, and the `claude` process writing it elsewhere, if any.
+/// An earlier session of the folder, and the agent process writing it elsewhere, if any.
 #[derive(Clone, Debug)]
 pub struct Earlier {
     pub info: SessionInfo,
     pub running_pid: Option<u32>,
 }
 
-pub enum ClaudeSideEvent {
+pub enum AgentSideEvent {
     /// Open this earlier conversation as a new session tab.
     Resume {
         chat: Box<Conversation>,
@@ -32,11 +33,11 @@ pub enum ClaudeSideEvent {
     },
 }
 
-pub struct ClaudeSide {
+pub struct AgentSide {
     host: Arc<dyn Host>,
     root: PathBuf,
-    session: Entity<ClaudeSession>,
-    panel: Entity<ClaudePanel>,
+    session: Entity<AgentSession>,
+    panel: Entity<ChatPanel>,
     pub earlier: Vec<Earlier>,
     /// The earlier session whose "running elsewhere" choices are shown.
     choosing: Option<String>,
@@ -46,14 +47,14 @@ pub struct ClaudeSide {
     _obs: Subscription,
 }
 
-impl EventEmitter<ClaudeSideEvent> for ClaudeSide {}
+impl EventEmitter<AgentSideEvent> for AgentSide {}
 
-impl ClaudeSide {
+impl AgentSide {
     pub fn new(
         host: Arc<dyn Host>,
         root: PathBuf,
-        session: Entity<ClaudeSession>,
-        panel: Entity<ClaudePanel>,
+        session: Entity<AgentSession>,
+        panel: Entity<ChatPanel>,
         cx: &mut Context<Self>,
     ) -> Self {
         let obs = cx.observe(&session, |_, _, cx| cx.notify());
@@ -73,7 +74,7 @@ impl ClaudeSide {
         this
     }
 
-    /// Re-list earlier sessions and `claude` processes in the folder, now and every 10 s.
+    /// Re-list earlier sessions and agent processes in the folder, now and every 10 s.
     fn start_scanning(&mut self, cx: &mut Context<Self>) {
         self._scan = Some(
             cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
@@ -93,20 +94,16 @@ impl ClaudeSide {
         let host = self.host.clone();
         let root = self.root.clone();
         let own = self.session.read(cx).chat.session_id.clone();
+        let backend = self.session.read(cx).backend.clone();
+        if !backend.capabilities().earlier_sessions {
+            return;
+        }
         cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
             let found = cx
                 .background_spawn(async move {
-                    let Some(home) = workbench_core::skills::claude_home(host.as_ref()) else {
-                        return Vec::new();
-                    };
-                    let sessions = history::list_sessions(host.as_ref(), &home, &root, 20);
-                    // Processes can only be seen on this machine.
-                    let procs = if host.is_remote() {
-                        Vec::new()
-                    } else {
-                        history::claude_processes_in(&root, std::process::id())
-                    };
-                    let matched = history::match_processes(&procs, &sessions);
+                    let sessions = backend.earlier_sessions(host.as_ref(), &root, 20);
+                    let matched =
+                        backend.running_elsewhere(host.as_ref(), &root, &sessions, std::process::id());
                     sessions
                         .into_iter()
                         .map(|info| Earlier {
@@ -152,14 +149,14 @@ impl ClaudeSide {
         self.choosing = None;
         let host = self.host.clone();
         let root = self.root.clone();
-        let path = e.info.path.clone();
+        let backend = self.session.read(cx).backend.clone();
+        let id = e.info.id.clone();
         cx.spawn_in(window, async move |this, cx| {
-            let cwd = root.to_string_lossy().to_string();
             let chat = cx
-                .background_spawn(async move { history::load_session(host.as_ref(), &path, &cwd) })
+                .background_spawn(async move { backend.load_session(host.as_ref(), &root, &id) })
                 .await;
             let _ = this.update(cx, |_, cx| match chat {
-                Ok(chat) => cx.emit(ClaudeSideEvent::Resume {
+                Ok(chat) => cx.emit(AgentSideEvent::Resume {
                     chat: Box::new(chat),
                     fork,
                     wait_for,
@@ -261,6 +258,7 @@ impl ClaudeSide {
             theme.warning,
         );
         let open = self.show_earlier;
+        let can_fork = self.session.read(cx).backend.capabilities().fork;
         let mut out = vec![
             div()
                 .id("earlier-head")
@@ -358,7 +356,7 @@ impl ClaudeSide {
                             div()
                                 .flex()
                                 .gap_1()
-                                .child(
+                                .when(can_fork, |d| d.child(
                                     Button::new(("fork", i))
                                         .xsmall()
                                         .primary()
@@ -366,7 +364,7 @@ impl ClaudeSide {
                                         .on_click(cx.listener(move |s, _, window, cx| {
                                             s.resume(&id1, true, None, window, cx)
                                         })),
-                                )
+                                ))
                                 .child(
                                     Button::new(("takeover", i))
                                         .xsmall()
@@ -386,7 +384,7 @@ impl ClaudeSide {
 
 /// Poll (with `ps`, no signals) until the other process exits, then let the session run.
 pub fn watch_takeover(
-    session: Entity<ClaudeSession>,
+    session: Entity<AgentSession>,
     host: Arc<dyn Host>,
     root: PathBuf,
     pid: u32,
@@ -399,7 +397,7 @@ pub fn watch_takeover(
                 .timer(std::time::Duration::from_secs(2))
                 .await;
             let alive = cx
-                .background_spawn(async move { history::process_alive(pid) })
+                .background_spawn(async move { host::process_alive(pid) })
                 .await;
             if alive {
                 if session.upgrade().is_none() {
@@ -408,18 +406,14 @@ pub fn watch_takeover(
                 continue;
             }
             // Reload the history the other terminal added, then continue here.
-            let id = session
-                .update(cx, |s, _| s.chat.session_id.clone())
-                .ok()
-                .flatten();
+            let Ok((id, backend)) =
+                session.update(cx, |s, _| (s.chat.session_id.clone(), s.backend.clone()))
+            else {
+                break;
+            };
             let (h, r) = (host.clone(), root.clone());
             let reloaded = cx
-                .background_spawn(async move {
-                    let home = workbench_core::skills::claude_home(h.as_ref())?;
-                    let id = id?;
-                    let path = history::project_sessions_dir(&home, &r).join(format!("{id}.jsonl"));
-                    history::load_session(h.as_ref(), &path, &r.to_string_lossy()).ok()
-                })
+                .background_spawn(async move { backend.load_session(h.as_ref(), &r, &id?).ok() })
                 .await;
             let _ = session.update(cx, |s, cx| {
                 if let Some(chat) = reloaded {
@@ -443,27 +437,32 @@ fn short_time(iso: &str) -> String {
     format!("{date} {time}")
 }
 
-impl Focusable for ClaudeSide {
+impl Focusable for AgentSide {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus.clone()
     }
 }
 
-impl Render for ClaudeSide {
+impl Render for AgentSide {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let bg = cx.theme().sidebar;
         let mut col = div()
-            .id("claude-side")
+            .id("agent-side")
             .flex()
             .flex_col()
             .size_full()
             .bg(bg)
             .overflow_y_scroll();
-        for row in self.render_agents(cx) {
-            col = col.child(row);
+        let caps = self.session.read(cx).backend.capabilities();
+        if caps.subagents {
+            for row in self.render_agents(cx) {
+                col = col.child(row);
+            }
         }
-        for row in self.render_earlier(cx) {
-            col = col.child(row);
+        if caps.earlier_sessions {
+            for row in self.render_earlier(cx) {
+                col = col.child(row);
+            }
         }
         col
     }

@@ -62,6 +62,37 @@ pub struct Catalog {
 }
 
 impl Catalog {
+    /// The neutral groups the window shows.
+    pub fn into_neutral(self) -> crate::skills::Catalog {
+        let conv = |e: Entry| crate::skills::Entry {
+            kind: match e.kind {
+                Kind::Skill => crate::skills::Kind::Skill,
+                Kind::Agent => crate::skills::Kind::Agent,
+                Kind::Command => crate::skills::Kind::Command,
+                Kind::ClaudeMd => crate::skills::Kind::Instructions,
+            },
+            read_only: e.read_only(),
+            name: e.name,
+            description: e.description,
+            path: e.path,
+        };
+        let group = |key: &str, title: String, entries: Vec<Entry>, folded: bool| crate::skills::Group {
+            key: key.to_string(),
+            title,
+            entries: entries.into_iter().map(conv).collect(),
+            folded,
+        };
+        let mut groups = vec![group("project", "Project".into(), self.project, false)];
+        if !self.project_docs.is_empty() {
+            groups.push(group("docs", "CLAUDE.md, agents, commands".into(), self.project_docs, false));
+        }
+        groups.push(group("user", "User".into(), self.user, false));
+        for (name, entries) in self.plugins {
+            groups.push(group(&format!("plugin:{name}"), format!("Plugin: {name}"), entries, true));
+        }
+        crate::skills::Catalog { groups }
+    }
+
     pub fn all(&self) -> impl Iterator<Item = &Entry> {
         self.project
             .iter()

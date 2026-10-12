@@ -15,7 +15,6 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::mpsc::Sender;
 
-use crate::claude::Options;
 
 /// A program to start: locally, or `ssh` for a remote host.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -24,12 +23,25 @@ pub struct CommandSpec {
     pub args: Vec<String>,
     /// Working directory on this machine (`None` for remote commands, which `cd` themselves).
     pub cwd: Option<PathBuf>,
+    /// Extra environment variables.
+    pub env: Vec<(String, String)>,
+}
+
+/// A program an agent backend wants run on the host: by name (found on the host's PATH and in
+/// the usual install places) or by path, in a folder, with arguments and environment.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ProgramSpec {
+    pub program: String,
+    pub args: Vec<String>,
+    pub env: Vec<(String, String)>,
+    pub cwd: PathBuf,
 }
 
 impl CommandSpec {
     pub fn to_command(&self) -> Command {
         let mut cmd = Command::new(&self.program);
         cmd.args(&self.args);
+        cmd.envs(self.env.iter().map(|(k, v)| (k, v)));
         if let Some(cwd) = &self.cwd {
             cmd.current_dir(cwd);
         }
@@ -80,8 +92,8 @@ pub trait Host: Send + Sync {
     fn watch(&self, root: &Path, changes: Sender<Change>) -> Option<Watch>;
     /// The shell for the terminal, started in `cwd`.
     fn shell_command(&self, cwd: &Path) -> CommandSpec;
-    /// `claude` with structured streaming, started in `options.cwd`.
-    fn claude_command(&self, options: &Options) -> CommandSpec;
+    /// An agent program (any backend's), started in `spec.cwd`.
+    fn program_command(&self, spec: &ProgramSpec) -> CommandSpec;
     /// The current git branch of the repository at `root`, if any.
     fn git_branch(&self, root: &Path) -> Option<String> {
         let head = self.read_to_string(&root.join(".git/HEAD")).ok()?;
@@ -215,19 +227,17 @@ impl Host for LocalHost {
                 vec!["-l".into()]
             },
             cwd: Some(cwd.to_path_buf()),
+            env: Vec::new(),
         }
     }
 
-    fn claude_command(&self, options: &Options) -> CommandSpec {
-        CommandSpec {
-            program: options
-                .program
-                .clone()
-                .or_else(crate::claude::find_claude)
-                .unwrap_or_else(|| "claude".into()),
-            args: options.args(),
-            cwd: Some(options.cwd.clone()),
-        }
+    fn program_command(&self, spec: &ProgramSpec) -> CommandSpec {
+        let program = if spec.program.contains('/') {
+            PathBuf::from(&spec.program)
+        } else {
+            find_program(&spec.program).unwrap_or_else(|| spec.program.clone().into())
+        };
+        CommandSpec { program, args: spec.args.clone(), cwd: Some(spec.cwd.clone()), env: spec.env.clone() }
     }
 }
 
@@ -275,6 +285,7 @@ impl SshHost {
             program: "ssh".into(),
             args,
             cwd: None,
+            env: Vec::new(),
         }
     }
 
@@ -385,15 +396,41 @@ impl Host for SshHost {
         self.ssh_spec(&format!("cd {} && exec \"$SHELL\" -l", q(cwd)), true)
     }
 
-    fn claude_command(&self, options: &Options) -> CommandSpec {
-        let args: Vec<String> = options.args().iter().map(|a| shell_quote(a)).collect();
-        // A login shell, so the remote PATH finds claude.
-        let inner = format!("cd {} && exec claude {}", q(&options.cwd), args.join(" "));
+    fn program_command(&self, spec: &ProgramSpec) -> CommandSpec {
+        let args: Vec<String> = spec.args.iter().map(|a| shell_quote(a)).collect();
+        let env: Vec<String> = spec.env.iter().map(|(k, v)| shell_quote(&format!("{k}={v}"))).collect();
+        let env = if env.is_empty() { String::new() } else { format!("env {} ", env.join(" ")) };
+        // A login shell, so the remote PATH finds the program.
+        let inner = format!("cd {} && exec {env}{} {}", q(&spec.cwd), shell_quote(&spec.program), args.join(" "));
         self.ssh_spec(
             &format!("exec \"$SHELL\" -lc {}", shell_quote(&inner)),
             false,
         )
     }
+}
+
+/// Find a program on PATH or where installers put it (a window started from the Finder does
+/// not get the shell's PATH).
+pub fn find_program(name: &str) -> Option<PathBuf> {
+    let exe = if cfg!(windows) { format!("{name}.exe") } else { name.to_string() };
+    let mut dirs: Vec<PathBuf> =
+        std::env::var_os("PATH").map(|p| std::env::split_paths(&p).collect()).unwrap_or_default();
+    if let Some(home) = dirs::home_dir() {
+        dirs.push(home.join(".local/bin"));
+        dirs.push(home.join(".npm-global/bin"));
+        dirs.push(home.join(format!(".{name}/local")));
+    }
+    dirs.push("/opt/homebrew/bin".into());
+    dirs.push("/usr/local/bin".into());
+    dirs.into_iter().map(|d| d.join(&exe)).find(|p| p.is_file())
+}
+
+/// Whether a process on this machine still exists (asks `ps`; sends no signal).
+pub fn process_alive(pid: u32) -> bool {
+    std::process::Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "pid="])
+        .output()
+        .is_ok_and(|o| o.status.success() && !o.stdout.is_empty())
 }
 
 /// Turn a list of file paths into files plus the folders that hold them, sorted.
@@ -433,44 +470,39 @@ mod tests {
     }
 
     #[test]
-    fn local_claude_and_shell_commands() {
+    fn local_program_and_shell_commands() {
         let host = LocalHost;
-        let opts = Options {
-            program: Some("/bin/claude".into()),
+        let spec = ProgramSpec {
+            program: "/bin/agent".into(),
+            args: vec!["-p".into()],
+            env: vec![("A".into(), "1".into())],
             cwd: "/p".into(),
-            ..Default::default()
         };
-        let spec = host.claude_command(&opts);
-        assert_eq!(spec.program, PathBuf::from("/bin/claude"));
-        assert_eq!(spec.cwd.as_deref(), Some(Path::new("/p")));
-        assert_eq!(spec.args, opts.args());
-        assert_eq!(
-            host.shell_command(Path::new("/p")).cwd.as_deref(),
-            Some(Path::new("/p"))
-        );
+        let cmd = host.program_command(&spec);
+        assert_eq!(cmd.program, PathBuf::from("/bin/agent"));
+        assert_eq!(cmd.cwd.as_deref(), Some(Path::new("/p")));
+        assert_eq!(cmd.args, ["-p"]);
+        assert_eq!(cmd.env, [("A".to_string(), "1".to_string())]);
+        assert_eq!(host.shell_command(Path::new("/p")).cwd.as_deref(), Some(Path::new("/p")));
     }
 
     #[test]
     fn ssh_commands_quote_paths() {
-        let host = SshHost {
-            destination: "dev".into(),
-            home: None,
-        };
+        let host = SshHost { destination: "dev".into(), home: None };
         let shell = host.shell_command(Path::new("/srv/my app"));
         assert_eq!(shell.program, PathBuf::from("ssh"));
         assert!(shell.args.contains(&"-t".to_string()));
-        assert_eq!(
-            shell.args.last().unwrap(),
-            "cd '/srv/my app' && exec \"$SHELL\" -l"
-        );
-        let claude = host.claude_command(&Options {
+        assert_eq!(shell.args.last().unwrap(), "cd '/srv/my app' && exec \"$SHELL\" -l");
+        let agent = host.program_command(&ProgramSpec {
+            program: "agent".into(),
+            args: vec!["--mode".into(), "it's".into()],
+            env: vec![("K".into(), "v".into())],
             cwd: "/srv/it's".into(),
-            ..Default::default()
         });
-        assert!(claude.args.contains(&"-T".to_string()));
-        let script = claude.args.last().unwrap();
+        assert!(agent.args.contains(&"-T".to_string()));
+        let script = agent.args.last().unwrap();
         assert!(script.starts_with("exec \"$SHELL\" -lc '"));
-        assert!(script.contains("stream-json"));
+        assert!(script.contains("agent"));
         assert_eq!(shell_quote("it's"), r"'it'\''s'");
     }
 

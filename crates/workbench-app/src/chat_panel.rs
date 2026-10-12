@@ -1,4 +1,4 @@
-//! The Claude panel: the chat rendered natively from the stream. Assistant text as markdown,
+//! The chat panel: the conversation rendered natively from the agent's events. Assistant text as markdown,
 //! tool calls as collapsible cards, file edits as diffs, permission prompts with Allow and
 //! Deny, and a one-line status in the header. Every file reference is a link.
 
@@ -12,15 +12,15 @@ use gpui_kit::component::{ActiveTheme, Icon, IconName, Sizable};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 use workbench_core::conversation::{
-    AgentStatus, Item, PermissionPrompt, SubAgent, ToolCall, is_agent_tool,
+    AgentStatus, Item, PermissionPrompt, SubAgent, ToolCall,
 };
 use workbench_core::diff::{FileDiff, LineKind};
 use workbench_core::links::{self, FileIndex};
-use workbench_core::summary::one_line;
+use workbench_core::conversation::one_line;
 
-use crate::claude_session::ClaudeSession;
+use crate::agent_session::AgentSession;
 
-pub enum ClaudePanelEvent {
+pub enum ChatPanelEvent {
     OpenFile(PathBuf, Option<u32>),
     NewSession,
     /// The session's tab was closed.
@@ -29,8 +29,8 @@ pub enum ClaudePanelEvent {
     Activated,
 }
 
-pub struct ClaudePanel {
-    pub session: Entity<ClaudeSession>,
+pub struct ChatPanel {
+    pub session: Entity<AgentSession>,
     /// The session's number (saved with the layout).
     pub number: usize,
     focus: FocusHandle,
@@ -51,20 +51,24 @@ pub struct ClaudePanel {
 /// Items rendered at first; "Show earlier" adds this many more.
 const PAGE: usize = 150;
 
-impl EventEmitter<ClaudePanelEvent> for ClaudePanel {}
+impl EventEmitter<ChatPanelEvent> for ChatPanel {}
 
 const MONO: &str = "Menlo";
 
-impl ClaudePanel {
+impl ChatPanel {
     pub fn new(
-        session: Entity<ClaudeSession>,
+        session: Entity<AgentSession>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let placeholder = format!(
+            "Message {} (Enter sends, Shift+Enter new line)",
+            session.read(cx).backend.name()
+        );
         let input = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .auto_grow(1, 10)
-                .placeholder("Message Claude (Enter sends, Shift+Enter new line)")
+                .placeholder(placeholder)
                 .submit_on_enter(true)
         });
         let s1 = cx.subscribe_in(
@@ -165,7 +169,7 @@ impl ClaudePanel {
     }
 
     fn open(&self, path: PathBuf, line: Option<u32>, cx: &mut Context<Self>) {
-        cx.emit(ClaudePanelEvent::OpenFile(path, line));
+        cx.emit(ChatPanelEvent::OpenFile(path, line));
     }
 
     fn markdown(&self, id: SharedString, text: &str, cx: &mut Context<Self>) -> AnyElement {
@@ -316,8 +320,8 @@ impl ClaudePanel {
     }
 
     fn render_tool(&self, ix: usize, tool: &ToolCall, cx: &mut Context<Self>) -> AnyElement {
-        if is_agent_tool(&tool.name)
-            && let Some(agent) = self.session.read(cx).chat.agent(&tool.id).cloned()
+        // A tool call that started a subagent shows as the subagent's card.
+        if let Some(agent) = self.session.read(cx).chat.agent(&tool.id).cloned()
         {
             return self.render_agent(&agent, true, cx);
         }
@@ -780,7 +784,7 @@ impl ClaudePanel {
             .clone()
             .or_else(|| session.model.clone())
             .unwrap_or_else(|| "default model".into());
-        let model = model.trim_start_matches("claude-").to_string();
+        let caps = session.backend.capabilities();
         let mode = session.permission_mode.clone();
         let busy = chat.busy;
         let mut status = vec![model];
@@ -796,7 +800,9 @@ impl ClaudePanel {
         if let Some((i, o)) = chat.last_turn_tokens {
             status.push(format!("{}k in / {} out", i / 1000, o));
         }
-        let accept = mode.as_deref() == Some("acceptEdits");
+        let accept_mode = caps.accept_edits_mode.clone();
+        let accept = mode.is_some() && mode == accept_mode;
+        let backend_name = session.backend.name();
         div()
             .h(px(22.))
             .flex_none()
@@ -816,7 +822,7 @@ impl ClaudePanel {
                     .truncate()
                     .child(status.join(" · ")),
             )
-            .child(
+            .when_some(accept_mode, |d, accept_mode| d.child(
                 div()
                     .id("perm-mode")
                     .px_1()
@@ -826,15 +832,11 @@ impl ClaudePanel {
                     .hover(|d| d.bg(hover))
                     .child(if accept { "accept edits" } else { "ask first" })
                     .on_click(cx.listener(move |p, _, _, cx| {
-                        let next = if accept {
-                            None
-                        } else {
-                            Some("acceptEdits".to_string())
-                        };
+                        let next = if accept { None } else { Some(accept_mode.clone()) };
                         p.session
                             .update(cx, |s, cx| s.set_permission_mode(next, cx));
                     })),
-            )
+            ))
             .when(busy, |d| {
                 d.child(
                     div()
@@ -863,23 +865,23 @@ impl ClaudePanel {
                     .gap_1()
                     .child(Icon::new(IconName::Plus).xsmall())
                     .child("New session")
-                    .tooltip(|w, cx| {
-                        gpui_kit::component::tooltip::Tooltip::new("New Claude session (Cmd+N)")
+                    .tooltip(move |w, cx| {
+                        gpui_kit::component::tooltip::Tooltip::new(format!("New {backend_name} session (Cmd+N)"))
                             .build(w, cx)
                     })
-                    .on_click(cx.listener(|_, _, _, cx| cx.emit(ClaudePanelEvent::NewSession))),
+                    .on_click(cx.listener(|_, _, _, cx| cx.emit(ChatPanelEvent::NewSession))),
             )
             .into_any_element()
     }
 }
 
-impl Focusable for ClaudePanel {
+impl Focusable for ChatPanel {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus.clone()
     }
 }
 
-impl Render for ClaudePanel {
+impl Render for ChatPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let started = std::time::Instant::now();
         let focused = self.contains_focus(window, cx);
@@ -893,13 +895,14 @@ impl Render for ClaudePanel {
             theme.border,
         );
         let items = self.session.read(cx).chat.items.clone();
+        let backend_name = self.session.read(cx).backend.name();
         let mut list = div().flex().flex_col().gap_2().px_2().py_2();
         if items.is_empty() {
             list = list.child(
                 div()
                     .text_xs()
                     .text_color(muted)
-                    .child("Claude Code runs in this folder. Ask for something; tool calls, diffs and permission prompts show here."),
+                    .child(format!("{backend_name} runs in this folder. Ask for something; tool calls, diffs and permission prompts show here.")),
             );
         }
         let hidden = items.len().saturating_sub(self.shown);
