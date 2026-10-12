@@ -104,6 +104,9 @@ pub struct AgentSession {
     pub dormant: bool,
     /// When the reply preview was last read off the terminal (at most ten times a second).
     preview_read: Option<std::time::Instant>,
+    /// Messages the interface reported submitted (its prompt hook), to tell a sent message
+    /// from one whose Enter was lost.
+    prompts_seen: u64,
     pub cwd: PathBuf,
     pub chat: Conversation,
     pub backend: Arc<dyn Backend>,
@@ -168,6 +171,7 @@ impl AgentSession {
             host,
             dormant: false,
             preview_read: None,
+            prompts_seen: 0,
             chat: Conversation::new(cwd.to_string_lossy().to_string()),
             cwd,
             permission_mode: keleuo_core::env_var("PERMISSION_MODE").ok().filter(|m| !m.is_empty()),
@@ -640,14 +644,27 @@ impl AgentSession {
             pty.write(first);
         }
         let rest: Vec<Vec<u8>> = pieces.collect();
-        if rest.is_empty() {
-            return;
-        }
-        cx.spawn(async move |_, cx: &mut AsyncApp| {
+        let seen = self.prompts_seen;
+        let (view, text) = (run.view.clone(), text.to_string());
+        cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
             for piece in rest {
                 // A separate read for each piece, so the paste ends before Enter arrives.
                 cx.background_executor().timer(std::time::Duration::from_millis(30)).await;
                 pty.write(piece);
+            }
+            // The interface may drop the Enter while it is still busy (starting on a long
+            // conversation, say): no word that the message went, and the message still in its
+            // input box, means press Enter again.
+            for _ in 0..SUBMIT_RETRIES {
+                cx.background_executor().timer(SUBMIT_CHECK).await;
+                let again = this.update(cx, |s, cx| {
+                    s.prompts_seen == seen
+                        && view.read(cx).recent_lines(80).is_some_and(|(lines, _)| s.backend.message_unsent(&lines, &text))
+                });
+                match again {
+                    Ok(true) => pty.write(b"\r".to_vec()),
+                    _ => break,
+                }
             }
         })
         .detach();
@@ -683,6 +700,7 @@ impl AgentSession {
                 self.set_ready(cx);
             }
             Hook::Prompt(text) => {
+                self.prompts_seen += 1;
                 let t = plain(&text);
                 // Empty: a prompt the interface made itself (a report, a task notice), which
                 // may not start a turn; the work it starts marks the session busy.
@@ -1009,6 +1027,11 @@ impl AgentSession {
         self.chat.process_ended();
     }
 }
+
+/// How long after sending a message its submission is checked, and how many times Enter is
+/// pressed again if it still sits unsent.
+const SUBMIT_CHECK: std::time::Duration = std::time::Duration::from_millis(1200);
+const SUBMIT_RETRIES: usize = 3;
 
 /// How often at most the reply preview is read off the terminal.
 const PREVIEW_EVERY: std::time::Duration = std::time::Duration::from_millis(100);

@@ -415,6 +415,11 @@ pub trait Backend: Send + Sync {
     fn reply_preview(&self, _lines: &[String], _columns: usize) -> Option<String> {
         None
     }
+    /// Whether a message typed into the agent's own interface still sits in its input box,
+    /// unsent (its Enter was lost), from the terminal's lines.
+    fn message_unsent(&self, _lines: &[String], _text: &str) -> bool {
+        false
+    }
     /// Apply fix `fix` of the known issue `kind` (see [`Issue`]) for `project`; what was done,
     /// in a sentence.
     fn apply_fix(&self, _host: &dyn Host, _project: &Path, _kind: &str, _fix: &str) -> std::io::Result<String> {

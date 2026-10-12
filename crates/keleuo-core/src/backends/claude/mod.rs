@@ -243,6 +243,10 @@ impl Backend for ClaudeBackend {
         screen::reply_in_progress(lines, columns)
     }
 
+    fn message_unsent(&self, lines: &[String], text: &str) -> bool {
+        screen::message_unsent(lines, text)
+    }
+
     fn apply_fix(&self, host: &dyn Host, project: &Path, kind: &str, fix: &str) -> std::io::Result<String> {
         if host.is_remote() {
             return Err(std::io::Error::other("fixes are applied on this machine only for now"));

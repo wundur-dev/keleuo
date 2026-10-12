@@ -71,6 +71,30 @@ pub fn reply_in_progress(lines: &[String], columns: usize) -> Option<String> {
     (!text.trim().is_empty()).then_some(text)
 }
 
+/// Whether `text`, typed as a message, still sits in the input box (its Enter was lost: the
+/// interface was still busy starting, say). A long paste shows as `[Pasted text #1 …]`.
+pub fn message_unsent(lines: &[String], text: &str) -> bool {
+    let rule = |l: &str| {
+        let t = l.trim();
+        t.chars().count() >= 20 && t.chars().all(|c| c == '─')
+    };
+    let Some(input) = (1..lines.len()).rev().find(|&i| lines[i].starts_with('❯') && rule(&lines[i - 1])) else {
+        return false;
+    };
+    let end = (input + 1..lines.len()).find(|&i| rule(&lines[i])).unwrap_or(lines.len());
+    let typed: String = lines[input..end].join(" ");
+    let typed = typed.trim_start_matches('❯');
+    if typed.contains("[Pasted text") {
+        return true;
+    }
+    let key: String = letters(text).chars().take(16).collect();
+    !key.is_empty() && letters(typed).contains(&key)
+}
+
+fn letters(text: &str) -> String {
+    text.chars().filter(|c| c.is_alphanumeric()).flat_map(char::to_lowercase).collect()
+}
+
 /// A line of Claude Code's own status while it works or when it is done: a spinner glyph at the
 /// start, then words with `…` or a `·`.
 fn is_status(line: &str) -> bool {
@@ -169,6 +193,19 @@ mod tests {
         assert_eq!(reply_in_progress(&screen("tool-running"), 120), None);
         assert_eq!(reply_in_progress(&screen("finished-long"), 120), None);
         assert_eq!(reply_in_progress(&screen("finished-after-tool"), 120), None);
+    }
+
+    #[test]
+    fn a_message_left_in_the_input_box_is_seen() {
+        let mut lines = screen("waiting");
+        let input = lines.iter().rposition(|l| l.starts_with('❯')).unwrap();
+        assert!(!message_unsent(&lines, "Hello there, please look at the tests"), "the box is empty");
+        lines[input] = "❯ Hello there, please look at the tests".into();
+        assert!(message_unsent(&lines, "Hello there, please look at the tests"));
+        lines[input] = "❯ [Pasted text #1 +40 lines]".into();
+        assert!(message_unsent(&lines, "anything long"));
+        // Sent: it shows above the box, which is empty again.
+        assert!(!message_unsent(&screen("streaming-paragraphs"), "Without using any tools, explain in about 40 lines"));
     }
 
     #[test]
