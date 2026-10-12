@@ -664,7 +664,14 @@ impl AgentSession {
                         && view.read(cx).recent_lines(80).is_some_and(|(lines, _)| s.backend.message_unsent(&lines, &text))
                 });
                 match again {
-                    Ok(true) => pty.write(b"\r".to_vec()),
+                    Ok(true) => {
+                        pty.write(b"\r".to_vec());
+                        // Said, so how often the interface loses an Enter (and when) shows.
+                        let _ = this.update(cx, |s, cx| {
+                            s.chat.push_notice("The message hadn't gone; pressed Enter again.");
+                            cx.notify();
+                        });
+                    }
                     _ => break,
                 }
             }
