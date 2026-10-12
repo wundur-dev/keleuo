@@ -1,12 +1,14 @@
 //! Workbench: Claude, code, skills and terminals for one project folder.
 //!
-//! `workbench [folder]` or `workbench --ssh host:/path`. With no folder, or one that does not
-//! exist, a folder picker with the recent folders opens instead.
+//! `workbench [folder]` or `workbench --ssh host:/path`: the directory browser opens at that
+//! folder (the current one when none is given), listing each folder's agent sessions.
+//! `--new` starts a session there directly. When a window is already open the request goes to
+//! it (see `instance`) instead of opening a second one.
 
 extern crate gpui_kit as gpui;
 
 use std::cell::RefCell;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
@@ -17,6 +19,7 @@ use workbench_core::host::{Host, LocalHost, SshHost};
 use workbench_core::settings::Settings;
 
 mod actions;
+mod browser;
 mod backends;
 mod chat_panel;
 mod agent_session;
@@ -28,7 +31,7 @@ mod file_tree;
 mod palette;
 mod panels;
 mod perf;
-mod picker;
+mod instance;
 mod pty;
 mod sheet_tabs;
 mod shell;
@@ -46,34 +49,73 @@ pub struct AppSettings(pub Rc<RefCell<Settings>>);
 
 impl Global for AppSettings {}
 
-/// What to show first.
-enum Start {
-    Open(Arc<dyn Host>, PathBuf),
-    /// The folder picker, with a note when a given path was not found.
-    Pick(Option<String>),
+/// The command line as a request: which folder, on which machine, browse or start.
+fn parse_args() -> anyhow::Result<(instance::Request, Option<String>)> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let new = args.iter().any(|a| a == "--new");
+    if let Some(pos) = args.iter().position(|a| a == "--ssh") {
+        let target = args.get(pos + 1).ok_or_else(|| anyhow::anyhow!("--ssh needs host:/path"))?;
+        let (dest, path) = target.split_once(':').ok_or_else(|| anyhow::anyhow!("--ssh needs host:/path"))?;
+        return Ok((instance::Request { ssh: dest.into(), path: PathBuf::from(path), new }, None));
+    }
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
+    let Some(arg) = args.iter().find(|a| !a.starts_with("--")) else {
+        // Like `code .`: the folder the command was run from. Started from the Finder (the
+        // root folder), the browser opens at the last folder instead.
+        let path = if cwd == Path::new("/") { PathBuf::new() } else { cwd };
+        return Ok((instance::Request { ssh: String::new(), path, new }, None));
+    };
+    match cwd.join(arg).canonicalize() {
+        Ok(p) if p.is_dir() => Ok((instance::Request { ssh: String::new(), path: p, new }, None)),
+        _ => Ok((
+            instance::Request { ssh: String::new(), path: PathBuf::new(), new: false },
+            Some(format!("{arg} is not a folder that exists.")),
+        )),
+    }
 }
 
-fn parse_args() -> anyhow::Result<Start> {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    if let Some(pos) = args.iter().position(|a| a == "--ssh") {
-        let target = args
-            .get(pos + 1)
-            .ok_or_else(|| anyhow::anyhow!("--ssh needs host:/path"))?;
-        let (dest, path) = target
-            .split_once(':')
-            .ok_or_else(|| anyhow::anyhow!("--ssh needs host:/path"))?;
-        let host = SshHost::connect(dest)?;
-        return Ok(Start::Open(Arc::new(host), PathBuf::from(path)));
+/// Carry out a request in a window: open one, or use the open one.
+fn carry_out(request: instance::Request, note: Option<String>, cx: &mut App) {
+    let instance::Request { ssh, path, new } = request;
+    if ssh.is_empty() {
+        let path = if path.as_os_str().is_empty() { shell::default_folder(cx) } else { path };
+        show(Arc::new(LocalHost), path, new, note, cx);
+        return;
     }
-    let Some(arg) = args.first() else {
-        return Ok(Start::Pick(None));
-    };
-    match PathBuf::from(arg).canonicalize() {
-        Ok(p) if p.is_dir() => Ok(Start::Open(Arc::new(LocalHost), p)),
-        _ => Ok(Start::Pick(Some(format!(
-            "{arg} is not a folder that exists."
-        )))),
+    // Connecting is a network round trip: off the UI thread.
+    cx.spawn(async move |cx: &mut AsyncApp| {
+        let dest = ssh.clone();
+        let host = cx.background_spawn(async move { SshHost::connect(&dest) }).await;
+        cx.update(|cx| match host {
+            Ok(host) => show(Arc::new(host), path, new, note, cx),
+            Err(e) => eprintln!("workbench: could not connect to {ssh}: {e}"),
+        });
+    })
+    .detach();
+}
+
+fn show(host: Arc<dyn Host>, path: PathBuf, new: bool, note: Option<String>, cx: &mut App) {
+    let existing = cx.global::<control::ControlTargets>().workspace.clone();
+    if let Some((handle, shell)) = existing
+        && shell.upgrade().is_some()
+    {
+        let _ = handle.update(cx, |_, window, cx| {
+            let _ = shell.update(cx, |s, cx| {
+                if new {
+                    let backend = backends::backend(None, cx);
+                    s.new_session_in(host, path, backend, window, cx);
+                } else {
+                    s.open_browser(host, path, note, window, cx);
+                }
+            });
+            if !background() {
+                window.activate_window();
+            }
+        });
+        return;
     }
+    let start = if new { shell::Start::Session(host, path) } else { shell::Start::Browse(host, path, note) };
+    open_window(start, cx);
 }
 
 /// Run in the background (tests): windows open without taking keyboard focus and the app
@@ -97,34 +139,11 @@ fn window_options(title: String, w: f32, h: f32, cx: &App) -> WindowOptions {
     }
 }
 
-pub fn open_workspace(host: Arc<dyn Host>, root: PathBuf, cx: &mut App) {
-    let title = format!(
-        "{} - Workbench",
-        root.file_name()
-            .map(|n| n.to_string_lossy())
-            .unwrap_or_default()
-    );
-    let options = window_options(title, 1500., 940., cx);
-    match gpui_kit::open_window(options, cx, |window, cx| {
-        cx.new(|cx| shell::Shell::new(host, root, window, cx))
-    }) {
-        Ok((handle, ws)) => {
-            let targets = cx.global_mut::<control::ControlTargets>();
-            targets.workspace = Some((handle, ws.downgrade()));
-            targets.picker = None;
-        }
-        Err(e) => eprintln!("workbench: could not open the window: {e}"),
-    }
-}
-
-fn open_picker(message: Option<String>, cx: &mut App) {
-    let recent = cx.global::<AppSettings>().0.borrow().existing_recent();
-    let options = window_options("Workbench".into(), 560., 520., cx);
-    match gpui_kit::open_window(options, cx, |_, cx| {
-        cx.new(|_| picker::Picker { message, recent })
-    }) {
-        Ok((handle, p)) => {
-            cx.global_mut::<control::ControlTargets>().picker = Some((handle, p.downgrade()))
+fn open_window(start: shell::Start, cx: &mut App) {
+    let options = window_options("Workbench".into(), 1500., 940., cx);
+    match gpui_kit::open_window(options, cx, |window, cx| cx.new(|cx| shell::Shell::new(start, window, cx))) {
+        Ok((handle, shell)) => {
+            cx.global_mut::<control::ControlTargets>().workspace = Some((handle, shell.downgrade()));
         }
         Err(e) => eprintln!("workbench: could not open the window: {e}"),
     }
@@ -132,13 +151,17 @@ fn open_picker(message: Option<String>, cx: &mut App) {
 
 fn main() {
     START.get_or_init(Instant::now);
-    let start = match parse_args() {
+    let (request, note) = match parse_args() {
         Ok(v) => v,
         Err(e) => {
             eprintln!("workbench: {e}");
             std::process::exit(2);
         }
     };
+    // A window is already open: it takes the request.
+    if note.is_none() && instance::hand_over(&request) {
+        return;
+    }
     gpui_kit::application()
         .with_assets(gpui_kit::assets::Assets)
         .run(move |cx: &mut App| {
@@ -158,32 +181,25 @@ fn main() {
             bind_keys(cx);
             cx.set_menus(menus());
             cx.on_action(|_: &Quit, cx| cx.quit());
-            cx.on_action(|_: &OpenFolder, cx| {
-                let rx = cx.prompt_for_paths(PathPromptOptions {
-                    files: false,
-                    directories: true,
-                    multiple: false,
-                    prompt: Some("Open".into()),
-                });
-                cx.spawn(async move |cx: &mut AsyncApp| {
-                    if let Ok(Ok(Some(paths))) = rx.await
-                        && let Some(path) = paths.into_iter().next()
-                    {
-                        cx.update(|cx| open_workspace(Arc::new(LocalHost), path, cx));
-                    }
-                })
-                .detach();
-            });
             cx.on_window_closed(|cx, _| {
                 if cx.windows().is_empty() {
+                    instance::stop_listening();
                     cx.quit();
                 }
             })
             .detach();
-            match start {
-                Start::Open(host, root) => open_workspace(host, root, cx),
-                Start::Pick(message) => open_picker(message, cx),
-            }
+            // Later `workbench` commands come here instead of opening another app.
+            let (tx, rx) = async_channel::unbounded::<instance::Request>();
+            instance::listen(move |r| {
+                let _ = tx.send_blocking(r);
+            });
+            cx.spawn(async move |cx: &mut AsyncApp| {
+                while let Ok(r) = rx.recv().await {
+                    cx.update(|cx| carry_out(r, None, cx));
+                }
+            })
+            .detach();
+            carry_out(request, note, cx);
             if !background() {
                 cx.activate(true);
             }

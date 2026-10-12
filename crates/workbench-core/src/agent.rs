@@ -8,6 +8,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde_json::Value;
 
@@ -112,6 +113,25 @@ pub struct Capabilities {
     pub accept_edits_mode: Option<String>,
     /// Models it can be asked to use (empty: its default only).
     pub models: Vec<String>,
+    /// Its own terminal interface can run a session ([`Backend::terminal_program`]) while the
+    /// window follows the session's file ([`Backend::follow_session`]).
+    pub terminal_view: bool,
+}
+
+/// A session file being followed; dropping it stops the follower.
+pub struct Follow(pub Arc<AtomicBool>);
+
+impl Follow {
+    pub fn new() -> (Self, Arc<AtomicBool>) {
+        let stop = Arc::new(AtomicBool::new(false));
+        (Self(stop.clone()), stop)
+    }
+}
+
+impl Drop for Follow {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
 }
 
 /// An earlier session of a folder.
@@ -169,6 +189,21 @@ pub trait Backend: Send + Sync {
     /// A session's history as a chat.
     fn load_session(&self, _host: &dyn Host, _project: &Path, _id: &str) -> std::io::Result<Conversation> {
         Err(std::io::Error::other("this agent cannot resume sessions"))
+    }
+    /// The agent's own terminal interface for session `id` (`new`: a session not started yet,
+    /// to be created under that id). Run in a pseudo-terminal while the window follows the file.
+    fn terminal_program(&self, _options: &StartOptions, _id: &str, _new: bool) -> Option<crate::host::ProgramSpec> {
+        None
+    }
+    /// Follow session `id` of `project` from now on, off the UI thread: what is added to it
+    /// arrives through `sink` as events, until the returned handle is dropped.
+    fn follow_session(&self, _host: Arc<dyn Host>, _project: &Path, _id: &str, _sink: Sink) -> Option<Follow> {
+        None
+    }
+    /// What to type into the terminal interface to leave it cleanly, in pieces sent a moment
+    /// apart.
+    fn terminal_exit_input(&self) -> Vec<String> {
+        Vec::new()
     }
     /// Every agent process of this kind on this machine except this window's own (children of
     /// `own_pid`). Read-only: nothing is signalled. Empty for a remote host.

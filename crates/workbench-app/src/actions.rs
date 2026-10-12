@@ -26,6 +26,7 @@ actions!(
         NextSession,
         PrevSession,
         RenameSession,
+        ToggleSessions,
     ]
 );
 
@@ -46,6 +47,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-shift-w", CloseSession, None),
         KeyBinding::new("cmd-\\", SplitRight, None),
         KeyBinding::new("cmd-shift-\\", SplitDown, None),
+        KeyBinding::new("cmd-shift-b", ToggleSessions, None),
         KeyBinding::new("ctrl-tab", NextSession, None),
         KeyBinding::new("ctrl-shift-tab", PrevSession, None),
         KeyBinding::new("ctrl--", GoBack, None),
@@ -68,6 +70,7 @@ pub fn menus() -> Vec<Menu> {
             MenuItem::action("New Terminal", NewTerminal),
         ]),
         Menu::new("View").items([
+            MenuItem::action("Session List", ToggleSessions),
             MenuItem::action("Sidebar", ToggleSidebar),
             MenuItem::action("Split Right", SplitRight),
             MenuItem::action("Split Down", SplitDown),

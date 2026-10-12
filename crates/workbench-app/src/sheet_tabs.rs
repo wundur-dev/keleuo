@@ -7,6 +7,10 @@
 //! Two orientations: hanging from the content above (tool panels, tabs along the bottom) and
 //! standing on the content below (documents, tabs along the top).
 
+use std::cell::{Cell, RefCell};
+use std::rc::Rc;
+
+use gpui_kit::prelude::*;
 use gpui_kit::*;
 
 /// The tabs' shape, in pixels.
@@ -222,6 +226,140 @@ pub fn paint_tab(bounds: Bounds<Pixels>, joined: Joined, shown: bool, hot: bool,
             window.paint_path(p, palette.edge);
         }
     }
+}
+
+/// What one strip remembers between its layout and its paint: each tab records its slot as it
+/// is laid out, and one canvas behind them all paints the shapes in the right order.
+#[derive(Default)]
+pub struct StripState {
+    slots: RefCell<Vec<(usize, Bounds<Pixels>)>>,
+    hot: Cell<Option<usize>>,
+}
+
+impl StripState {
+    /// The shapes, behind the labels: the line along the joined edge, the others from the
+    /// right, the shown one last. Clears the slots for this frame's tabs to fill.
+    pub fn backdrop(self: &Rc<Self>, joined: Joined, palette: Palette, shown: Option<usize>) -> impl IntoElement {
+        self.slots.borrow_mut().clear();
+        let state = self.clone();
+        canvas(
+            |_, _, _| (),
+            move |b, _, window, _| {
+                let y = match joined {
+                    Joined::Top => b.origin.y,
+                    Joined::Bottom => b.origin.y + b.size.height - px(1.),
+                };
+                window.paint_quad(fill(Bounds::new(point(b.origin.x, y), size(b.size.width, px(1.))), palette.line));
+                let slots = state.slots.borrow().clone();
+                let selected: Vec<bool> = slots.iter().map(|(ix, _)| Some(*ix) == shown).collect();
+                for i in paint_order(&selected) {
+                    let (ix, bounds) = slots[i];
+                    // Tabs scrolled out of the strip do not paint over its neighbours.
+                    if bounds.right() < b.left() || bounds.left() > b.right() {
+                        continue;
+                    }
+                    paint_tab(bounds, joined, selected[i], state.hot.get() == Some(ix), &palette, window);
+                }
+            },
+        )
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full()
+    }
+
+    /// Put inside tab `ix`: records where it was laid out.
+    pub fn recorder(self: &Rc<Self>, ix: usize) -> impl IntoElement {
+        let state = self.clone();
+        canvas(move |b, _, _| state.slots.borrow_mut().push((ix, b)), |_, _, _, _| {})
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full()
+    }
+
+    /// For tab `ix`'s `on_hover`: the tab under the pointer is drawn a shade lighter.
+    pub fn hover(self: &Rc<Self>, ix: usize) -> impl Fn(&bool, &mut Window, &mut App) + 'static {
+        let state = self.clone();
+        move |hovered, window, _| {
+            let now = if *hovered {
+                Some(ix)
+            } else if state.hot.get() == Some(ix) {
+                None
+            } else {
+                state.hot.get()
+            };
+            if now != state.hot.get() {
+                state.hot.set(now);
+                window.refresh();
+            }
+        }
+    }
+}
+
+/// Room between a tab's side and its label.
+pub fn label_pad() -> Pixels {
+    px(GEOMETRY.pad + GEOMETRY.slant)
+}
+
+/// A tab's box in a strip: its slot recorder, label padding and overlap with the one before.
+pub fn tab_box(state: &Rc<StripState>, id: impl Into<ElementId>, ix: usize, n: usize, joined: Joined) -> Stateful<Div> {
+    div()
+        .id(id)
+        .relative()
+        .flex_none()
+        .h_full()
+        .px(label_pad())
+        .when(n > 0, |d| d.ml(px(-GEOMETRY.overlap)))
+        .flex()
+        .items_center()
+        .gap_1()
+        .map(|d| match joined {
+            // Labels sit in the tab's body, away from the recessed free edge.
+            Joined::Top => d.pb(px(2.)),
+            Joined::Bottom => d.pt(px(2.)),
+        })
+        .child(state.recorder(ix))
+        .on_hover(state.hover(ix))
+}
+
+/// What a click on tab `ix` does.
+pub type OnSelect = Rc<dyn Fn(usize, &mut Window, &mut App)>;
+
+/// A plain strip of labelled tabs (a session's Chat and Terminal views): click to show.
+#[allow(clippy::too_many_arguments)]
+pub fn simple_strip(
+    state: &Rc<StripState>,
+    id: &'static str,
+    labels: &[SharedString],
+    shown: usize,
+    joined: Joined,
+    palette: Palette,
+    height: f32,
+    on_select: OnSelect,
+) -> Div {
+    let mut row = div().flex().flex_1().h_full().pl(px(4.));
+    for (ix, label) in labels.iter().enumerate() {
+        let select = on_select.clone();
+        row = row.child(
+            tab_box(state, (id, ix), ix, ix, joined)
+                .text_size(px(11.))
+                .text_color(if ix == shown { palette.content_text } else { palette.face_text })
+                .cursor_pointer()
+                .child(label.clone())
+                .on_click(move |_, window, cx| select(ix, window, cx)),
+        );
+    }
+    div()
+        .relative()
+        .h(px(height))
+        .flex_none()
+        .w_full()
+        .flex()
+        .items_center()
+        .bg(palette.ground)
+        .child(state.backdrop(joined, palette, Some(shown)))
+        .child(row)
 }
 
 #[cfg(test)]

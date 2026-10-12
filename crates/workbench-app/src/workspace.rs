@@ -23,7 +23,7 @@ use workbench_core::host::Host;
 use crate::AppSettings;
 use crate::actions::*;
 use crate::chat_panel::{ChatPanel, ChatPanelEvent};
-use crate::agent_session::{AgentSession, SessionEvent};
+use crate::agent_session::{AgentSession, SessionEvent, View};
 use crate::agent_side::{AgentSide, AgentSideEvent};
 use crate::doc_panel::{DocContext, DocEvent, DocPanel};
 use crate::file_tree::{FileTree, FileTreeEvent};
@@ -168,6 +168,8 @@ impl Workspace {
         let files = cx.new(|cx| FileTree::new(host.clone(), root.clone(), cx));
         let skills = cx.new(|cx| SkillsPanel::new(host.clone(), backend.clone(), root.clone(), cx));
         let session = cx.new(|_| session);
+        // The view this session was last shown in, else the default for new sessions.
+        session.update(cx, |s, cx| s.apply_remembered_view(cx));
         let claude = cx.new(|cx| ChatPanel::new(session.clone(), window, cx));
         let agent_side = cx.new(|cx| {
             AgentSide::new(
@@ -315,31 +317,21 @@ impl Workspace {
         this
     }
 
+    pub fn branch(&self) -> Option<&str> {
+        self.branch.as_deref()
+    }
+
+    /// The name in the session list: the first thing asked, else "New session".
+    pub fn list_name(&self, cx: &App) -> String {
+        self.session.read(cx).chat.title(48).unwrap_or_else(|| "New session".into())
+    }
+
     pub fn root(&self) -> &Path {
         &self.root
     }
 
     pub fn host(&self) -> Arc<dyn Host> {
         self.host.clone()
-    }
-
-    /// The session tab's automatic name: folder and branch, then the first message.
-    pub fn auto_name(&self, cx: &App) -> String {
-        let mut name = self
-            .root
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_default();
-        if let Some(b) = &self.branch {
-            name.push_str(&format!(" ({b})"));
-        }
-        if self.host.is_remote() {
-            name = format!("{}: {name}", self.host.label());
-        }
-        match self.session.read(cx).chat.title(28) {
-            Some(t) => format!("{name}: {t}"),
-            None => name,
-        }
     }
 
     /// Whether a file is open here.
@@ -1139,6 +1131,34 @@ impl Workspace {
                 self.agent_side
                     .update(cx, |s, cx| s.resume(&e.info.id, fork, wait, window, cx));
             }
+            "view" => {
+                let view = if arg == "terminal" { View::Terminal } else { View::Chat };
+                self.session.update(cx, |s, cx| s.set_view(view, cx));
+                return format!("{:?}", self.session.read(cx).view);
+            }
+            "default-view" => {
+                let settings = cx.global::<AppSettings>().0.clone();
+                settings.borrow_mut().default_view = arg.to_string();
+                let _ = settings.borrow().save();
+            }
+            "term-screen" => {
+                return match self.session.read(cx).terminal_view() {
+                    Some(t) => t.read(cx).screen_text().lines().filter(|l| !l.is_empty()).collect::<Vec<_>>().join(" | "),
+                    None => "no terminal view".into(),
+                };
+            }
+            "term-type" => {
+                // Type into the session's terminal view (tests): `\n` is Enter, `\e` Escape.
+                let text = arg.replace("\\n", "\r").replace("\\e", "\u{1b}");
+                match self.session.read(cx).terminal_view() {
+                    Some(t) => {
+                        if let Some(pty) = &t.read(cx).pty {
+                            pty.write(text.into_bytes());
+                        }
+                    }
+                    None => return "no terminal view".into(),
+                }
+            }
             "expand" => {
                 let ids: Vec<String> = self
                     .session
@@ -1162,6 +1182,31 @@ impl Workspace {
                     _ => self.recent_code_panel(cx),
                 };
                 self.toggle_zoom(id, window, cx);
+            }
+            "chat" => {
+                // The session's chat state, briefly (tests).
+                let s = self.session.read(cx);
+                let c = &s.chat;
+                let edits: Vec<String> = c
+                    .items
+                    .iter()
+                    .filter_map(|i| match i {
+                        workbench_core::conversation::Item::Tool(t) => t.diff.as_ref().map(|d| d.path.display().to_string()),
+                        _ => None,
+                    })
+                    .collect();
+                return format!(
+                    "view={:?} busy={} items={} agents={} tokens={:?} cost={:.4} session={:?} last={:?} edits={:?}",
+                    s.view,
+                    c.busy,
+                    c.items.len(),
+                    c.agents.len(),
+                    c.last_turn_tokens,
+                    c.total_cost_usd,
+                    c.session_id,
+                    c.last_activity(60),
+                    edits
+                );
             }
             "state" => {
                 let a = self.dock.read(cx);

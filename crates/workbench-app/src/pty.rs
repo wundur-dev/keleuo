@@ -113,6 +113,7 @@ impl Pty {
         env.insert("TERM".to_string(), "xterm-256color".to_string());
         env.insert("COLORTERM".to_string(), "truecolor".to_string());
         env.insert("TERM_PROGRAM".to_string(), "Workbench".to_string());
+        env.extend(spec.env.iter().cloned());
         let options = tty::Options {
             shell: Some(tty::Shell::new(
                 spec.program.to_string_lossy().to_string(),

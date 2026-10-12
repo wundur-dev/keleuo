@@ -36,6 +36,9 @@ impl Options {
                 .unwrap_or_else(|| "claude".into()),
             args: self.args(),
             env: Vec::new(),
+            // Claude Code marks processes it starts; a window started from inside a Claude
+            // session must not pass that on, or the agent stops saving its transcript.
+            unset: vec!["CLAUDE_CODE_CHILD_SESSION".into()],
             cwd: self.cwd.clone(),
         }
     }

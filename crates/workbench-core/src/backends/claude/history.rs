@@ -134,6 +134,34 @@ pub fn session_count(host: &dyn Host, claude_home: &Path, folder: &Path) -> (usi
     (files.len(), newest)
 }
 
+/// The events one line of a session file stands for (sidechain lines belong to subagents'
+/// own files and are skipped).
+fn line_events(v: &Value, mapper: &mut Mapper) -> Vec<Event> {
+    if v.get("isSidechain").and_then(Value::as_bool) == Some(true) {
+        return Vec::new();
+    }
+    match v.get("type").and_then(Value::as_str) {
+        Some("user") => {
+            let is_result = v
+                .get("message")
+                .and_then(|m| m.get("content"))
+                .and_then(Value::as_array)
+                .is_some_and(|b| b.iter().any(|b| b.get("type").and_then(Value::as_str) == Some("tool_result")));
+            if is_result {
+                mapper.map(stream::parse_value(v))
+            } else if v.get("isMeta").and_then(Value::as_bool) != Some(true)
+                && let Some(text) = user_text(v)
+            {
+                vec![Event::UserText(text)]
+            } else {
+                Vec::new()
+            }
+        }
+        Some("assistant") => mapper.map(stream::parse_value(v)),
+        _ => Vec::new(),
+    }
+}
+
 /// Rebuild the chat of a session from its file.
 pub fn load_conversation(text: &str, cwd: &str) -> Conversation {
     let mut chat = Conversation::new(cwd);
@@ -142,32 +170,10 @@ pub fn load_conversation(text: &str, cwd: &str) -> Conversation {
     mapper.history = true;
     for line in text.lines() {
         let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
-        if v.get("isSidechain").and_then(Value::as_bool) == Some(true) {
-            continue;
-        }
         if chat.session_id.is_none() {
             chat.session_id = v.get("sessionId").and_then(Value::as_str).map(str::to_string);
         }
-        match v.get("type").and_then(Value::as_str) {
-            Some("user") => {
-                let is_result = v
-                    .get("message")
-                    .and_then(|m| m.get("content"))
-                    .and_then(Value::as_array)
-                    .is_some_and(|b| b.iter().any(|b| b.get("type").and_then(Value::as_str) == Some("tool_result")));
-                if is_result {
-                    chat.apply_all(mapper.map(stream::parse_value(&v)));
-                } else if v.get("isMeta").and_then(Value::as_bool) != Some(true)
-                    && let Some(text) = user_text(&v)
-                {
-                    chat.apply(Event::UserText(text));
-                }
-            }
-            Some("assistant") => {
-                chat.apply_all(mapper.map(stream::parse_value(&v)));
-            }
-            _ => {}
-        }
+        chat.apply_all(line_events(&v, &mut mapper));
     }
     chat.busy = false;
     chat.status = None;
@@ -181,34 +187,110 @@ pub fn attach_subagent(chat: &mut Conversation, tool_use_id: &str, text: &str) {
     chat.replaying = true;
     let mut mapper = Mapper::new(chat.cwd.clone());
     for line in text.lines() {
-        let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
-        let raw = match v.get("type").and_then(Value::as_str) {
-            Some("assistant") => match stream::parse_value(&v) {
-                stream::Event::Assistant { message_id, model, blocks, .. } => stream::Event::Assistant {
-                    message_id,
-                    model,
-                    blocks,
-                    parent_tool_use_id: Some(tool_use_id.to_string()),
-                },
-                _ => continue,
-            },
-            Some("user") => match stream::parse_value(&v) {
-                stream::Event::ToolResult { tool_use_id: id, content, is_error, structured, .. } => {
-                    stream::Event::ToolResult {
-                        tool_use_id: id,
-                        content,
-                        is_error,
-                        structured,
-                        parent_tool_use_id: Some(tool_use_id.to_string()),
-                    }
-                }
-                _ => continue,
-            },
-            _ => continue,
-        };
-        chat.apply_all(mapper.map(raw));
+        if let Ok(v) = serde_json::from_str::<Value>(line) {
+            chat.apply_all(subagent_line_events(&v, tool_use_id, &mut mapper));
+        }
     }
     chat.replaying = false;
+}
+
+/// The events of one line of a subagent's transcript, under the tool call that started it.
+fn subagent_line_events(v: &Value, tool_use_id: &str, mapper: &mut Mapper) -> Vec<Event> {
+    let parent = Some(tool_use_id.to_string());
+    let raw = match (v.get("type").and_then(Value::as_str), stream::parse_value(v)) {
+        (Some("assistant"), stream::Event::Assistant { message_id, model, blocks, .. }) => {
+            stream::Event::Assistant { message_id, model, blocks, parent_tool_use_id: parent }
+        }
+        (Some("user"), stream::Event::ToolResult { tool_use_id: id, content, is_error, structured, .. }) => {
+            stream::Event::ToolResult { tool_use_id: id, content, is_error, structured, parent_tool_use_id: parent }
+        }
+        _ => return Vec::new(),
+    };
+    mapper.map(raw)
+}
+
+/// Follow a session file being written by Claude Code in a terminal: every complete line added
+/// after now (and to its subagents' transcripts) is mapped and sent to `sink`, until `stop`.
+/// An assistant message that ends its turn also ends the turn here, with its token counts.
+pub fn follow(host: &dyn Host, path: &Path, cwd: &str, sink: &crate::agent::Sink, stop: &std::sync::atomic::AtomicBool) {
+    use crate::agent::Message;
+    use std::collections::HashMap;
+    use std::sync::atomic::Ordering;
+
+    let size = |p: &Path| host.read(p).map(|b| b.len()).unwrap_or(0);
+    let mut main = (size(path), Mapper::new(cwd));
+    main.1.history = true;
+    let agents_dir = path.with_extension("").join("subagents");
+    // Subagent transcripts: file name to (offset, mapper, the tool call that started it).
+    let mut agents: HashMap<String, (usize, Mapper, Option<String>)> = HashMap::new();
+    if let Ok(entries) = host.read_dir(&agents_dir) {
+        for e in entries.iter().filter(|e| e.name.ends_with(".jsonl")) {
+            agents.insert(e.name.clone(), (size(&agents_dir.join(&e.name)), Mapper::new(cwd), None));
+        }
+    }
+    // New complete lines of `p` from `offset` on.
+    let new_lines = |p: &Path, offset: &mut usize| -> Vec<Value> {
+        let Ok(bytes) = host.read(p) else { return Vec::new() };
+        if bytes.len() < *offset {
+            *offset = 0;
+        }
+        let Some(end) = bytes[*offset..].iter().rposition(|b| *b == b'\n') else { return Vec::new() };
+        let chunk = String::from_utf8_lossy(&bytes[*offset..*offset + end + 1]).to_string();
+        *offset += end + 1;
+        chunk.lines().filter_map(|l| serde_json::from_str(l).ok()).collect()
+    };
+    while !stop.load(Ordering::Relaxed) {
+        for v in new_lines(path, &mut main.0) {
+            for e in line_events(&v, &mut main.1) {
+                sink(Message::Event(e));
+            }
+            if let Some(end) = turn_end(&v) {
+                sink(Message::Event(end));
+            }
+        }
+        if let Ok(entries) = host.read_dir(&agents_dir) {
+            for e in entries.iter().filter(|e| e.name.ends_with(".jsonl")) {
+                let entry = agents.entry(e.name.clone()).or_insert_with(|| (0, Mapper::new(cwd), None));
+                if entry.2.is_none() {
+                    let meta = agents_dir.join(e.name.replace(".jsonl", ".meta.json"));
+                    entry.2 = host
+                        .read_to_string(&meta)
+                        .ok()
+                        .and_then(|m| serde_json::from_str::<Value>(&m).ok())
+                        .and_then(|m| m.get("toolUseId").and_then(Value::as_str).map(str::to_string));
+                }
+                let Some(parent) = entry.2.clone() else { continue };
+                for v in new_lines(&agents_dir.join(&e.name), &mut entry.0) {
+                    for ev in subagent_line_events(&v, &parent, &mut entry.1) {
+                        sink(Message::Event(ev));
+                    }
+                }
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(400));
+    }
+}
+
+/// An assistant message that ends the turn (`stop_reason` `end_turn`), as a turn end with its
+/// token counts. The terminal interface does not write the cost to the file.
+fn turn_end(v: &Value) -> Option<Event> {
+    if v.get("isSidechain").and_then(Value::as_bool) == Some(true) || v.get("type").and_then(Value::as_str) != Some("assistant") {
+        return None;
+    }
+    let message = v.get("message")?;
+    if message.get("stop_reason").and_then(Value::as_str) != Some("end_turn") {
+        return None;
+    }
+    let usage = message.get("usage");
+    let n = |k: &str| usage.and_then(|u| u.get(k)).and_then(Value::as_u64).unwrap_or(0);
+    Some(Event::TurnEnded {
+        error: None,
+        cost_total_usd: None,
+        input_tokens: n("input_tokens") + n("cache_read_input_tokens") + n("cache_creation_input_tokens"),
+        output_tokens: n("output_tokens"),
+        duration_ms: None,
+        session_id: v.get("sessionId").and_then(Value::as_str).map(str::to_string),
+    })
 }
 
 /// Read a session's file and its subagents' transcripts and rebuild the chat.
@@ -380,6 +462,41 @@ mod tests {
                 .join(name),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn follows_lines_added_to_a_session_file() {
+        use crate::agent::Message;
+        use std::sync::atomic::AtomicBool;
+        use std::sync::{Arc, Mutex};
+        let dir = std::env::temp_dir().join(format!("wb-follow-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("s.jsonl");
+        let text = fixture("session_history.jsonl");
+        let lines: Vec<&str> = text.lines().collect();
+        std::fs::write(&path, format!("{}\n", lines[0])).unwrap();
+        let got = Arc::new(Mutex::new(Vec::new()));
+        let g = got.clone();
+        let sink: crate::agent::Sink = Arc::new(move |m| {
+            if let Message::Event(e) = m {
+                g.lock().unwrap().push(e)
+            }
+        });
+        let stop = Arc::new(AtomicBool::new(false));
+        let (p, s) = (path.clone(), stop.clone());
+        let t = std::thread::spawn(move || follow(&crate::host::LocalHost, &p, "/tmp/wb-proj", &sink, &s));
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        // The rest arrives, the last line without its newline yet.
+        let rest = lines[1..].join("\n");
+        std::fs::write(&path, format!("{}\n{rest}", lines[0])).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(900));
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        t.join().unwrap();
+        let mut chat = Conversation::new("/tmp/wb-proj");
+        chat.apply_all(got.lock().unwrap().clone());
+        // The first line was there before: not replayed. The two Agent calls and their ends came.
+        assert_eq!(chat.agents.len(), 2, "{:?}", chat.items.len());
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

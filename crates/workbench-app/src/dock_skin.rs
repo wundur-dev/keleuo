@@ -16,7 +16,6 @@
 //! Tabs and the grip drag with the dock's own `DragPanel`, and drop through
 //! `TabGroupContext::drop_panel`, so docking, splitting and saving work as before.
 
-use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -29,8 +28,9 @@ use gpui_kit::component::menu::DropdownMenu;
 use gpui_kit::component::{ActiveTheme, Icon, IconName, Sizable};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
+use gpui_kit::base::TestSupportExt;
 
-use crate::sheet_tabs::{self, GEOMETRY, Joined, Palette};
+use crate::sheet_tabs::{self, Joined, Palette, StripState};
 
 /// The panels that are tools (lists beside the work) rather than documents.
 const TOOLS: [&str; 4] = ["Files", "Skills", "Agent", "Terminals"];
@@ -97,14 +97,6 @@ impl DockAreaRenderer for WorkbenchSkin {
             scroll: ScrollHandle::new(),
         })
     }
-}
-
-/// What one strip remembers between its layout and its paint.
-#[derive(Default)]
-struct StripState {
-    /// Each drawn tab's slot this frame, by panel index.
-    slots: RefCell<Vec<(usize, Bounds<Pixels>)>>,
-    hot: Cell<Option<usize>>,
 }
 
 struct SheetGroup {
@@ -227,7 +219,7 @@ impl SheetGroup {
         let menu_panel = handle.clone();
         let handle_el = on_drag_panel(
             div()
-                .id("panel-grip")
+                .id(("panel-grip", panel.panel_id(cx).as_u64() as usize))
                 .h_full()
                 .flex_1()
                 .min_w_0()
@@ -269,7 +261,7 @@ impl SheetGroup {
                         drop_group.drop_panel(drag.clone(), None, true, window, cx)
                     })
             })
-            .child(handle_el)
+            .child(handle_el.test_support())
             .children(buttons.into_iter().map(|b| b.xsmall().ghost().tab_stop(false)))
             .child(
                 div().invisible().group_hover("panel-header", |d| d.visible()).child(
@@ -318,35 +310,7 @@ impl SheetGroup {
         let documents = joined == Joined::Bottom;
         let shown = shown_ix(group, cx);
         let collapsed = group.is_collapsed();
-        self.strip.slots.borrow_mut().clear();
-
-        let state = self.strip.clone();
-        let backdrop = canvas(
-            |_, _, _| (),
-            move |b, _, window, _| {
-                // The line along the joined edge, then the tabs: the others from the right, the
-                // shown one last, over them and the line.
-                let y = match joined {
-                    Joined::Top => b.origin.y,
-                    Joined::Bottom => b.origin.y + b.size.height - px(1.),
-                };
-                window.paint_quad(fill(Bounds::new(point(b.origin.x, y), size(b.size.width, px(1.))), palette.line));
-                let slots = state.slots.borrow().clone();
-                let selected: Vec<bool> = slots.iter().map(|(ix, _)| Some(*ix) == shown && !collapsed).collect();
-                for i in sheet_tabs::paint_order(&selected) {
-                    let (ix, bounds) = slots[i];
-                    // Clip to the strip, so tabs scrolled out of it do not paint over neighbours.
-                    if bounds.right() < b.left() || bounds.left() > b.right() {
-                        continue;
-                    }
-                    sheet_tabs::paint_tab(bounds, joined, selected[i], state.hot.get() == Some(ix), &palette, window);
-                }
-            },
-        )
-        .absolute()
-        .top_0()
-        .left_0()
-        .size_full();
+        let backdrop = self.strip.backdrop(joined, palette, shown.filter(|_| !collapsed));
 
         let mut row = div()
             .id("sheet-tabs")
@@ -364,38 +328,14 @@ impl SheetGroup {
             let title = title_of(&panel, window, cx);
             let drag = drag_of(group, ix, cx);
             let closable = documents && group.is_panel_closable(panel.panel_id(cx), cx);
-            let state = self.strip.clone();
-            let record = self.strip.clone();
             let (select, close, drop_on, middle) = (group.clone(), group.clone(), group.clone(), group.clone());
             let id = panel.panel_id(cx);
-            let pad = GEOMETRY.pad + GEOMETRY.slant;
-            let tab = div()
-                .id(("sheet-tab", ix))
+            let tab = sheet_tabs::tab_box(&self.strip, ("sheet-tab", id.as_u64() as usize), ix, n, joined)
                 .group("sheet-tab")
-                .relative()
-                .flex_none()
-                .h_full()
                 .max_w(px(220.))
-                .pl(px(pad))
-                .pr(px(if closable { pad - 6. } else { pad }))
-                .when(n > 0, |d| d.ml(px(-GEOMETRY.overlap)))
-                .flex()
-                .items_center()
-                .gap_1()
-                .map(|d| match joined {
-                    // Labels sit in the tab's body, away from the recessed free edge.
-                    Joined::Top => d.pb(px(2.)),
-                    Joined::Bottom => d.pt(px(2.)),
-                })
+                .when(closable, |d| d.pr(sheet_tabs::label_pad() - px(6.)))
                 .text_size(px(if documents { 12. } else { 11. }))
                 .text_color(if is_shown { palette.content_text } else { palette.face_text })
-                .child(
-                    canvas(move |b, _, _| record.slots.borrow_mut().push((ix, b)), |_, _, _, _| {})
-                        .absolute()
-                        .top_0()
-                        .left_0()
-                        .size_full(),
-                )
                 .child(div().min_w_0().truncate().child(title))
                 .when(closable, |d| {
                     d.child(
@@ -416,13 +356,6 @@ impl SheetGroup {
                             }),
                     )
                 })
-                .on_hover(move |hovered, window, _| {
-                    let now = if *hovered { Some(ix) } else if state.hot.get() == Some(ix) { None } else { state.hot.get() };
-                    if now != state.hot.get() {
-                        state.hot.set(now);
-                        window.refresh();
-                    }
-                })
                 .on_click(move |_, window, cx| select.select_tab(ix, window, cx))
                 .when(closable, |d| {
                     d.on_mouse_down(MouseButton::Middle, move |_, window, cx| {
@@ -437,7 +370,7 @@ impl SheetGroup {
                             drop_on.drop_panel(drag.clone(), Some(ix), true, window, cx)
                         })
                 });
-            row = row.child(on_drag_panel(tab, if collapsed { None } else { drag }, panel));
+            row = row.child(on_drag_panel(tab, if collapsed { None } else { drag }, panel).test_support());
         }
         // Room past the last tab to drop a panel at the end.
         let end = group.clone();
@@ -538,7 +471,9 @@ impl TabGroupRenderer for SheetGroup {
             return self.header(group, window, cx);
         }
         let theme = cx.theme();
-        let (ground, content) = (theme.tab_bar, theme.background);
+        // The strip's ground is the darkest surface, so the shown tab (the content's colour)
+        // and the recessed grey ones both read against it.
+        let (ground, content) = (theme.sidebar, theme.background);
         let trailing = self.doc_actions(group, window, cx);
         self.strip(group, Joined::Bottom, TOP_STRIP, ground, content, trailing, window, cx)
     }
@@ -558,7 +493,7 @@ impl TabGroupRenderer for SheetGroup {
             return view.into_any_element();
         }
         let theme = cx.theme();
-        let (ground, content) = (theme.tab_bar, theme.sidebar);
+        let (ground, content) = (sheet_tabs::mix(theme.sidebar, gpui_kit::black(), 0.45), theme.sidebar);
         div()
             .flex()
             .flex_col()
@@ -575,5 +510,116 @@ impl TabGroupRenderer for SheetGroup {
 
     fn render_empty(&self, group: &TabGroupContext, window: &mut Window, cx: &mut App) -> Option<AnyElement> {
         self.inner.render_empty(group, window, cx)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Drag and drop through the skin, in a headless window: from a tool group's bottom tabs
+    //! and its title bar grip, into a document group's top tabs.
+    use std::time::Duration;
+
+    use gpui_kit::component::dock::{BasePanel, DockLayout, Panel, PanelEvent, panel_handle};
+    use gpui_kit::test::{TestAppContextExt, TestWindowExt};
+    use gpui_kit::{
+        App, AppContext, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement, Render, TestAppContext, Window,
+        WindowBounds, WindowOptions, div, prelude::*, px, size,
+    };
+
+    use super::{TestSupportExt, WorkbenchSkin};
+
+    struct Probe {
+        kind: &'static str,
+        id: &'static str,
+        focus: FocusHandle,
+    }
+    impl BasePanel for Probe {
+        fn panel_name(&self) -> &'static str {
+            self.kind
+        }
+    }
+    impl Panel for Probe {
+        fn title(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            self.id
+        }
+    }
+    impl EventEmitter<PanelEvent> for Probe {}
+    impl Focusable for Probe {
+        fn focus_handle(&self, _: &App) -> FocusHandle {
+            self.focus.clone()
+        }
+    }
+    impl Render for Probe {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().id(self.id).test_support().track_focus(&self.focus).size_full().child(self.id)
+        }
+    }
+    struct Root(Entity<gpui_kit::component::dock::DockArea>);
+    impl Render for Root {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().child(self.0.clone())
+        }
+    }
+
+    fn tab(e: &Entity<Probe>) -> (&'static str, usize) {
+        ("sheet-tab", e.entity_id().as_u64() as usize)
+    }
+
+    #[gpui_kit::test]
+    async fn panels_drag_from_bottom_tabs_and_the_grip(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let mut probes = Vec::new();
+        let handle = cx.update(|cx| {
+            let options = WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(gpui_kit::Bounds { origin: Default::default(), size: size(px(1000.), px(600.)) })),
+                ..Default::default()
+            };
+            gpui_kit::open_window(options, cx, |window, cx| {
+                let (area, _) = WorkbenchSkin::dock_area("test", None, window, cx);
+                let make = |kind, id, cx: &mut App| cx.new(|cx| Probe { kind, id, focus: cx.focus_handle() });
+                let files = make("Files", "files", cx);
+                let skills = make("Skills", "skills", cx);
+                let doc_a = make("Doc", "doc-a", cx);
+                let doc_b = make("Doc", "doc-b", cx);
+                probes = vec![files.clone(), skills.clone(), doc_a.clone(), doc_b.clone()];
+                let layout = DockLayout::h_split()
+                    .child(DockLayout::tabs().panel_view(panel_handle(files), cx).panel_view(panel_handle(skills), cx), Some(px(300.)))
+                    .child(DockLayout::tabs().panel_view(panel_handle(doc_a), cx).panel_view(panel_handle(doc_b), cx), None);
+                area.update(cx, |a, cx| a.set_center(layout, window, cx));
+                cx.new(|_| Root(area))
+            })
+            .unwrap()
+            .0
+        });
+        let (files, skills, doc_a) = (probes[0].clone(), probes[1].clone(), probes[2].clone());
+        let mut right = None;
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find("files").visible());
+            right = Some(window.find("doc-a").bounds());
+            // A click on a bottom tab shows that panel.
+            window.click(tab(&skills), cx);
+        })
+        .unwrap();
+        let right = right.unwrap();
+        cx.wait_for(handle, Duration::from_secs(1), |w, _| w.try_find("skills").is_some()).await;
+        // Drag Skills by its bottom tab onto the documents' top tab.
+        cx.update_window(handle, |_, window, cx| window.drag_to(tab(&skills), tab(&doc_a), cx)).unwrap();
+        cx.wait_for(handle, Duration::from_secs(1), |w, _| {
+            w.try_find("skills").is_some_and(|s| s.bounds().left() >= right.left())
+        })
+        .await;
+        // Files is alone now: drag it by its title bar grip onto the documents' tabs too.
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.drag_to(("panel-grip", files.entity_id().as_u64() as usize), tab(&doc_a), cx)
+        })
+        .unwrap();
+        cx.wait_for(handle, Duration::from_secs(1), |w, cx| {
+            w.render_frame(cx);
+            // Its tab is now in the documents' strip along the top, not along a bottom edge.
+            w.try_find(tab(&files)).is_some_and(|t| t.bounds().top() < px(40.))
+        })
+        .await;
     }
 }

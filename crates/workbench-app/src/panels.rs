@@ -209,7 +209,7 @@ impl Panel for SkillsPanel {
 
 impl Panel for AgentSide {
     fn title(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        list_title(IconName::Bot, "Subagents and earlier sessions")
+        list_title(IconName::Bot, "Agent")
     }
     fn zoom_control(&self, _: &App) -> Option<gpui_kit::component::dock::PanelControl> {
         None

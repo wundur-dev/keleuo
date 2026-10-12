@@ -349,6 +349,11 @@ impl Conversation {
                 self.finish_streaming();
                 self.items.push(Item::User(text));
                 self.turn_agents_from = self.agents.len();
+                // Live (a session followed from its file): a turn has begun.
+                if !self.replaying {
+                    self.busy = true;
+                    self.status = Some("working".into());
+                }
             }
             Event::ToolCall { id, name, summary, input, diff, parent } => {
                 if parent.is_none() {

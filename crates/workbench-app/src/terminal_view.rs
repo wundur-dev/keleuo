@@ -131,6 +131,21 @@ impl TerminalView {
         }
     }
 
+    /// The visible screen as text, one line per row (tests read it over the control channel).
+    pub fn screen_text(&self) -> String {
+        let Some(pty) = &self.pty else { return String::new() };
+        let term = pty.term.lock();
+        let grid = term.grid();
+        let mut out = String::new();
+        for line in 0..grid.screen_lines() {
+            let row = &grid[Line(line as i32)];
+            let text: String = (0..grid.columns()).map(|c| row[Column(c)].c).collect();
+            out.push_str(text.trim_end());
+            out.push('\n');
+        }
+        out
+    }
+
     fn copy(&self, cx: &mut Context<Self>) -> bool {
         let Some(pty) = &self.pty else { return false };
         let text = pty.term.lock().selection_to_string();

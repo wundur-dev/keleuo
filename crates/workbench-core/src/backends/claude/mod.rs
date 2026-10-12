@@ -15,9 +15,9 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
 
-use crate::agent::{Agent, Backend, Capabilities, Message, Running, SessionInfo, Sink, StartOptions};
+use crate::agent::{Agent, Backend, Capabilities, Follow, Message, Running, SessionInfo, Sink, StartOptions};
 use crate::conversation::Conversation;
-use crate::host::Host;
+use crate::host::{Host, ProgramSpec};
 use map::Mapper;
 use process::{Line, Options, Process};
 
@@ -27,6 +27,12 @@ pub const ID: &str = "claude-code";
 /// Claude Code as a [`Backend`].
 #[derive(Default)]
 pub struct ClaudeBackend;
+
+impl ClaudeBackend {
+    fn program_name(&self) -> String {
+        "claude".into()
+    }
+}
 
 impl Backend for ClaudeBackend {
     fn id(&self) -> &'static str {
@@ -46,6 +52,7 @@ impl Backend for ClaudeBackend {
             permission_prompts: true,
             accept_edits_mode: Some("acceptEdits".into()),
             models: ["haiku", "sonnet", "opus"].map(String::from).into(),
+            terminal_view: true,
         }
     }
 
@@ -79,6 +86,38 @@ impl Backend for ClaudeBackend {
         let home = skills::claude_home(host).ok_or_else(|| std::io::Error::other("no home folder"))?;
         let path = history::project_sessions_dir(&home, project).join(format!("{id}.jsonl"));
         history::load_session(host, &path, &project.to_string_lossy())
+    }
+
+    fn terminal_program(&self, options: &StartOptions, id: &str, new: bool) -> Option<ProgramSpec> {
+        let mut args: Vec<String> = Vec::new();
+        args.extend([if new { "--session-id" } else { "--resume" }.to_string(), id.to_string()]);
+        if let Some(model) = &options.model {
+            args.extend(["--model".into(), model.clone()]);
+        }
+        if let Some(mode) = &options.permission_mode {
+            args.extend(["--permission-mode".into(), mode.clone()]);
+        }
+        Some(ProgramSpec {
+            program: self.program_name(),
+            args,
+            env: Vec::new(),
+            unset: vec!["CLAUDE_CODE_CHILD_SESSION".into()],
+            cwd: options.cwd.clone(),
+        })
+    }
+
+    fn follow_session(&self, host: Arc<dyn Host>, project: &Path, id: &str, sink: Sink) -> Option<Follow> {
+        let home = skills::claude_home(host.as_ref())?;
+        let path = history::project_sessions_dir(&home, project).join(format!("{id}.jsonl"));
+        let (follow, stop) = Follow::new();
+        let cwd = project.to_string_lossy().to_string();
+        std::thread::spawn(move || history::follow(host.as_ref(), &path, &cwd, &sink, &stop));
+        Some(follow)
+    }
+
+    fn terminal_exit_input(&self) -> Vec<String> {
+        // Ctrl+C clears whatever is half typed; then the exit command.
+        vec!["\u{3}".into(), "/exit\r".into()]
     }
 
     fn running(&self, host: &dyn Host, own_pid: u32) -> Vec<Running> {

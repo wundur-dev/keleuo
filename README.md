@@ -1,8 +1,9 @@
 # Workbench
 
-A native desktop app for working with Claude Code on one project folder: skills on the
-left, code in the centre, Claude on the right, a real terminal along the bottom. Written in
-Rust with gpui (the UI framework behind Zed) and gpui-component. First prototype.
+A native desktop app for working with coding agents (Claude Code so far): a list of
+sessions, each a whole workspace with its chat or the agent's own terminal, files, skills
+and terminals. Written in Rust with gpui (the UI framework behind Zed) and gpui-component.
+Prototype.
 
 MIT licence, copyright Wundur AI Learning, LLC.
 
@@ -13,55 +14,83 @@ Keep the build output on the internal disk:
 
 ```sh
 export CARGO_TARGET_DIR="$HOME/Library/Caches/workbench-target"
-cargo run -p workbench-app -- /path/to/project
-cargo run -p workbench-app --release -- /path/to/project   # for speed measurements
-cargo test -p workbench-core
+cargo run -p workbench-app --release -- /path/to/project      # the browser at that folder
+cargo run -p workbench-app --release -- --new /path/to/project # a session there at once
+cargo test --workspace
 ```
 
-With no folder (or one that does not exist) a folder picker with recent folders opens.
-File > Open Folder (Cmd+O) opens another folder in a new window.
+The window opens on the **session browser** at the folder given (or the current folder, like
+`code .`; started from the Finder, the last folder). Remote: `--ssh host:/path/on/host`.
 
-Remote over SSH (first steps, see below): `cargo run -p workbench-app -- --ssh host:/path/on/host`.
+### The `workbench` command
+
+`scripts/workbench` opens the browser at the current folder, or hands the request to the
+window that is already open (one window for everything; the first one listens on a socket in
+`$TMPDIR`). Install it once, after a release build:
+
+```sh
+CARGO_TARGET_DIR="$HOME/Library/Caches/workbench-target" cargo build -p workbench-app --release
+ln -s "$PWD/scripts/workbench" "$HOME/.local/bin/workbench"   # any folder on your PATH
+```
+
+Then `workbench`, `workbench ~/code/app`, `workbench --new .` or `workbench --ssh dev:/srv/app`.
+`WORKBENCH_BIN` points it at another binary.
 
 ## Layout and keys
 
-    [ session tab ][ session tab ][ + New session ]              (title bar)
-    +------------+------------------------+----------------------------+
-    | Files      | Claude                 | terminals, files, skills   |
-    | Skills     | (this session's        | (tab groups; split, drag)  |
-    | Terminals  |  conversation)         |                            |
-    | Subagents  |                        |                            |
-    +------------+------------------------+----------------------------+
+    +-----------+----------------------------------------------------------------+
+    | + New     | [grip] Files          ...  | [Claude Code][greet.py][zsh]       |
+    | ● session | (file tree)                |  (chat or the agent's own terminal) |
+    |   folder  |                            |                                     |
+    | ○ session | [Files][Skills]            |                                     |
+    |   ...     | [grip] Agent               |                                     |
+    |           | (subagents, earlier)       |                                     |
+    |           | [Agent][Terminals]         | [Chat][Terminal]                    |
+    +-----------+----------------------------+-------------------------------------+
 
-- **Sessions are the top level.** Each tab in the title bar is a whole workspace: a folder
-  (local or over SSH), one Claude conversation with its subagents, its own terminals, open
-  files, skills and dock layout. Switching a tab switches everything; hidden sessions keep
-  running and their tab shows a dot (blue working, amber needs permission, white unseen).
-- **New session** (Cmd+N or "+"): the same folder, the same folder in a new git worktree (a
-  new branch and folder next to the project, made with `git worktree add`, shown on the tab),
-  a recent folder, or any folder. Without a worktree, when Claude in one session edits a file
-  another session in the same folder has open, that file shows "also edited by session ...".
-- **Docking inside a session** (gpui-component's DockArea): the lists, Claude, every terminal
-  and every file are tabs that drag between tab groups or onto an edge to split. The default
-  is lists on the left, Claude, then code; "Reset layout" (title bar or View menu) restores
-  it, and the arrangement is saved per folder.
-- **Subagents** run live: a strip on top of the Claude panel while they run, a list in the
-  sidebar's Claude panel, and a card per subagent in the chat; each expands to its own
-  messages and tool calls.
-- **Earlier sessions** of the folder (from `~/.claude/projects`, read-only) are listed in the
-  sidebar and open as a new session tab with their history; one still running in another
-  terminal offers "Fork here" or "Take over when it stops" (never signalled).
-- Tabs rename in place: double-click a session tab, F2 or the tab menu for other tabs.
+- **Sessions are the top level**, listed down the left. Each is a whole workspace: a folder
+  (local or over SSH), one agent conversation with its subagents, its own terminals, open
+  files, skills and dock layout. A row shows a dot (blue working, amber needs permission,
+  white unseen, hollow idle), the name (double-click to rename), folder and branch, a worktree
+  badge, the last thing that happened and the cost so far. Drag rows to reorder; Cmd+Shift+B
+  folds the list to a rail of dots and initials (names in tooltips).
+- **New session** (Cmd+N, "+ New session"): the browser. Folders on the left (this folder,
+  recent ones, then the folders here; type to filter, Up/Down to move, Cmd+Down to go into a
+  folder, Cmd+Up for the parent), each with a green dot when an agent runs there and a count
+  of its sessions. The selected folder's sessions on the right: running ones first ("running
+  in another terminal since 10:42", Fork here, Take over when it stops), then recent ones
+  (Continue); plus "Start a new session here" (Enter) and "New session in a git worktree"
+  (Cmd+Enter). A session already open in the window just shows. Folder discovery runs off the
+  UI thread and only for the rows on screen.
+- **Chat and Terminal views** of one session, the tabs along the bottom of the chat: Chat is
+  the native view; Terminal runs the agent's own interface (`claude --resume <id>`) in a
+  pseudo-terminal on the same conversation. Only one process ever drives a session: switching
+  waits for the turn to end, then ends one process before starting the other (leaving the
+  terminal sends Ctrl+C and `/exit`, then reloads the conversation). In Terminal view the
+  window follows the session's file, so subagents, edits (a strip of changed files), tokens
+  and the status dot keep working. Each session remembers its view; "New sessions open in"
+  on the strip sets the default. Hidden for backends without a terminal interface.
+- **Panel headers and sheet tabs** (after an earlier app): a tool panel (Files, Skills,
+  Terminals, Agent) has a title bar with a grip to drag it by, its title, its actions and
+  options on hover; tool panels sharing a spot put their tabs along the bottom, the shown one
+  joined to the content above with an accent line. Documents (the chat, files, terminals) keep
+  their tabs on top in the same style. Everything drags between groups or onto an edge to
+  split (gpui-component's DockArea under a custom renderer, `dock_skin.rs`); "Reset layout"
+  restores the default, and the arrangement is saved per folder.
+- **Subagents** run live: a strip on top of the chat while they run, a list in the Agent
+  panel, and a card per subagent in the chat.
+- When the agent in one session edits a file another session in the same folder has open,
+  that file shows "also edited by session ...".
 
 | Keys | What |
 | --- | --- |
-| Cmd+N / Cmd+Shift+W | New session / close the session |
+| Cmd+N / Cmd+Shift+W | New session (the browser) / close the session |
+| Cmd+Shift+B | Fold or unfold the session list |
 | Ctrl+Tab / Ctrl+Shift+Tab | Next / previous session |
 | Cmd+T | New terminal tab |
-| Cmd+B | Fold or unfold the sidebar |
+| Cmd+B | Fold or unfold the tool panels |
 | Cmd+\\ / Cmd+Shift+\\ | Move the shown file or terminal into a new group beside / below |
-| Cmd+Shift+C / Cmd+Shift+E | Zoom Claude / zoom the code group (again to unzoom) |
-| Cmd+O | New session in a chosen folder |
+| Cmd+Shift+C / Cmd+Shift+E | Zoom the chat / zoom the code group (again to unzoom) |
 | Cmd+S, Cmd+W | Save, close tab |
 | Cmd+E | Markdown: rendered or editor |
 | F2 | Rename the focused tab |
@@ -71,9 +100,11 @@ Remote over SSH (first steps, see below): `cargo run -p workbench-app -- --ssh h
 
 Environment: `WORKBENCH_MODEL=haiku` picks the model; `WORKBENCH_PERF=1` prints timings;
 `WORKBENCH_CONTROL=<fifo>` accepts test commands (`open`, `term`, `type`, `split`, `send`,
-`allow`, `new`, `new-worktree`, `tab`, `tabs`, `earlier`, `resume`, `fork`, `takeover`, `key`,
-`state`, ...; see `control.rs`, `shell.rs`, `workspace.rs`); `WORKBENCH_BACKGROUND=1` opens
-windows without taking focus; `WORKBENCH_CONFIG_DIR` moves the settings folder.
+`allow`, `new`, `browse`, `tab`, `tabs`, `move-session`, `fold-sessions`, `view`,
+`term-type`, `term-screen`, `chat`, `earlier`, `resume`, `fork`, `takeover`, `key`, `state`,
+...; see `control.rs`, `shell.rs`, `workspace.rs`); `WORKBENCH_BACKGROUND=1` opens windows
+without taking focus; `WORKBENCH_CONFIG_DIR` moves the settings folder (and the window's
+socket with it); `WORKBENCH_TEST_BACKENDS=1` adds the scripted test agent to the browser.
 
 ## Layout of the code
 
@@ -164,7 +195,15 @@ For reading and navigating code in the editor (not for the Claude panel).
 - Sessions: the open session tabs are not restored after a restart (each folder's dock
   layout is); worktree sessions are local only; the shared-folder warning covers edits by
   Claude, not edits typed in another session's editor.
-- Docking: dock tabs cannot be double-clicked to rename (F2 or the tab menu instead).
+- Docking: dock tabs cannot be double-clicked to rename (F2 or the tab menu instead). Tabs
+  that do not fit scroll rather than shrink; there is no overflow menu.
+- Session list and browser: the list order and the open sessions are not saved; the browser
+  has no remote recent folders and lists folders only (not files). The live dot sees agents
+  on this machine only.
+- Terminal view: the agent's own interface does not write its cost to the session file, so
+  the cost shown is what Chat counted; a permission prompt inside the terminal interface does
+  not turn the dot amber (it is not in the file). Leaving the terminal types Ctrl+C and
+  `/exit`; if the person has the interface in another mode, they finish there.
 - Terminal: no mouse reporting, no kitty keyboard protocol, no IME composition (dead keys
   and CJK input), no cursor blink, fixed colours and font (Menlo 12.5).
 - Skills: plugin skills are found from `installed_plugins.json` and their `skills/` folder

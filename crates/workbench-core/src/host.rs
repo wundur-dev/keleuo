@@ -34,6 +34,8 @@ pub struct ProgramSpec {
     pub program: String,
     pub args: Vec<String>,
     pub env: Vec<(String, String)>,
+    /// Variables to remove from the environment it inherits.
+    pub unset: Vec<String>,
     pub cwd: PathBuf,
 }
 
@@ -237,7 +239,14 @@ impl Host for LocalHost {
         } else {
             find_program(&spec.program).unwrap_or_else(|| spec.program.clone().into())
         };
-        CommandSpec { program, args: spec.args.clone(), cwd: Some(spec.cwd.clone()), env: spec.env.clone() }
+        if spec.unset.is_empty() {
+            return CommandSpec { program, args: spec.args.clone(), cwd: Some(spec.cwd.clone()), env: spec.env.clone() };
+        }
+        // `env -u` works the same for a plain process and a pseudo-terminal.
+        let mut args: Vec<String> = spec.unset.iter().flat_map(|v| ["-u".to_string(), v.clone()]).collect();
+        args.push(program.to_string_lossy().to_string());
+        args.extend(spec.args.iter().cloned());
+        CommandSpec { program: "/usr/bin/env".into(), args, cwd: Some(spec.cwd.clone()), env: spec.env.clone() }
     }
 }
 
@@ -399,7 +408,12 @@ impl Host for SshHost {
     fn program_command(&self, spec: &ProgramSpec) -> CommandSpec {
         let args: Vec<String> = spec.args.iter().map(|a| shell_quote(a)).collect();
         let env: Vec<String> = spec.env.iter().map(|(k, v)| shell_quote(&format!("{k}={v}"))).collect();
-        let env = if env.is_empty() { String::new() } else { format!("env {} ", env.join(" ")) };
+        let unset: Vec<String> = spec.unset.iter().map(|v| format!("-u {}", shell_quote(v))).collect();
+        let env = if env.is_empty() && unset.is_empty() {
+            String::new()
+        } else {
+            format!("env {} ", unset.into_iter().chain(env).collect::<Vec<_>>().join(" "))
+        };
         // A login shell, so the remote PATH finds the program.
         let inner = format!("cd {} && exec {env}{} {}", q(&spec.cwd), shell_quote(&spec.program), args.join(" "));
         self.ssh_spec(
@@ -476,6 +490,7 @@ mod tests {
             program: "/bin/agent".into(),
             args: vec!["-p".into()],
             env: vec![("A".into(), "1".into())],
+            unset: Vec::new(),
             cwd: "/p".into(),
         };
         let cmd = host.program_command(&spec);
@@ -484,6 +499,9 @@ mod tests {
         assert_eq!(cmd.args, ["-p"]);
         assert_eq!(cmd.env, [("A".to_string(), "1".to_string())]);
         assert_eq!(host.shell_command(Path::new("/p")).cwd.as_deref(), Some(Path::new("/p")));
+        let cmd = host.program_command(&ProgramSpec { unset: vec!["X".into()], ..spec });
+        assert_eq!(cmd.program, PathBuf::from("/usr/bin/env"));
+        assert_eq!(cmd.args, ["-u", "X", "/bin/agent", "-p"]);
     }
 
     #[test]
@@ -497,12 +515,14 @@ mod tests {
             program: "agent".into(),
             args: vec!["--mode".into(), "it's".into()],
             env: vec![("K".into(), "v".into())],
+            unset: vec!["X".into()],
             cwd: "/srv/it's".into(),
         });
         assert!(agent.args.contains(&"-T".to_string()));
         let script = agent.args.last().unwrap();
         assert!(script.starts_with("exec \"$SHELL\" -lc '"));
         assert!(script.contains("agent"));
+        assert!(script.contains("env -u"));
         assert_eq!(shell_quote("it's"), r"'it'\''s'");
     }
 

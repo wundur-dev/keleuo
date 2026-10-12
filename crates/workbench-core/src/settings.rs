@@ -41,6 +41,13 @@ pub struct Settings {
     /// Most recent first.
     pub recent: Vec<PathBuf>,
     pub layout: Layout,
+    /// How new sessions show: `"chat"` (the default) or `"terminal"` (the agent's own
+    /// interface, for backends that have one).
+    pub default_view: String,
+    /// The view each session was last shown in, by session id.
+    pub session_views: std::collections::BTreeMap<String, String>,
+    /// The session list folded to a rail.
+    pub sessions_folded: bool,
     #[serde(skip)]
     path: Option<PathBuf>,
 }
@@ -80,6 +87,23 @@ impl Settings {
         self.recent.retain(|p| p != folder);
         self.recent.insert(0, folder.to_path_buf());
         self.recent.truncate(MAX_RECENT);
+    }
+
+    /// The view a session opens in: its remembered one, else the default.
+    pub fn view_for(&self, session: Option<&str>) -> &str {
+        session
+            .and_then(|id| self.session_views.get(id))
+            .map(String::as_str)
+            .unwrap_or(if self.default_view.is_empty() { "chat" } else { &self.default_view })
+    }
+
+    /// Remember a session's view (the list is kept to the last few hundred sessions).
+    pub fn set_view(&mut self, session: &str, view: &str) {
+        self.session_views.insert(session.to_string(), view.to_string());
+        while self.session_views.len() > 500 {
+            let first = self.session_views.keys().next().cloned().unwrap_or_default();
+            self.session_views.remove(&first);
+        }
     }
 
     /// Recent folders that still exist.

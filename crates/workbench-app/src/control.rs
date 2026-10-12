@@ -1,7 +1,7 @@
 //! A debug command channel for tests and scripting, so the window can be driven without
 //! synthetic keyboard or mouse input. Off unless `WORKBENCH_CONTROL` names a FIFO (or a plain
 //! file to tail); each line is a command for the newest workspace window (see
-//! `Workspace::command`) or, while the folder picker is open, `pick <n>` / `pick <path>`.
+//! `Shell::command` and `Workspace::command`); `key <keystrokes>` types inside the window.
 //! Replies go to stderr as `control: <line> -> <result>`.
 
 use std::io::{BufRead, BufReader};
@@ -9,14 +9,12 @@ use std::path::PathBuf;
 
 use gpui_kit::*;
 
-use crate::picker::Picker;
 use crate::shell::Shell;
 
 /// Where control commands go.
 #[derive(Default)]
 pub struct ControlTargets {
     pub workspace: Option<(AnyWindowHandle, WeakEntity<Shell>)>,
-    pub picker: Option<(AnyWindowHandle, WeakEntity<Picker>)>,
 }
 
 impl Global for ControlTargets {}
@@ -54,33 +52,7 @@ pub fn start(cx: &mut App) {
 
 fn dispatch(line: &str, cx: &mut App) -> String {
     let targets = cx.global::<ControlTargets>();
-    let picker = targets.picker.clone();
     let workspace = targets.workspace.clone();
-    if let Some(arg) = line.strip_prefix("pick ") {
-        let Some((handle, picker)) = picker else {
-            return "no picker".into();
-        };
-        let arg = arg.trim().to_string();
-        return handle
-            .update(cx, |_, window, cx| {
-                picker
-                    .update(cx, |p, cx| {
-                        let path = match arg.parse::<usize>() {
-                            Ok(n) => p.recent.get(n.saturating_sub(1)).cloned(),
-                            Err(_) => Some(PathBuf::from(&arg)),
-                        };
-                        match path {
-                            Some(path) => {
-                                p.choose(path, window, cx);
-                                "ok".to_string()
-                            }
-                            None => "no such recent folder".to_string(),
-                        }
-                    })
-                    .unwrap_or_else(|_| "picker closed".into())
-            })
-            .unwrap_or_else(|_| "picker closed".into());
-    }
     let Some((handle, ws)) = workspace else {
         return "no workspace".into();
     };

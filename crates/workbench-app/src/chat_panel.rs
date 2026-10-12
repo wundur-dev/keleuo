@@ -3,10 +3,14 @@
 //! Deny, and a one-line status in the header. Every file reference is a link.
 
 use std::collections::HashSet;
+use std::rc::Rc;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
+
+use crate::agent_session::View;
+use crate::sheet_tabs::{self, Joined, Palette, StripState};
 use gpui_kit::component::text::TextView;
 use gpui_kit::component::{ActiveTheme, Icon, IconName, Sizable};
 use gpui_kit::prelude::*;
@@ -45,6 +49,8 @@ pub struct ChatPanel {
     shown: usize,
     /// Redraws once a second while subagents run (their elapsed time).
     ticker: Option<Task<()>>,
+    /// The Chat and Terminal view tabs.
+    views: Rc<StripState>,
     _subs: Vec<Subscription>,
 }
 
@@ -117,8 +123,9 @@ impl ChatPanel {
                         },
                     ));
                 }
-                cx.notify();
             }
+            // The view (Chat or Terminal) may have changed too.
+            cx.notify();
         });
         Self {
             session,
@@ -132,6 +139,7 @@ impl ChatPanel {
             last_revision: 0,
             shown: PAGE,
             ticker: None,
+            views: Rc::new(StripState::default()),
             _subs: vec![s1, s2],
         }
     }
@@ -875,6 +883,120 @@ impl ChatPanel {
     }
 }
 
+impl ChatPanel {
+    /// The Chat and Terminal tabs along the bottom, for backends with a terminal interface.
+    fn render_views(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let session = self.session.read(cx);
+        if !session.backend.capabilities().terminal_view {
+            return None;
+        }
+        let theme = cx.theme();
+        let ground = theme.sidebar;
+        let content = theme.background;
+        let palette = Palette::new(ground, theme.foreground, content, theme.foreground, theme.border, theme.ring);
+        let shown = match session.view {
+            View::Chat => 0,
+            View::Terminal => 1,
+        };
+        let waiting = session.chat_when_idle;
+        let default_terminal = cx.global::<crate::AppSettings>().0.borrow().view_for(None) == "terminal";
+        let muted = theme.muted_foreground;
+        let weak = self.session.downgrade();
+        let strip = sheet_tabs::simple_strip(
+            &self.views,
+            "session-view",
+            &["Chat".into(), "Terminal".into()],
+            shown,
+            Joined::Top,
+            palette,
+            24.,
+            Rc::new(move |ix, _, cx| {
+                let view = if ix == 0 { View::Chat } else { View::Terminal };
+                let _ = weak.update(cx, |s, cx| s.set_view(view, cx));
+            }),
+        );
+        Some(
+            strip
+                .when(waiting, |d| {
+                    d.child(div().px_2().text_size(px(10.5)).text_color(muted).child("Chat when this turn ends"))
+                })
+                .child(
+                    div()
+                        .id("default-view")
+                        .px_2()
+                        .text_size(px(10.5))
+                        .text_color(muted)
+                        .cursor_pointer()
+                        .hover(|d| d.text_color(theme.foreground))
+                        .child(if default_terminal { "New sessions open in Terminal" } else { "New sessions open in Chat" })
+                        .tooltip(|w, cx| {
+                            gpui_kit::component::tooltip::Tooltip::new("Click to change which view new sessions open in").build(w, cx)
+                        })
+                        .on_click(move |_, window, cx| {
+                            let settings = cx.global::<crate::AppSettings>().0.clone();
+                            let next = if default_terminal { "chat" } else { "terminal" };
+                            settings.borrow_mut().default_view = next.into();
+                            let _ = settings.borrow().save();
+                            window.refresh();
+                        }),
+                )
+                .into_any_element(),
+        )
+    }
+
+    /// In the terminal view, the files the agent changed this session, as links.
+    fn render_edits(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let chat = &self.session.read(cx).chat;
+        let mut seen: Vec<(PathBuf, usize, usize)> = Vec::new();
+        for item in chat.items.iter().rev() {
+            if let Item::Tool(t) = item
+                && let Some(d) = &t.diff
+                && t.done()
+                && !t.is_error
+                && !seen.iter().any(|(p, ..)| *p == d.path)
+            {
+                seen.push((d.path.clone(), d.added(), d.removed()));
+            }
+            if seen.len() >= 6 {
+                break;
+            }
+        }
+        if seen.is_empty() {
+            return None;
+        }
+        let theme = cx.theme();
+        let (muted, link, green, red, border) = (theme.muted_foreground, theme.blue, theme.green, theme.red, theme.border);
+        let root = PathBuf::from(&chat.cwd);
+        let mut row = div()
+            .flex_none()
+            .h(px(22.))
+            .px_2()
+            .flex()
+            .items_center()
+            .gap_3()
+            .border_t_1()
+            .border_color(border)
+            .text_size(px(11.))
+            .text_color(muted)
+            .child("Edited:");
+        for (i, (path, added, removed)) in seen.into_iter().enumerate() {
+            let name = path.strip_prefix(&root).unwrap_or(&path).display().to_string();
+            row = row.child(
+                div()
+                    .id(("edited", i))
+                    .flex()
+                    .gap_1()
+                    .cursor_pointer()
+                    .child(div().text_color(link).child(name))
+                    .child(div().text_color(green).child(format!("+{added}")))
+                    .child(div().text_color(red).child(format!("-{removed}")))
+                    .on_click(cx.listener(move |_, _, _, cx| cx.emit(ChatPanelEvent::OpenFile(path.clone(), None)))),
+            );
+        }
+        Some(row.into_any_element())
+    }
+}
+
 impl Focusable for ChatPanel {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus.clone()
@@ -927,6 +1049,10 @@ impl Render for ChatPanel {
         }
         let _ = (fg, red, user_bg);
         let scroll = self.scroll.clone();
+        let terminal = {
+            let s = self.session.read(cx);
+            (s.view == View::Terminal).then(|| s.terminal_view()).flatten()
+        };
         crate::perf::record("chat build (elements)", started.elapsed());
         div()
             .size_full()
@@ -938,7 +1064,11 @@ impl Render for ChatPanel {
             .border_color(if focused { ring } else { transparent_black() })
             .child(self.render_header(cx))
             .children(self.render_agent_strip(cx))
-            .child(
+            .when_some(terminal.clone(), |d, term| {
+                d.child(div().flex_1().min_h_0().relative().child(term))
+                    .children(self.render_edits(cx))
+            })
+            .when(terminal.is_none(), |d| d.child(
                 div()
                     .id("chat-scroll")
                     .flex_1()
@@ -959,7 +1089,8 @@ impl Render for ChatPanel {
                     .border_t_1()
                     .border_color(border)
                     .child(Textarea::new(&self.input).text_sm()),
-            )
+            ))
+            .children(self.render_views(cx))
     }
 }
 
