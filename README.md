@@ -165,7 +165,11 @@ Each session runs `claude` (`--session-id <new id>`, or `--resume <id>`, with
 the system's temporary folder, removed when the window closes) that adds hooks. Nothing in
 `~/.claude` is changed. Each hook runs `workbench-hook <socket> <token> <event>` (built next
 to `workbench`; standard library only), which passes the hook's input to the window over a
-local socket:
+local socket. Otherwise it is started as in a person's terminal: no stream flags, TERM
+`xterm-256color`, LANG set when the window has none, and the variables a running Claude Code
+gives its children unset (when the window was itself started from one).
+
+The hooks:
 
 - `SessionStart`: the interface is up; messages typed before it wait until then.
 - `UserPromptSubmit`, `PreToolUse`, `Stop`, `Notification`: the status dot (working, which
