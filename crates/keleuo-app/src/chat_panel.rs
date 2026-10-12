@@ -68,6 +68,8 @@ pub struct ChatPanel {
     last_revision: u64,
     /// Redraws once a second while subagents or tool calls run (their elapsed time).
     ticker: Option<Task<()>>,
+    /// When the agent became busy with the current turn (for the time on the thinking line).
+    busy_since: Option<std::time::Instant>,
     /// The Chat and Terminal view tabs.
     views: Rc<StripState>,
     _subs: Vec<Subscription>,
@@ -120,6 +122,11 @@ impl ChatPanel {
             },
         );
         let s2 = cx.observe(&session, |panel, session, cx| {
+            match (session.read(cx).chat.busy, panel.busy_since) {
+                (true, None) => panel.busy_since = Some(std::time::Instant::now()),
+                (false, Some(_)) => panel.busy_since = None,
+                _ => {}
+            }
             let rev = session.read(cx).chat.revision;
             if rev != panel.last_revision {
                 panel.last_revision = rev;
@@ -170,6 +177,7 @@ impl ChatPanel {
             toggled: HashSet::new(),
             index: Arc::new(FileIndex::default()),
             last_revision: 0,
+            busy_since: None,
             ticker: None,
             views: Rc::new(StripState::default()),
             _subs: vec![s1, s2],
@@ -1492,7 +1500,8 @@ impl ChatPanel {
             Some(_) => format!("{name} is working…"),
         };
         let theme = cx.theme();
-        let (ring, border, accent) = (theme.ring, theme.border, theme.accent);
+        let (ring, border, accent, muted) = (theme.ring, theme.border, theme.accent, theme.muted_foreground);
+        let elapsed = self.busy_since.map(|t| format_elapsed(t.elapsed()));
         Some(
             div()
                 .flex_none()
@@ -1507,6 +1516,9 @@ impl ChatPanel {
                 .text_sm()
                 .child(Spinner::new().color(ring))
                 .child(ShimmerText::new(label).id("thinking"))
+                // How long this turn has been going, at the right.
+                .child(div().flex_1())
+                .when_some(elapsed, |d, e| d.child(div().flex_none().text_xs().text_color(muted).child(e)))
                 .into_any_element(),
         )
     }
@@ -2023,15 +2035,32 @@ fn hover_actions(group: SharedString, key: String, text: String, muted: Hsla) ->
 
 /// Something with a live clock runs: a subagent or a tool call.
 fn clocks_running(chat: &keleuo_core::conversation::Conversation) -> bool {
-    chat.running_agents().next().is_some() || chat.running_tools().next().is_some()
+    chat.busy || chat.running_agents().next().is_some() || chat.running_tools().next().is_some()
 }
 
-/// `42s`, `3m 05s`.
+/// `42s`, `3m 05s`, `2h 05m 09s`, `1d 3h 05m 09s`.
 fn format_elapsed(d: std::time::Duration) -> String {
     let s = d.as_secs();
-    if s < 60 {
-        format!("{s}s")
-    } else {
-        format!("{}m {:02}s", s / 60, s % 60)
+    let (days, h, m, sec) = (s / 86_400, s / 3600 % 24, s / 60 % 60, s % 60);
+    match (days, h, m) {
+        (0, 0, 0) => format!("{sec}s"),
+        (0, 0, _) => format!("{m}m {sec:02}s"),
+        (0, _, _) => format!("{h}h {m:02}m {sec:02}s"),
+        _ => format!("{days}d {h}h {m:02}m {sec:02}s"),
+    }
+}
+
+#[cfg(test)]
+mod elapsed_tests {
+    use super::format_elapsed;
+    use std::time::Duration;
+
+    #[test]
+    fn reads_from_seconds_to_days() {
+        let t = |s| format_elapsed(Duration::from_secs(s));
+        assert_eq!(t(42), "42s");
+        assert_eq!(t(185), "3m 05s");
+        assert_eq!(t(2 * 3600 + 5 * 60 + 9), "2h 05m 09s");
+        assert_eq!(t(86_400 + 3 * 3600 + 5 * 60 + 9), "1d 3h 05m 09s");
     }
 }
