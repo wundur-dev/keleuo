@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use gpui_kit::prelude::*;
 use gpui_kit::*;
-use keleion_core::agent::{Agent, Backend, Event, Follow, Hook, Message, StartOptions};
+use keleion_core::agent::{Agent, Backend, Event, Follow, Hook, Launch, Message, StartOptions};
 use keleion_core::conversation::Conversation;
 use keleion_core::host::Host;
 
@@ -141,6 +141,8 @@ pub struct AgentSession {
     pasted_images: Vec<PathBuf>,
     /// Restart the interface when the turn ends (a new model).
     restart_after_turn: bool,
+    /// Why the interface is starting again, while it does (for the composer).
+    pub restarting: Option<String>,
 }
 
 impl EventEmitter<SessionEvent> for AgentSession {}
@@ -177,6 +179,7 @@ impl AgentSession {
             skip_images: 0,
             pasted_images: Vec::new(),
             restart_after_turn: false,
+            restarting: None,
         }
     }
 
@@ -200,6 +203,11 @@ impl AgentSession {
         let (host, backend, cwd) = (self.host.clone(), self.backend.clone(), self.cwd.clone());
         let id = self.chat.session_id.clone()?;
         Some(move |from, to| backend.load_segment(host.as_ref(), &cwd, &id, from, to))
+    }
+
+    /// Messages waiting for the interface to be up.
+    pub fn queued_count(&self) -> usize {
+        self.queued.len()
     }
 
     /// Whether the agent's own terminal interface drives this session (Chat is then a view of
@@ -333,10 +341,21 @@ impl AgentSession {
         if self.hooks.is_none() {
             self.hooks = hooks::register(cx.entity().downgrade(), self.backend.as_ref(), cx);
         }
-        let fork = std::mem::take(&mut self.fork_next);
-        let (id, new) = match self.chat.session_id.clone() {
-            Some(id) => (id, false),
-            None => (new_session_id(), true),
+        let fork_asked = std::mem::take(&mut self.fork_next);
+        // Continue only a conversation that exists: a session started here that has had no
+        // message yet has no file, and `--resume` would fail ("No conversation found"). Every
+        // launch and relaunch (model, mode, view, take over, after an exit) comes through here.
+        let has_messages = self
+            .chat
+            .session_id
+            .as_deref()
+            .is_some_and(|id| self.backend.session_has_messages(self.host.as_ref(), &self.cwd, id));
+        let launch = Launch::decide(self.chat.session_id.is_some(), has_messages, fork_asked);
+        let fork = launch == Launch::Fork;
+        let (id, new) = match (launch, self.chat.session_id.clone()) {
+            (Launch::New, Some(id)) => (id, true),
+            (Launch::New, None) => (new_session_id(), true),
+            (_, id) => (id.unwrap_or_else(new_session_id), false),
         };
         let options = StartOptions {
             cwd: self.cwd.clone(),
@@ -347,6 +366,9 @@ impl AgentSession {
             settings: self.hooks.as_ref().map(|h| h.settings.clone()),
         };
         let Some(spec) = self.backend.terminal_program(&options, &id, new) else { return };
+        if crate::perf::enabled() || keleion_core::env_var("LOG_LAUNCH").is_ok() {
+            eprintln!("keleion: launch {} {}", spec.program, spec.args.iter().filter(|a| !a.ends_with(".json")).cloned().collect::<Vec<_>>().join(" "));
+        }
         let command = self.host.program_command(&spec);
         let placeholder = Placeholder {
             lines: last_lines(&self.chat, 12),
@@ -438,6 +460,7 @@ impl AgentSession {
             return;
         }
         self.ready = true;
+        self.restarting = None;
         for (text, images) in std::mem::take(&mut self.queued) {
             self.type_with_images(text, images, cx);
         }
@@ -510,6 +533,7 @@ impl AgentSession {
                 self.chat.push_notice(format!("Model: {model}. Applies when this turn ends."));
             } else {
                 self.stop();
+                self.restarting = Some(format!("with {model}"));
                 self.start_terminal(cx);
                 self.chat.push_notice(format!("Model: {model}."));
             }
@@ -667,6 +691,7 @@ impl AgentSession {
                 }
                 if std::mem::take(&mut self.restart_after_turn) {
                     self.stop();
+                    self.restarting = self.model.as_ref().map(|m| format!("with {m}"));
                     self.start_terminal(cx);
                 }
             }
@@ -870,6 +895,7 @@ impl AgentSession {
         let now = self.interactive() && self.running(cx) && !self.chat.busy;
         self.stop();
         if now {
+            self.restarting = Some("in the new permission mode".into());
             self.start_terminal(cx);
         }
         self.chat.push_notice(format!(

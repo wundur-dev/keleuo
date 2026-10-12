@@ -105,6 +105,12 @@ impl Backend for ClaudeBackend {
         history::load_session(host, &path, &project.to_string_lossy())
     }
 
+    fn session_has_messages(&self, host: &dyn Host, project: &Path, id: &str) -> bool {
+        let Some(home) = skills::claude_home(host) else { return false };
+        let path = history::project_sessions_dir(&home, project).join(format!("{id}.jsonl"));
+        history::has_messages(host, &path)
+    }
+
     fn load_segment(&self, host: &dyn Host, project: &Path, id: &str, from: u64, to: u64) -> std::io::Result<Vec<crate::conversation::Item>> {
         let home = skills::claude_home(host).ok_or_else(|| std::io::Error::other("no home folder"))?;
         let path = history::project_sessions_dir(&home, project).join(format!("{id}.jsonl"));

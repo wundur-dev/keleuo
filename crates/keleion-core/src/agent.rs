@@ -65,6 +65,29 @@ pub enum Event {
 /// cycles them, and that key.
 pub type ModeCycle = (Vec<(String, String)>, Vec<u8>);
 
+/// How to start an agent's interface on a session: continue it (`--resume`) only when it has
+/// a conversation to continue; a session that has none yet starts afresh under its id, and a
+/// fork of one with nothing to copy starts afresh too.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Launch {
+    /// A new conversation under this id.
+    New,
+    /// Continue the conversation.
+    Resume,
+    /// Continue a copy of it.
+    Fork,
+}
+
+impl Launch {
+    pub fn decide(has_id: bool, has_messages: bool, fork: bool) -> Self {
+        match (has_id && has_messages, fork) {
+            (false, _) => Launch::New,
+            (true, true) => Launch::Fork,
+            (true, false) => Launch::Resume,
+        }
+    }
+}
+
 /// What the agent's own interface reports through the window's hooks, in neutral terms (see
 /// [`Backend::hook_settings`] and [`Backend::parse_hook`]).
 #[derive(Clone, Debug, PartialEq)]
@@ -245,6 +268,12 @@ pub trait Backend: Send + Sync {
     fn load_session(&self, _host: &dyn Host, _project: &Path, _id: &str) -> std::io::Result<Conversation> {
         Err(std::io::Error::other("this agent cannot resume sessions"))
     }
+    /// Whether session `id` of `project` has a conversation the agent can continue (its file
+    /// exists and holds a message). Until then a restart must start it afresh under the same
+    /// id, not continue it.
+    fn session_has_messages(&self, _host: &dyn Host, _project: &Path, _id: &str) -> bool {
+        true
+    }
     /// The items of an [`crate::conversation::Item::Earlier`] part of session `id`.
     fn load_segment(&self, _host: &dyn Host, _project: &Path, _id: &str, _from: u64, _to: u64) -> std::io::Result<Vec<crate::conversation::Item>> {
         Err(std::io::Error::other("this agent cannot read earlier parts"))
@@ -362,5 +391,24 @@ impl Registry {
     /// The first backend: the default for new sessions.
     pub fn default_backend(&self) -> Option<Arc<dyn Backend>> {
         self.backends.first().cloned()
+    }
+}
+
+#[cfg(test)]
+mod launch_tests {
+    use super::Launch;
+
+    /// Every relaunch (model, mode, view, take over, after an exit) before the first message:
+    /// the session has an id but no conversation, so it starts afresh under that id.
+    #[test]
+    fn a_restart_before_the_first_message_starts_afresh() {
+        assert_eq!(Launch::decide(true, false, false), Launch::New);
+        // A fork asked of a session with nothing in it yet starts afresh too.
+        assert_eq!(Launch::decide(true, false, true), Launch::New);
+        // No id yet: new.
+        assert_eq!(Launch::decide(false, false, false), Launch::New);
+        // With a conversation: continue it, or a copy.
+        assert_eq!(Launch::decide(true, true, false), Launch::Resume);
+        assert_eq!(Launch::decide(true, true, true), Launch::Fork);
     }
 }

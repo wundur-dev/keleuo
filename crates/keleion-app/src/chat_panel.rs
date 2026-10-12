@@ -1444,6 +1444,9 @@ impl ChatPanel {
         let model = session.chat.model.clone().or_else(|| session.model.clone()).unwrap_or_else(|| "default model".into());
         let mode = session.live_mode.clone().or_else(|| session.permission_mode.clone()).unwrap_or_else(|| "default".into());
         let has_text = !self.input.read(cx).value().trim().is_empty() || !self.attachments.is_empty();
+        let restarting = session.restarting.clone();
+        let queued = session.queued_count();
+        let name = session.backend.name();
         let weak = self.session.downgrade();
         let entity = cx.entity().downgrade();
 
@@ -1604,6 +1607,22 @@ impl ChatPanel {
                     .shadow_md()
                     .drag_over::<ExternalPaths>(move |d, _, _, _| d.border_color(accent))
                     .on_drop(cx.listener(|p, paths: &ExternalPaths, _, cx| p.attach(paths.paths().to_vec(), cx)))
+                    .when_some(restarting, |d, why| {
+                        // Restarting (a new model or mode): what is typed now waits for it.
+                        d.child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .text_size(px(11.5))
+                                .text_color(muted)
+                                .child(Icon::new(IconName::LoaderCircle).xsmall())
+                                .child(match queued {
+                                    0 => format!("Restarting {name} {why}. A message sent now goes when it is up."),
+                                    n => format!("Restarting {name} {why}. {n} message{} waiting to go.", if n == 1 { "" } else { "s" }),
+                                }),
+                        )
+                    })
                     .when(!self.attachments.is_empty(), |d| d.child(chips))
                     .child(
                         Textarea::new(&self.input)

@@ -121,6 +121,24 @@ fn user_images(v: &Value) -> Vec<PathBuf> {
         .collect()
 }
 
+/// Whether a session file exists and holds a message (read until the first one).
+pub fn has_messages(host: &dyn Host, path: &Path) -> bool {
+    let mut found = false;
+    let _ = host.for_each_line(path, 0, None, &mut |_, line| {
+        if (line.contains("\"type\":\"user\"") || line.contains("\"type\":\"assistant\""))
+            && serde_json::from_str::<Value>(line)
+                .ok()
+                .and_then(|v| v.get("type").and_then(Value::as_str).map(|t| t == "user" || t == "assistant"))
+                == Some(true)
+        {
+            found = true;
+            return false;
+        }
+        true
+    });
+    found
+}
+
 /// The sessions of `folder`, newest first, at most `max`.
 pub fn list_sessions(
     host: &dyn Host,
@@ -891,6 +909,20 @@ mod tests {
         let earlier = load_segment(&crate::host::LocalHost, &path, "/p", from, to).unwrap();
         assert!(matches!(&earlier[0], Item::User(t) if t == "first"));
         assert!(matches!(&earlier[1], Item::Assistant { text, .. } if text == "one"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_session_without_a_message_has_nothing_to_resume() {
+        let dir = std::env::temp_dir().join(format!("keleion-hasmsg-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let host = crate::host::LocalHost;
+        let path = dir.join("s.jsonl");
+        assert!(!has_messages(&host, &path), "no file yet");
+        std::fs::write(&path, "{\"type\":\"permission-mode\"}\n{\"type\":\"file-history-snapshot\"}\n").unwrap();
+        assert!(!has_messages(&host, &path), "only bookkeeping lines");
+        std::fs::write(&path, "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"hi\"}}\n").unwrap();
+        assert!(has_messages(&host, &path));
         let _ = std::fs::remove_dir_all(dir);
     }
 
