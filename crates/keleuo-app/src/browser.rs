@@ -572,7 +572,7 @@ impl Browser {
         };
         col = col
             .child(div().text_lg().text_color(fg).child(heading))
-            .child(div().text_xs().text_color(muted).truncate().child(folder.display().to_string()));
+            .child(div().text_xs().text_color(muted).truncate().child(short_path(&folder)));
         let (h1, b1, f1) = (host.clone(), backend.clone(), folder.clone());
         let mut actions = div().flex().gap_2().child(
             Button::new("start-new")
@@ -598,7 +598,7 @@ impl Browser {
             let name = input.read(cx).value().trim().to_string();
             let repo = name_of(top);
             let from = branch.clone().map(|b| format!(" ({b})")).unwrap_or_default();
-            let parent = top.parent().map(|p| p.display().to_string()).unwrap_or_default();
+            let parent = top.parent().map(short_path).unwrap_or_default();
             col = col.child(
                 div()
                     .flex()
