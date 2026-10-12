@@ -18,6 +18,7 @@ use gpui_kit::*;
 use keleuo_core::host::{Host, LocalHost, SshHost};
 use keleuo_core::settings::Settings;
 
+mod about;
 mod actions;
 mod app_icon;
 mod browser;
@@ -34,6 +35,7 @@ mod icons;
 mod palette;
 mod panels;
 mod perf;
+mod procstats;
 mod instance;
 mod pty;
 mod sheet_tabs;
@@ -188,6 +190,7 @@ fn main() {
             cx.set_global(backends::Backends(backends::registry()));
             workspace::register_panels(cx);
             theme::apply(theme::wants_dark(cx), cx);
+            cx.on_action(|_: &ShowAbout, cx| about::open(cx));
             cx.on_action(|_: &AppearanceSystem, cx| theme::set_appearance("system", cx));
             cx.on_action(|_: &AppearanceLight, cx| theme::set_appearance("light", cx));
             cx.on_action(|_: &AppearanceDark, cx| theme::set_appearance("dark", cx));

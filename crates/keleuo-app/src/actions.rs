@@ -5,6 +5,7 @@ use gpui_kit::*;
 actions!(
     keleuo,
     [
+        ShowAbout,
         Quit,
         OpenFolder,
         Save,
@@ -62,7 +63,11 @@ pub fn bind_keys(cx: &mut App) {
 
 pub fn menus() -> Vec<Menu> {
     vec![
-        Menu::new("Keleuo").items([MenuItem::action("Quit Keleuo", Quit)]),
+        Menu::new("Keleuo").items([
+            MenuItem::action("About Keleuo", ShowAbout),
+            MenuItem::separator(),
+            MenuItem::action("Quit Keleuo", Quit),
+        ]),
         Menu::new("File").items([
             MenuItem::action("Open Folder...", OpenFolder),
             MenuItem::action("Save", Save),
