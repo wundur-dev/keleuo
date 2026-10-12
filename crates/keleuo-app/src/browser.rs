@@ -103,12 +103,8 @@ impl Browser {
         let filter = cx.new(|cx| InputState::new(window, cx).placeholder("Filter folders, or type a path (~/code)"));
         let sub = cx.subscribe_in(&filter, window, |b, _, ev: &InputEvent, window, cx| match ev {
             InputEvent::Change => b.rebuild_rows(cx),
-            InputEvent::PressEnter { secondary, .. } => {
-                // A path typed or pasted: go there; else open the selected folder.
-                if !b.go_to_typed(window, cx) {
-                    b.open_default(*secondary, window, cx)
-                }
-            }
+            // A path typed or pasted: go there; else open the selected folder.
+            InputEvent::PressEnter { secondary, .. } if !b.go_to_typed(window, cx) => b.open_default(*secondary, window, cx),
             _ => {}
         });
         filter.update(cx, |f, cx| f.focus(window, cx));
