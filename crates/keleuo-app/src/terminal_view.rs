@@ -243,6 +243,24 @@ impl TerminalView {
     }
 
     /// The visible screen as text, one line per row (tests read it over the control channel).
+    /// The last `max` lines of scrollback and the screen, top to bottom (trailing spaces
+    /// trimmed), with the width in columns.
+    pub fn recent_lines(&self, max: usize) -> Option<(Vec<String>, usize)> {
+        let pty = self.pty.as_ref()?;
+        let term = pty.term.lock();
+        let grid = term.grid();
+        let screen = grid.screen_lines() as i32;
+        let history = (grid.history_size() as i32).min(max.saturating_sub(screen as usize) as i32);
+        let lines = (-history..screen)
+            .map(|l| {
+                let row = &grid[Line(l)];
+                let text: String = (0..grid.columns()).map(|c| row[Column(c)].c).collect();
+                text.trim_end().to_string()
+            })
+            .collect();
+        Some((lines, grid.columns()))
+    }
+
     pub fn screen_text(&self) -> String {
         let Some(pty) = &self.pty else { return String::new() };
         let term = pty.term.lock();

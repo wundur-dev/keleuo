@@ -616,9 +616,47 @@ impl ChatPanel {
                     .flex()
                     .flex_col()
                     .gap_2()
-                    .children(self.render_items(std::slice::from_ref(&item), &format!("main{ix}"), cx)),
+                    .children(match self.preview_text(ix, &item, cx) {
+                        Some(text) => vec![self.render_preview(text, cx)],
+                        None => self.render_items(std::slice::from_ref(&item), &format!("main{ix}"), cx),
+                    }),
             )
             .into_any_element()
+    }
+
+    /// The text of item `ix` when it is a preview of the reply being written (read off the
+    /// agent's screen), not text from its record.
+    fn preview_text(&self, ix: usize, item: &Item, cx: &App) -> Option<String> {
+        if self.agent.is_some() || self.session.read(cx).chat.preview_item() != Some(ix) {
+            return None;
+        }
+        match item {
+            Item::Assistant { text, .. } => Some(text.clone()),
+            _ => None,
+        }
+    }
+
+    /// The reply being written, as plain text with its lines kept (the screen has already
+    /// turned its Markdown into terminal text); the finished reply replaces it, formatted.
+    fn render_preview(&self, text: String, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let (fg, muted) = (theme.foreground, theme.muted_foreground);
+        let mut col = div().w_full().flex().flex_col().text_color(fg).line_height(rems(1.5));
+        for line in text.lines() {
+            col = col.child(if line.trim().is_empty() { div().h(rems(0.75)) } else { div().child(line.to_string()) });
+        }
+        col.child(
+            div()
+                .pt_1()
+                .flex()
+                .items_center()
+                .gap_1()
+                .text_xs()
+                .text_color(muted)
+                .child(self.spinner(muted).xsmall())
+                .child("Writing…"),
+        )
+        .into_any_element()
     }
 
     pub fn focus_input(&self, window: &mut Window, cx: &mut App) {

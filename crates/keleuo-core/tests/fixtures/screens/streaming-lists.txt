@@ -1,0 +1,36 @@
+ ▐▛███▛█   Claude Code v2.1.296
+▝▜██████▀  Haiku 5.5 · Claude Max
+ ▝▝   ▝▝   ~/projects/demo
+
+
+❯ Without using any tools, explain in about 40 lines how a hash map works. Use a heading, two short paragraphs, a
+  bulleted list of 6 items, a numbered list of 4 steps, a small table, and a short Rust code block.
+
+⏺ How a Hash Map Works
+
+  A hash map stores key-value pairs in an array of buckets. To insert or look up a key, it runs the key through a hash
+  function, which produces an integer. That integer, reduced modulo the bucket count, picks the slot. Because the map
+  jumps straight to a slot instead of scanning every entry, lookups take constant time on average.
+
+  Two different keys can land in the same bucket, which is a collision. Implementations handle this with chaining (each
+  bucket holds a small list) or open addressing (probe for the next free slot). When the table gets too full, it grows:
+  it allocates a larger array and re-inserts every entry, because each key's bucket index depends on the capacity.
+
+  - Average O(1) insert, lookup, and removal
+  - Worst case O(n) when many keys collide
+  - Keys need equality and a consistent hash function
+  - Iteration order is unspecified and can change after a resize
+  - The load factor trades memory use against collision rate
+  - Good hash functions spread keys evenly across buckets
+
+  A lookup follows four steps:
+
+  1. Hash the key into an integer.
+  2.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ auto mode on (shift+tab to cycle) · esc to interrupt · ← 1 agent
+
+

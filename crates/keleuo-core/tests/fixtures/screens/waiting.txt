@@ -1,0 +1,36 @@
+ ▐▛███▛█   Claude Code v2.1.296
+▝▜██████▀  Haiku 5.5 · Claude Max
+ ▝▝   ▝▝   ~/projects/demo
+
+
+❯ Without using any tools, explain in about 40 lines how a hash map works. Use a heading, two short paragraphs, a
+  bulleted list of 6 items, a numbered list of 4 steps, a small table, and a short Rust code block.
+
+· Canoodling…
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ auto mode on (shift+tab to cycle) · esc to interrupt · ← 1 agent
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

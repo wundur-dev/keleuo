@@ -102,6 +102,8 @@ pub struct AgentSession {
     /// Opened again at start: its conversation shows, but its agent starts only when it is
     /// needed (a message, or its Terminal shown), so reopening many sessions costs nothing.
     pub dormant: bool,
+    /// When the reply preview was last read off the terminal (at most ten times a second).
+    preview_read: Option<std::time::Instant>,
     pub cwd: PathBuf,
     pub chat: Conversation,
     pub backend: Arc<dyn Backend>,
@@ -165,6 +167,7 @@ impl AgentSession {
             backend,
             host,
             dormant: false,
+            preview_read: None,
             chat: Conversation::new(cwd.to_string_lossy().to_string()),
             cwd,
             permission_mode: keleuo_core::env_var("PERMISSION_MODE").ok().filter(|m| !m.is_empty()),
@@ -254,6 +257,24 @@ impl AgentSession {
         }
         if self.waiting_for.is_none() && !self.dormant {
             self.start_terminal(cx);
+        }
+    }
+
+    /// The terminal drew: while the agent works and Chat shows, read the reply it is writing
+    /// off the screen as a preview (the record has it only once it is finished).
+    fn read_preview(&mut self, view: &Entity<TerminalView>, cx: &mut Context<Self>) {
+        if !self.chat.busy || self.view != View::Chat {
+            return;
+        }
+        let now = std::time::Instant::now();
+        if self.preview_read.is_some_and(|t| now.duration_since(t) < PREVIEW_EVERY) {
+            return;
+        }
+        self.preview_read = Some(now);
+        let Some((lines, columns)) = view.read(cx).recent_lines(PREVIEW_LINES) else { return };
+        if let Some(text) = self.backend.reply_preview(&lines, columns) {
+            self.chat.apply(Event::TextPreview(text));
+            cx.notify();
         }
     }
 
@@ -418,6 +439,7 @@ impl AgentSession {
         });
         self.pasted_images.clear();
         let exit = cx.observe(&view, |s, view, cx| {
+            s.read_preview(&view, cx);
             if view.read(cx).exited && s.ready {
                 s.ready = false;
                 s.drop_waiting(cx);
@@ -987,6 +1009,12 @@ impl AgentSession {
         self.chat.process_ended();
     }
 }
+
+/// How often at most the reply preview is read off the terminal.
+const PREVIEW_EVERY: std::time::Duration = std::time::Duration::from_millis(100);
+/// Lines of scrollback and screen the preview is looked for in (a reply taller than this gets
+/// no preview: its start is out of reach).
+const PREVIEW_LINES: usize = 400;
 
 /// A message as compared with its copy in the session file: without the interface's image
 /// markers (`[Image #1]`) and outer spaces.

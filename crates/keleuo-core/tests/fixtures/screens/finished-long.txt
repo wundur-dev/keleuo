@@ -1,0 +1,36 @@
+  1. Hash the key into an integer.
+  2. Take that integer modulo the bucket count to get an index.
+  3. Walk the bucket, comparing stored keys for equality.
+  4. Return the matching value, or report that the key is absent.
+
+  ┌───────────┬─────────┬────────────┐
+  │ Operation │ Average │ Worst case │
+  ├───────────┼─────────┼────────────┤
+  │ Insert    │ O(1)    │ O(n)       │
+  ├───────────┼─────────┼────────────┤
+  │ Get       │ O(1)    │ O(n)       │
+  ├───────────┼─────────┼────────────┤
+  │ Remove    │ O(1)    │ O(n)       │
+  └───────────┴─────────┴────────────┘
+
+  Here is a short example using Rust's standard HashMap:
+
+  use std::collections::HashMap;
+
+  fn main() {
+      let mut ages: HashMap<&str, u32> = HashMap::new();
+      ages.insert("alice", 31);
+      ages.insert("bob", 27);
+
+      if let Some(age) = ages.get("alice") {
+          println!("alice is {age}");
+      }
+  }
+
+✻ Cooked for 7s · done 12:33 PM
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ auto mode on (shift+tab to cycle) · ← 1 agent
+

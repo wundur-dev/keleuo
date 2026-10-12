@@ -67,6 +67,10 @@ pub enum Event {
     SubagentBackground { id: String, agent_id: Option<String> },
     /// A message from another agent: a background subagent's report, or a teammate's.
     AgentMessage { from: String, text: String },
+    /// A preview of the reply being written, read off the agent's screen before its record has
+    /// it: shown until the finished text arrives ([`Event::Text`]), and dropped if a tool call
+    /// or the end of the turn comes instead.
+    TextPreview(String),
     /// What a running tool has printed so far (its latest part), while it runs.
     ToolOutput { id: String, text: String },
     /// A tool call failed in a known way (see [`Issue`]).
@@ -404,6 +408,12 @@ pub trait Backend: Send + Sync {
     /// its notes) so they belong to the new name. Nothing to move by default.
     fn folder_renamed(&self, _host: &dyn Host, _old: &Path, _new: &Path) -> std::io::Result<()> {
         Ok(())
+    }
+    /// The reply being written, read off the agent's own interface (its terminal's lines,
+    /// scrollback first, and its width), for a preview in the chat. `None` when there is none,
+    /// or the screen does not look as expected.
+    fn reply_preview(&self, _lines: &[String], _columns: usize) -> Option<String> {
+        None
     }
     /// Apply fix `fix` of the known issue `kind` (see [`Issue`]) for `project`; what was done,
     /// in a sentence.

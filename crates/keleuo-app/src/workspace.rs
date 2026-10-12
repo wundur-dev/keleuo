@@ -1265,6 +1265,31 @@ impl Workspace {
                 settings.borrow_mut().default_view = arg.to_string();
                 let _ = settings.borrow().save();
             }
+            "chat-last" => {
+                // The chat's last item: a preview or not, and the start of its text (tests).
+                let chat = &self.session.read(cx).chat;
+                let n = chat.items.len();
+                return match chat.items.last() {
+                    Some(keleuo_core::conversation::Item::Assistant { text, streaming }) => format!(
+                        "{} {} chars streaming={streaming}: {}",
+                        if chat.preview_item() == Some(n - 1) { "PREVIEW" } else { "reply" },
+                        text.len(),
+                        text.chars().take(50).collect::<String>().replace('\n', " / ")
+                    ),
+                    Some(other) => format!("{:?}", std::mem::discriminant(other)),
+                    None => "empty".into(),
+                };
+            }
+            "term-dump" => {
+                // The agent's terminal screen, blank lines kept, written to a file (tests).
+                return match self.session.read(cx).terminal_view() {
+                    Some(t) => match std::fs::write(arg, t.read(cx).screen_text()) {
+                        Ok(()) => "ok".into(),
+                        Err(e) => e.to_string(),
+                    },
+                    None => "no terminal view".into(),
+                };
+            }
             "term-screen" => {
                 return match self.session.read(cx).terminal_view() {
                     Some(t) => t.read(cx).screen_text().lines().filter(|l| !l.is_empty()).collect::<Vec<_>>().join(" | "),

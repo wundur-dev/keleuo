@@ -11,6 +11,7 @@ pub mod map;
 pub mod messages;
 pub mod pricing;
 pub mod process;
+pub mod screen;
 pub mod skills;
 pub mod stream;
 pub mod summary;
@@ -236,6 +237,10 @@ impl Backend for ClaudeBackend {
             ages: &recent,
             own,
         })
+    }
+
+    fn reply_preview(&self, lines: &[String], columns: usize) -> Option<String> {
+        screen::reply_in_progress(lines, columns)
     }
 
     fn apply_fix(&self, host: &dyn Host, project: &Path, kind: &str, fix: &str) -> std::io::Result<String> {

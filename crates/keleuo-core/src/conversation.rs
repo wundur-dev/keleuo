@@ -187,6 +187,9 @@ pub struct Conversation {
     pub status: Option<String>,
     /// Index of the assistant text item receiving streamed deltas.
     streaming: Option<usize>,
+    /// The streaming item is a preview read off the agent's screen, not text from its stream:
+    /// replaced by the finished text, removed if anything else comes first.
+    preview: bool,
     /// Cost total at the start of the process run (the result total restarts with a new process).
     cost_base: f64,
     /// Bumped on every change, so a view can tell when to redraw.
@@ -395,11 +398,36 @@ impl Conversation {
     }
 
     fn finish_streaming(&mut self) {
+        if std::mem::take(&mut self.preview) {
+            // A preview the finished text never replaced: it goes.
+            if let Some(ix) = self.streaming.take().filter(|ix| *ix < self.items.len()) {
+                self.items.remove(ix);
+            }
+            return;
+        }
         if let Some(Item::Assistant { streaming, .. }) =
             self.streaming.take().and_then(|i| self.items.get_mut(i))
         {
             *streaming = false;
         }
+    }
+
+    /// The item shown as a preview of the reply being written, if any.
+    pub fn preview_item(&self) -> Option<usize> {
+        self.preview.then_some(self.streaming).flatten()
+    }
+
+    /// Whether the reply `text` (as a preview has it) is in this turn's replies already: the
+    /// screen still shows a reply after its record has it.
+    fn delivered(&self, text: &str) -> bool {
+        let key: String = letters(text).chars().take(60).collect();
+        if key.is_empty() {
+            return true;
+        }
+        let from = self.items.iter().rposition(|i| matches!(i, Item::User(_))).map_or(0, |i| i + 1);
+        self.items[from.min(self.items.len())..].iter().enumerate().any(|(k, item)| {
+            Some(from + k) != self.preview_item() && matches!(item, Item::Assistant { text: t, .. } if letters(t).contains(&key))
+        })
     }
 
     /// Apply one event.
@@ -436,7 +464,22 @@ impl Conversation {
                     self.agent_entry(&parent).items.push(Item::Assistant { text, streaming: false });
                 }
             }
+            Event::TextPreview(text) => {
+                if self.delivered(&text) {
+                    if self.preview {
+                        self.finish_streaming();
+                    }
+                } else if let Some(Item::Assistant { text: t, .. }) = self.preview_item().and_then(|i| self.items.get_mut(i)) {
+                    *t = text;
+                } else if self.streaming.is_none() {
+                    self.items.push(Item::Assistant { text, streaming: true });
+                    self.streaming = Some(self.items.len() - 1);
+                    self.preview = true;
+                }
+            }
             Event::Text { text, parent: None } => {
+                // The finished text: it takes the place of the preview, if there is one.
+                self.preview = false;
                 if let Some(Item::Assistant { text: t, streaming }) =
                     self.streaming.take().and_then(|i| self.items.get_mut(i))
                 {
@@ -769,6 +812,33 @@ fn plural(n: usize, word: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_preview_gives_way_to_the_finished_reply() {
+        let mut c = Conversation::new("/p");
+        c.apply(Event::UserText("Explain".into()));
+        c.apply(Event::TextPreview("How a hash".into()));
+        c.apply(Event::TextPreview("How a hash map works".into()));
+        assert_eq!(c.preview_item(), Some(1));
+        assert!(matches!(&c.items[1], Item::Assistant { text, streaming: true } if text == "How a hash map works"));
+        c.apply(Event::Text { text: "# How a hash map works\n\nIt hashes.".into(), parent: None });
+        assert_eq!(c.preview_item(), None);
+        assert_eq!(c.items.len(), 2);
+        assert!(matches!(&c.items[1], Item::Assistant { text, streaming: false } if text.starts_with("# How")));
+        // The screen still shows that reply: no second copy.
+        c.apply(Event::TextPreview("How a hash map works It hashes.".into()));
+        assert_eq!(c.items.len(), 2);
+    }
+
+    #[test]
+    fn a_preview_nothing_replaced_goes() {
+        let mut c = Conversation::new("/p");
+        c.apply(Event::UserText("Go".into()));
+        c.apply(Event::TextPreview("Listing the folder".into()));
+        c.apply(Event::ToolCall { id: "t".into(), name: "Bash".into(), summary: "ls".into(), input: Value::Null, diff: None, parent: None });
+        assert!(c.items.iter().all(|i| !matches!(i, Item::Assistant { .. })), "{:?}", c.items);
+        assert_eq!(c.preview_item(), None);
+    }
+
     use super::*;
     use crate::diff::{self, FileDiff};
     use serde_json::json;
@@ -870,4 +940,10 @@ mod tests {
              *Turn took 3s*\n"
         );
     }
+}
+
+/// Letters and digits only, lower case: a reply as Markdown and as the screen shows it compare
+/// equal this way.
+fn letters(text: &str) -> String {
+    text.chars().filter(|c| c.is_alphanumeric()).flat_map(char::to_lowercase).collect()
 }

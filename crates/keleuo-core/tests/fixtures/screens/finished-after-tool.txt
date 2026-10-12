@@ -1,0 +1,36 @@
+
+  Here is a short example using Rust's standard HashMap:
+
+  use std::collections::HashMap;
+
+  fn main() {
+      let mut ages: HashMap<&str, u32> = HashMap::new();
+      ages.insert("alice", 31);
+      ages.insert("bob", 27);
+
+      if let Some(age) = ages.get("alice") {
+          println!("alice is {age}");
+      }
+  }
+
+✻ Cooked for 7s · done 12:33 PM
+
+❯ Run the shell command ls -la, then in two short paragraphs describe what is in this folder.
+
+  Listed 1 directory (ctrl+o to expand)
+
+⏺ The folder holds one file, README.md, which is 10 bytes and was last modified on Oct 12 at 12:32. The listing shows no
+  subdirectories. The . entry has a link count of 3, which normally means there is one subdirectory, but none appears
+  in the listing, so something may be hidden or the count may be off.
+
+  I haven't opened README.md, so I can't say what it contains. At 10 bytes it is probably a short title or placeholder.
+  If you want, I can read it or check the link count further.
+
+✻ Cooked for 5s · done 12:35 PM
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ read the README.md file
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ auto mode on (shift+tab to cycle) · ← 1 agent
+
+

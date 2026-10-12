@@ -1,0 +1,36 @@
+  │ Insert    │ O(1)    │ O(n)       │
+  ├───────────┼─────────┼────────────┤
+  │ Get       │ O(1)    │ O(n)       │
+  ├───────────┼─────────┼────────────┤
+  │ Remove    │ O(1)    │ O(n)       │
+  └───────────┴─────────┴────────────┘
+
+  Here is a short example using Rust's standard HashMap:
+
+  use std::collections::HashMap;
+
+  fn main() {
+      let mut ages: HashMap<&str, u32> = HashMap::new();
+      ages.insert("alice", 31);
+      ages.insert("bob", 27);
+
+      if let Some(age) = ages.get("alice") {
+          println!("alice is {age}");
+      }
+  }
+
+✻ Cooked for 7s · done 12:33 PM
+
+❯ Run the shell command ls -la, then in two short paragraphs describe what is in this folder.
+
+  Listing 1 directory… (ctrl+o to expand)
+  ⎿  $ ls -la
+
+✻ Moseying… (1s · ↓ 8 tokens)
+  ⎿  Tip: Control this session from the Claude mobile app (https://claude.com/download#mobile) · run /remote-control
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ auto mode on (shift+tab to cycle) · esc to interrupt · ← 1 agent
+
