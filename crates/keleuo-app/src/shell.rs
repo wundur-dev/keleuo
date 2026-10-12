@@ -1353,7 +1353,13 @@ impl Render for Shell {
                 let ix = (s.active + n - 1) % n;
                 s.activate(ix, w, cx)
             }))
-            .on_action(cx.listener(|s, _: &OpenFolder, w, cx| s.new_session(w, cx)))
+            // Cmd+O: the browser, with the system's folder picker over it.
+            .on_action(cx.listener(|s, _: &OpenFolder, w, cx| {
+                s.new_session(w, cx);
+                if let Some(b) = s.browser.clone() {
+                    b.update(cx, |b, cx| b.choose_folder(w, cx));
+                }
+            }))
             .on_action(cx.listener(|s, _: &RenameFolder, w, cx| {
                 if let Some(ws) = s.active_workspace() {
                     let (host, root) = {

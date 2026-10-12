@@ -100,10 +100,15 @@ impl Browser {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let filter = cx.new(|cx| InputState::new(window, cx).placeholder("Type to filter folders"));
+        let filter = cx.new(|cx| InputState::new(window, cx).placeholder("Filter folders, or type a path (~/code)"));
         let sub = cx.subscribe_in(&filter, window, |b, _, ev: &InputEvent, window, cx| match ev {
             InputEvent::Change => b.rebuild_rows(cx),
-            InputEvent::PressEnter { secondary, .. } => b.open_default(*secondary, window, cx),
+            InputEvent::PressEnter { secondary, .. } => {
+                // A path typed or pasted: go there; else open the selected folder.
+                if !b.go_to_typed(window, cx) {
+                    b.open_default(*secondary, window, cx)
+                }
+            }
             _ => {}
         });
         filter.update(cx, |f, cx| f.focus(window, cx));
@@ -294,6 +299,56 @@ impl Browser {
             self.filter_clear(window, cx);
             self.go_to(path, None, cx);
         }
+    }
+
+    /// The filter holds a path (`/…` or `~/…`) to a folder: go there. Whether it did.
+    fn go_to_typed(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let text = self.filter.read(cx).value().trim().to_string();
+        let path = match text.strip_prefix('~') {
+            Some(rest) if rest.is_empty() || rest.starts_with('/') => match self.host.home_dir() {
+                Some(home) => home.join(rest.trim_start_matches('/')),
+                None => return false,
+            },
+            _ if text.starts_with('/') => PathBuf::from(&text),
+            _ => return false,
+        };
+        if self.host.read_dir(&path).is_err() {
+            self.note = Some(format!("No folder at {}.", path.display()));
+            cx.notify();
+            return true;
+        }
+        self.note = None;
+        self.filter_clear(window, cx);
+        self.go_to(path.clone(), Some(path), cx);
+        true
+    }
+
+    /// The system's folder picker (this machine only); the chosen folder is shown and selected.
+    pub fn choose_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.host.is_remote() {
+            return;
+        }
+        let picked = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Open".into()),
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(Ok(Some(paths))) = picked.await else { return };
+            let Some(path) = paths.into_iter().next() else { return };
+            let _ = this.update_in(cx, |b, window, cx| b.show_folder(path, window, cx));
+        })
+        .detach();
+    }
+
+    /// Go to a folder from elsewhere (picked, or dropped from the Finder); a file means its
+    /// folder.
+    fn show_folder(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let path = if path.is_dir() { path } else { path.parent().map(Path::to_path_buf).unwrap_or(path) };
+        self.note = None;
+        self.filter_clear(window, cx);
+        self.go_to(path.clone(), Some(path), cx);
     }
 
     fn go_up(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -812,7 +867,17 @@ impl Render for Browser {
                                     .tooltip("Up a folder (Cmd+Up)")
                                     .on_click(cx.listener(|b, _, window, cx| b.go_up(window, cx))),
                             )
-                            .child(div().flex_1().min_w_0().truncate().text_xs().text_color(muted).child(short_path(&self.dir))),
+                            .child(div().flex_1().min_w_0().truncate().text_xs().text_color(muted).child(short_path(&self.dir)))
+                            .when(!self.host.is_remote(), |d| {
+                                d.child(
+                                    Button::new("choose-folder")
+                                        .xsmall()
+                                        .ghost()
+                                        .icon(IconName::FolderOpen)
+                                        .tooltip("Choose a folder… (Cmd+O)")
+                                        .on_click(cx.listener(|b, _, window, cx| b.choose_folder(window, cx))),
+                                )
+                            }),
                     )
                     .child(Input::new(&self.filter).small()),
             )
@@ -820,6 +885,15 @@ impl Render for Browser {
         div()
             .id("browser")
             .track_focus(&self.focus)
+            // A folder (or a file in one) dropped from the Finder: go there.
+            .on_drop(cx.listener(|b, paths: &ExternalPaths, window, cx| {
+                if b.host.is_remote() {
+                    return;
+                }
+                if let Some(p) = paths.paths().first() {
+                    b.show_folder(p.clone(), window, cx);
+                }
+            }))
             .size_full()
             .flex()
             .flex_col()
