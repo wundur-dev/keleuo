@@ -39,6 +39,10 @@ const TOOLS: [&str; 4] = ["Files", "Skills", "Agent", "Terminals"];
 pub const HEADER_HEIGHT: f32 = 26.;
 /// A tool group's tabs along the bottom.
 pub const BOTTOM_STRIP: f32 = 24.;
+/// Space between a tool panel's content and its tabs along the bottom.
+pub const STRIP_GAP_ABOVE: f32 = 5.;
+/// Space below those tabs, before the panel's bottom edge.
+pub const STRIP_GAP_BELOW: f32 = 4.;
 /// A document group's tabs along the top.
 pub const TOP_STRIP: f32 = 28.;
 
@@ -502,13 +506,18 @@ impl TabGroupRenderer for SheetGroup {
         }
         let theme = cx.theme();
         let (ground, content) = (sheet_tabs::mix(theme.sidebar, gpui_kit::black(), 0.45), theme.sidebar);
+        // Room in the panel's colour above the tabs, so the list does not run into them (the
+        // shown tab still joins the panel through it), and a little below them.
         div()
             .flex()
             .flex_col()
             .flex_1()
             .min_h_0()
+            .bg(content)
             .child(view)
+            .child(div().flex_none().h(px(STRIP_GAP_ABOVE)))
             .child(self.strip(group, Joined::Top, BOTTOM_STRIP, ground, content, None, window, cx))
+            .child(div().flex_none().h(px(STRIP_GAP_BELOW)))
             .into_any_element()
     }
 
