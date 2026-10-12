@@ -27,6 +27,9 @@ actions!(
         PrevSession,
         RenameSession,
         ToggleSessions,
+        AppearanceSystem,
+        AppearanceLight,
+        AppearanceDark,
     ]
 );
 
@@ -75,6 +78,10 @@ pub fn menus() -> Vec<Menu> {
             MenuItem::action("Split Right", SplitRight),
             MenuItem::action("Split Down", SplitDown),
             MenuItem::action("Reset Layout", ResetLayout),
+            MenuItem::separator(),
+            MenuItem::action("Appearance: System", AppearanceSystem),
+            MenuItem::action("Appearance: Light", AppearanceLight),
+            MenuItem::action("Appearance: Dark", AppearanceDark),
             MenuItem::separator(),
             MenuItem::action("Zoom Files and Terminals", FocusRight),
             MenuItem::action("Zoom Claude", FocusClaude),

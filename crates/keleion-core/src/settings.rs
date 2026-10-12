@@ -62,6 +62,8 @@ pub struct Settings {
     /// When to show what a session costs: `"auto"` (the default: only when the agent is
     /// billed per use, else how full its context is), `"always"` or `"never"`.
     pub cost_display: String,
+    /// Light or dark: `"system"` (the default: follow macOS), `"light"` or `"dark"`.
+    pub appearance: String,
     #[serde(skip)]
     path: Option<PathBuf>,
 }

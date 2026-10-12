@@ -592,7 +592,7 @@ impl Render for TerminalView {
         let base = div()
             .id("terminal")
             .size_full()
-            .bg(hsla(palette::BACKGROUND))
+            .bg(hsla(palette::background()))
             .border_t_2()
             .border_color(if focused { ring } else { transparent_black() })
             .track_focus(&self.focus)
@@ -604,7 +604,7 @@ impl Render for TerminalView {
             .on_scroll_wheel(cx.listener(Self::scroll))
             .cursor(CursorStyle::IBeam);
         if let Some(err) = &self.error {
-            return base.p_2().text_color(hsla(0xcc6666)).child(err.clone());
+            return base.p_2().text_color(hsla(if palette::is_dark() { 0xcc6666 } else { 0xc0392b })).child(err.clone());
         }
         let placeholder = self
             .placeholder
@@ -616,7 +616,7 @@ impl Render for TerminalView {
                     .inset_0()
                     .px_2()
                     .pb_3()
-                    .bg(hsla(palette::BACKGROUND))
+                    .bg(hsla(palette::background()))
                     .flex()
                     .flex_col()
                     .justify_end()
@@ -628,11 +628,11 @@ impl Render for TerminalView {
                     col = col.child(
                         div()
                             .truncate()
-                            .text_color(hsla(if *user { 0x9a9a9a } else { 0x6e6e6e }))
+                            .text_color(hsla(palette::dim()).opacity(if *user { 1.0 } else { 0.8 }))
                             .child(if *user { format!("> {line}") } else { line.clone() }),
                     );
                 }
-                col.child(div().pt_2().text_color(hsla(0xb0b0b0)).child(p.label.clone()))
+                col.child(div().pt_2().text_color(hsla(palette::foreground())).child(p.label.clone()))
             });
         base.px_1().relative().child(
             canvas(
@@ -679,9 +679,9 @@ impl Render for TerminalView {
                 .top(y)
                 .p_1()
                 .rounded_md()
-                .bg(hsla(0x2a2b2e))
+                .bg(hsla(palette::background()))
                 .border_1()
-                .border_color(hsla(0x44464b))
+                .border_color(hsla(palette::dim()))
                 .shadow_lg()
                 .child(img(path).max_w(px(320.)).max_h(px(240.)).object_fit(ObjectFit::Contain))
         }))
@@ -705,7 +705,7 @@ fn paint_grid(
     let rows = term.screen_lines();
     let font_size = px(FONT_SIZE);
     let base_font = font(FONT_FAMILY);
-    let default_bg = palette::BACKGROUND;
+    let default_bg = palette::background();
     let grid = term.grid();
 
     for row in 0..rows {
@@ -740,8 +740,8 @@ fn paint_grid(
             let mut fg = palette::resolve(fg_color, colors, true);
             let mut bg = palette::resolve(bg_color, colors, false);
             if selection.is_some_and(|s| s.contains(gp)) {
-                bg = palette::SELECTION;
-                fg = palette::FOREGROUND;
+                bg = palette::selection();
+                fg = palette::foreground();
             }
             match bg_start {
                 Some((start, color)) if color != bg => {
@@ -854,7 +854,7 @@ fn paint_grid(
                 bounds.origin.x + cell.width * cursor.point.column.0 as f32,
                 bounds.origin.y + cell.height * row as f32,
             );
-            let color = hsla(palette::CURSOR);
+            let color = hsla(palette::cursor());
             let block = Bounds::new(origin, cell);
             if !focused {
                 window.paint_quad(outline(block, color, BorderStyle::Solid));

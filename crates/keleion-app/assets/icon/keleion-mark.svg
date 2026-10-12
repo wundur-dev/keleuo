@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="60 140 800 800" role="img" aria-labelledby="title">
+  <title id="title">Keleion mark: the pixel friend alone, for small sizes</title>
+  <rect x="60" y="140" width="800" height="800" fill="#6084E8"/>
+  <g id="pixel-friend">
+    <g id="body-depth">
+      <path fill="#E3D7BC" d="M187 247 263 274 263 714 187 690Z"/>
+      <path fill="#FFFEF8" d="M187 247 294 197 390 231 327 270 263 274Z"/>
+      <path fill="#E5D9C0" d="M327 270 390 231 390 300 327 341Z"/>
+      <path fill="#FFFCF2" d="M327 341 390 300 457 324 399 362Z"/>
+      <path fill="#E5D9C0" d="M399 362 457 324 457 392 399 430Z"/>
+      <path fill="#FFFCF2" d="M399 430 457 392 550 417 490 452Z"/>
+      <path fill="#E5D9C0" d="M490 452 550 417 550 478 490 512Z"/>
+      <path fill="#FFFCF2" d="M490 512 550 478 643 493 584 530Z"/>
+      <path fill="#E5D9C0" d="M584 530 643 493 643 555 584 594Z"/>
+      <path fill="#FFFCF2" d="M584 594 643 555 732 569 657 612Z"/>
+      <path fill="#E5D9C0" d="M657 612 732 569 732 669 657 713Z"/>
+    </g>
+    <g id="feet-depth">
+      <path fill="#CEBD98" d="M343 716 392 728 389 788 314 832 314 770 343 776Z"/>
+      <path fill="#ECE0C6" d="M222 749 263 726 303 742 263 766Z"/>
+      <path fill="#D2C19C" d="M584 699 657 713 615 748 615 765 543 807 543 757 584 766Z"/>
+      <path fill="#F5ECD9" d="M543 807 615 765 655 776 584 816Z"/>
+      <path fill="#DFD0AF" d="M584 816 655 776 655 839 584 880Z"/>
+    </g>
+    <path id="front" fill="#FFF9ED" d="M263 274 327 270V341L399 362V430L490 452V512L584 530V594L657 612V713L584 699V766L543 757V807L584 816V880L471 855V743L343 716V776L314 770V832L222 811V749L263 758Z"/>
+    <g id="eyes" fill="#292A28">
+      <path d="M328 547 389 560 389 625 328 613Z"/>
+      <path d="M454 568 515 582 515 649 454 636Z"/>
+    </g>
+  </g>
+</svg>

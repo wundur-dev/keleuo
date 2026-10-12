@@ -113,6 +113,14 @@ Then `keleion`, `keleion ~/code/app`, `keleion --new .` or `keleion --ssh dev:/s
   `[Image #N]` on the terminal screen shows that image. Images in history show as
   thumbnails. They are kept in `~/Library/Caches/keleion/images/<session>` and removed after
   30 days; nothing is uploaded anywhere else.
+- **Light and dark** follow the macOS appearance, live; View > Appearance sets System, Light
+  or Dark (saved as `appearance`). Both carry the round 4 hierarchy; the terminal has a light
+  palette too and answers programs that ask for its colours (OSC 10/11), so those that adapt
+  can. The accent is the icon's periwinkle (#6084E8); crane yellow marks what wants
+  attention. Claude Code draws its own interface with its own theme setting, so in the light
+  terminal its theme may need to be set to light in Claude Code.
+- **The icon** (`crates/keleion-app/assets/icon`): the owner's art at 128 px and up, the
+  character alone for 16 to 64 px, in `Keleion.icns`; the Dock shows it while the app runs.
 - **Worktrees** are explicit: the browser's right side is titled with the folder's repository
   and branch, and "New session in a git worktree..." first shows what it will make ("Copy of
   proj (main) into ../proj-2, branch keleion/proj-2") with the name editable.

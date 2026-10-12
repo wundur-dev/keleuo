@@ -13,12 +13,13 @@ use std::rc::Rc;
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
-use gpui_kit::component::{Theme, ThemeMode};
+
 use gpui_kit::*;
 use keleion_core::host::{Host, LocalHost, SshHost};
 use keleion_core::settings::Settings;
 
 mod actions;
+mod app_icon;
 mod browser;
 mod backends;
 mod chat_panel;
@@ -143,7 +144,11 @@ fn window_options(title: String, w: f32, h: f32, cx: &App) -> WindowOptions {
 
 fn open_window(start: shell::Start, cx: &mut App) {
     let options = window_options("Keleion".into(), 1500., 940., cx);
-    match gpui_kit::open_window(options, cx, |window, cx| cx.new(|cx| shell::Shell::new(start, window, cx))) {
+    match gpui_kit::open_window(options, cx, |window, cx| {
+        // The system went light or dark: follow it (unless the setting says otherwise).
+        window.observe_window_appearance(|_, cx| theme::sync(cx)).detach();
+        cx.new(|cx| shell::Shell::new(start, window, cx))
+    }) {
         Ok((handle, shell)) => {
             cx.global_mut::<control::ControlTargets>().workspace = Some((handle, shell.downgrade()));
         }
@@ -168,18 +173,27 @@ fn main() {
         .with_assets(icons::AppAssets)
         .run(move |cx: &mut App| {
             perf::step("gpui init", || gpui_kit::init(cx));
-            Theme::change(ThemeMode::Dark, None, cx);
             let settings = perf::step("settings", || Settings::load(Settings::default_path()));
+            let forced = match settings.appearance.as_str() {
+                "light" => Some(WindowAppearance::Light),
+                "dark" => Some(WindowAppearance::Dark),
+                _ => None,
+            };
             cx.set_global(AppSettings(Rc::new(RefCell::new(settings))));
+            cx.set_window_appearance(forced);
             cx.set_global(panels::Names(Rc::new(RefCell::new(
                 keleion_core::tabs::NameStore::open_default(),
             ))));
             cx.set_global(panels::Renaming::default());
             cx.set_global(backends::Backends(backends::registry()));
             workspace::register_panels(cx);
-            theme::apply(cx);
+            theme::apply(theme::wants_dark(cx), cx);
+            cx.on_action(|_: &AppearanceSystem, cx| theme::set_appearance("system", cx));
+            cx.on_action(|_: &AppearanceLight, cx| theme::set_appearance("light", cx));
+            cx.on_action(|_: &AppearanceDark, cx| theme::set_appearance("dark", cx));
             control::start(cx);
             hooks::init(cx);
+            app_icon::set();
             // Cached images older than 30 days go (off the UI thread).
             std::thread::spawn(|| {
                 if let Some(root) = keleion_core::images::root() {

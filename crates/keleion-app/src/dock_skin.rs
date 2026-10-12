@@ -519,7 +519,8 @@ impl TabGroupRenderer for SheetGroup {
             return view.into_any_element();
         }
         let theme = cx.theme();
-        let (ground, content) = (sheet_tabs::mix(theme.sidebar, gpui_kit::black(), 0.45), theme.sidebar);
+        let depth = if theme.is_dark() { 0.45 } else { 0.07 };
+        let (ground, content) = (sheet_tabs::mix(theme.sidebar, gpui_kit::black(), depth), theme.sidebar);
         // Room in the panel's colour above the tabs, so the list does not run into them (the
         // shown tab still joins the panel through it), and a little below them.
         div()

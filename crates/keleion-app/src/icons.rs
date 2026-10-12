@@ -63,17 +63,23 @@ fn hex(rgb: u32) -> Hsla {
     gpui_kit::rgb(rgb).into()
 }
 
+/// A colour tuned for the dark theme, made deep enough to read on a light one.
+fn tone(rgb: u32, cx: &App) -> Hsla {
+    let c = hex(rgb);
+    if cx.theme().is_dark() { c } else { Hsla { l: (c.l * 0.62).min(0.42), s: (c.s * 1.1).min(1.0), ..c } }
+}
+
 /// Folders: one warm tone, distinct from every file colour.
-pub fn folder(open: bool) -> Icon {
+pub fn folder(open: bool, cx: &App) -> Icon {
     Icon::new(if open { Lucide::FolderOpen } else { Lucide::Folder })
         .xsmall()
-        .text_color(hex(0xc9a766))
+        .text_color(tone(0xc9a766, cx))
 }
 
 /// A file's icon by its type, coloured by language or kind.
 pub fn file(name: &str, cx: &App) -> Icon {
     let (icon, color) = file_kind(name);
-    let color = color.map(hex).unwrap_or(cx.theme().muted_foreground);
+    let color = color.map(|c| tone(c, cx)).unwrap_or(cx.theme().muted_foreground);
     Icon::new(icon).xsmall().text_color(color)
 }
 

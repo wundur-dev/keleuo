@@ -44,6 +44,22 @@ impl EventListener for Listener {
                 return;
             }
             TermEvent::ChildExit(_) | TermEvent::Exit => PtyEvent::Exited,
+            // A program asks for a colour (OSC 4/10/11/12), e.g. to tell a light background
+            // from a dark one: answer with the palette in use.
+            TermEvent::ColorRequest(index, format) => {
+                let c = match index {
+                    256 => crate::palette::foreground(),
+                    257 => crate::palette::background(),
+                    258 => crate::palette::cursor(),
+                    i if i < 256 => crate::palette::indexed(i as u8),
+                    _ => return,
+                };
+                let rgb = alacritty_terminal::vte::ansi::Rgb { r: (c >> 16) as u8, g: (c >> 8) as u8, b: c as u8 };
+                if let Some(w) = self.writer.lock().as_ref() {
+                    let _ = w.send(Msg::Input(Cow::Owned(format(rgb).into_bytes())));
+                }
+                return;
+            }
             _ => return,
         };
         // Coalesce: a pending wakeup already covers this one.

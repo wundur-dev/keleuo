@@ -32,3 +32,9 @@ lsp-types = { version = "0.97", features = ["proposed"] }
 [dev-dependencies]
 # The same gpui-kit with its headless UI test harness (drags, clicks, element queries).
 gpui-kit = { version = "=0.7.1", features = ["tree-sitter-languages", "test-support"] }
+
+# The Dock icon (no app bundle yet): NSApplication's icon image, from the embedded PNG.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSImage", "NSResponder"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSData"] }

@@ -502,6 +502,10 @@ impl Shell {
                 }
                 "ok".into()
             }
+            "appearance" => {
+                crate::theme::set_appearance(arg, cx);
+                format!("dark={}", gpui_kit::component::ActiveTheme::theme(&**cx).is_dark())
+            }
             "worktree-ask" => {
                 // Tests: show the worktree form for the selected folder.
                 match self.browser.clone() {

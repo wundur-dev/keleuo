@@ -1,21 +1,60 @@
-//! Terminal colours: the 16 ANSI colours (a dark theme), the 6x6x6 cube and the grey ramp.
+//! Terminal colours: the 16 ANSI colours (dark and light), the 6x6x6 cube and the grey ramp.
 
 use alacritty_terminal::term::color::Colors;
 use alacritty_terminal::vte::ansi::{Color, NamedColor, Rgb};
 
-const ANSI: [u32; 16] = [
+/// Dark: the Tomorrow Night colours.
+const ANSI_DARK: [u32; 16] = [
     0x1d1f21, 0xcc6666, 0xb5bd68, 0xf0c674, 0x81a2be, 0xb294bb, 0x8abeb7, 0xc5c8c6, // normal
     0x666666, 0xd54e53, 0xb9ca4a, 0xe7c547, 0x7aa6da, 0xc397d8, 0x70c0b1, 0xeaeaea, // bright
 ];
 
-pub const FOREGROUND: u32 = 0xd4d4d4;
-pub const BACKGROUND: u32 = 0x18191b;
-pub const CURSOR: u32 = 0xc0c0c0;
-pub const SELECTION: u32 = 0x3a4a64;
+/// Light: deeper hues that keep their contrast on a white page (white itself stays light, as
+/// programs use it for backgrounds and dim text).
+const ANSI_LIGHT: [u32; 16] = [
+    0x1d1f21, 0xc0392b, 0x2f7d32, 0x9a6400, 0x3a5fcf, 0x8e44ad, 0x13798a, 0xd8dbe0, // normal
+    0x5a5f69, 0xd0453a, 0x3b8f3e, 0xb07800, 0x4a6fe0, 0x9d55c0, 0x1a8a9c, 0xf2f3f5, // bright
+];
+
+static DARK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+/// Switch every terminal between the dark and the light palette.
+pub fn set_dark(dark: bool) {
+    DARK.store(dark, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn is_dark() -> bool {
+    DARK.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+fn ansi(i: usize) -> u32 {
+    if is_dark() { ANSI_DARK[i] } else { ANSI_LIGHT[i] }
+}
+
+pub fn foreground() -> u32 {
+    if is_dark() { 0xd4d4d4 } else { 0x1f2227 }
+}
+
+pub fn background() -> u32 {
+    if is_dark() { 0x18191b } else { 0xfdfdfe }
+}
+
+pub fn cursor() -> u32 {
+    if is_dark() { 0xc0c0c0 } else { 0x3a3d44 }
+}
+
+pub fn selection() -> u32 {
+    if is_dark() { 0x3a4a64 } else { 0xc9d6f8 }
+}
+
+/// Quiet text (a placeholder's lines, notes).
+pub fn dim() -> u32 {
+    if is_dark() { 0x9a9a9a } else { 0x6b707a }
+}
 
 pub fn indexed(i: u8) -> u32 {
     match i {
-        0..=15 => ANSI[i as usize],
+        0..=15 => ansi(i as usize),
         16..=231 => {
             let i = i - 16;
             let level = |v: u8| if v == 0 { 0 } else { 55 + v as u32 * 40 };
@@ -43,24 +82,24 @@ pub fn resolve(color: Color, overrides: &Colors, is_fg: bool) -> u32 {
                 return rgb(c);
             }
             match n {
-                NamedColor::Foreground | NamedColor::BrightForeground => FOREGROUND,
-                NamedColor::Background => BACKGROUND,
-                NamedColor::Cursor => CURSOR,
-                NamedColor::DimForeground => 0x9a9a9a,
-                n if (n as usize) < 16 => ANSI[n as usize],
+                NamedColor::Foreground | NamedColor::BrightForeground => foreground(),
+                NamedColor::Background => background(),
+                NamedColor::Cursor => cursor(),
+                NamedColor::DimForeground => dim(),
+                n if (n as usize) < 16 => ansi(n as usize),
                 // Dim colours: halve the normal ones.
                 n if (NamedColor::DimBlack as usize..=NamedColor::DimWhite as usize)
                     .contains(&(n as usize)) =>
                 {
-                    let base = ANSI[n as usize - NamedColor::DimBlack as usize];
+                    let base = ansi(n as usize - NamedColor::DimBlack as usize);
                     let half = |s: u32| ((base >> s) & 0xff) * 2 / 3;
                     (half(16) << 16) | (half(8) << 8) | half(0)
                 }
                 _ => {
                     if is_fg {
-                        FOREGROUND
+                        foreground()
                     } else {
-                        BACKGROUND
+                        background()
                     }
                 }
             }

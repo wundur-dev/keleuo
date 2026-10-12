@@ -1348,7 +1348,7 @@ impl Render for ChatPanel {
             .size_full()
             .flex()
             .flex_col()
-            .bg(gpui_kit::rgb(0x17181b))
+            .bg(cx.theme().background)
             .track_focus(&self.focus)
             .border_t_2()
             .border_color(if focused { ring } else { transparent_black() })

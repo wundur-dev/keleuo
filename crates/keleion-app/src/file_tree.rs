@@ -174,7 +174,7 @@ impl Render for FileTree {
                     let is_sel = selected.as_ref() == Some(&row.path);
                     let entity = entity.clone();
                     let icon = if row.is_dir {
-                        crate::icons::folder(row.open)
+                        crate::icons::folder(row.open, cx)
                     } else {
                         crate::icons::file(&row.name, cx)
                     };
