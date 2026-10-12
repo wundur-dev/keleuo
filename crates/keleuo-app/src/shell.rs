@@ -676,7 +676,8 @@ impl Shell {
             return;
         }
         self.active = ix;
-        self.peek = false;
+        // A session picked from the peeking list leaves the list out: it goes when the pointer
+        // moves on over the content.
         self.browser = None;
         self._browser_sub = None;
         let ws = self.tabs[ix].ws.clone();
