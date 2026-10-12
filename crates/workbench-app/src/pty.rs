@@ -113,6 +113,10 @@ impl Pty {
         env.insert("TERM".to_string(), "xterm-256color".to_string());
         env.insert("COLORTERM".to_string(), "truecolor".to_string());
         env.insert("TERM_PROGRAM".to_string(), "Workbench".to_string());
+        // A terminal sets the locale; a window started from the Finder has none.
+        if std::env::var_os("LANG").is_none() {
+            env.insert("LANG".to_string(), "en_US.UTF-8".to_string());
+        }
         env.extend(spec.env.iter().cloned());
         let options = tty::Options {
             shell: Some(tty::Shell::new(

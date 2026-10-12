@@ -48,6 +48,9 @@ pub struct Settings {
     pub session_views: std::collections::BTreeMap<String, String>,
     /// The session list folded to a rail.
     pub sessions_folded: bool,
+    /// When to show what a session costs: `"auto"` (the default: only when the agent is
+    /// billed per use, else how full its context is), `"always"` or `"never"`.
+    pub cost_display: String,
     #[serde(skip)]
     path: Option<PathBuf>,
 }

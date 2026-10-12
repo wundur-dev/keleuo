@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
 
-use crate::agent_session::View;
+use crate::agent_session::{Spend, View};
 use crate::sheet_tabs::{self, Joined, Palette, StripState};
 use gpui_kit::component::text::TextView;
 use gpui_kit::component::{ActiveTheme, Icon, IconName, Sizable};
@@ -152,6 +152,19 @@ impl ChatPanel {
                 .read(cx)
                 .focus_handle(cx)
                 .contains_focused(window, cx)
+    }
+
+    /// Tests: show every item, or scroll by `dy` pixels (down is positive).
+    pub fn test_command(&mut self, cmd: &str, dy: f32, cx: &mut Context<Self>) {
+        match cmd {
+            "all" => self.shown = usize::MAX,
+            _ => {
+                let o = self.scroll.offset();
+                self.follow = false;
+                self.scroll.set_offset(point(o.x, o.y - px(dy)));
+            }
+        }
+        cx.notify();
     }
 
     pub fn focus_input(&self, window: &mut Window, cx: &mut App) {
@@ -799,17 +812,33 @@ impl ChatPanel {
         if let Some(s) = &chat.status {
             status.push(s.clone());
         }
-        // "~": worked out from token counts and published prices.
-        let est = if chat.cost_estimated { "~" } else { "" };
-        if let Some(c) = chat.last_turn_cost_usd {
-            status.push(format!("turn {est}${c:.4}"));
-        }
-        if chat.total_cost_usd > 0.0 {
-            status.push(format!("total {est}${:.4}", chat.total_cost_usd));
-        }
-        if let Some((i, o)) = chat.last_turn_tokens {
-            status.push(format!("{}k in / {} out", i / 1000, o));
-        }
+        // Cost when billed per use (or the setting says so), else how full the context is.
+        let setting = cx.global::<crate::AppSettings>().0.borrow().cost_display.clone();
+        let (spend, spend_tip) = match session.spend(cx) {
+            Some(Spend::Cost { total, turn, estimated }) => {
+                // "~": worked out from token counts and published prices.
+                let est = if estimated { "~" } else { "" };
+                let turn = turn.map(|c| format!("turn {est}${c:.4} · ")).unwrap_or_default();
+                let tokens = chat.last_turn_tokens.map(|(i, o)| format!(" · {}k in / {o} out", i / 1000)).unwrap_or_default();
+                (
+                    Some(format!("{turn}total {est}${total:.4}{tokens}")),
+                    if estimated { "Estimated from token counts and published per-token prices" } else { "As the agent reported it" },
+                )
+            }
+            Some(Spend::Context { percent, tokens, window }) => (
+                Some(format!("{percent}% of context")),
+                if tokens > 0 && window > 0 { "Tokens the last turn sent, against the model's context window" } else { "" },
+            ),
+            None => (None, ""),
+        };
+        let spend_tip = format!(
+            "{spend_tip}. Cost shows: {}. Click to change.",
+            match setting.as_str() {
+                "always" => "always",
+                "never" => "never (context instead)",
+                _ => "auto (only when billed per use)",
+            }
+        );
         let accept_mode = caps.accept_edits_mode.clone();
         let accept = mode.is_some() && mode == accept_mode;
         let backend_name = session.backend.name();
@@ -832,6 +861,31 @@ impl ChatPanel {
                     .truncate()
                     .child(status.join(" · ")),
             )
+            .when_some(spend, |d, spend| {
+                d.child(
+                    div()
+                        .id("spend")
+                        .flex_none()
+                        .px_1()
+                        .rounded_sm()
+                        .cursor_pointer()
+                        .hover(|d| d.bg(hover))
+                        .child(spend)
+                        .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(spend_tip.clone()).build(w, cx))
+                        .on_click(|_, window, cx| {
+                            // Auto, then always, then never.
+                            let settings = cx.global::<crate::AppSettings>().0.clone();
+                            let next = match settings.borrow().cost_display.as_str() {
+                                "always" => "never",
+                                "never" => "auto",
+                                _ => "always",
+                            };
+                            settings.borrow_mut().cost_display = next.into();
+                            let _ = settings.borrow().save();
+                            window.refresh();
+                        }),
+                )
+            })
             .when_some(accept_mode, |d, accept_mode| d.child(
                 div()
                     .id("perm-mode")
@@ -1014,6 +1068,10 @@ impl Focusable for ChatPanel {
 impl Render for ChatPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let started = std::time::Instant::now();
+        if crate::perf::enabled() {
+            // Build, layout and paint: from here to the frame being on screen.
+            window.on_next_frame(move |_, _| crate::perf::record("chat frame (render to frame)", started.elapsed()));
+        }
         let focused = self.contains_focus(window, cx);
         let ring = cx.theme().ring;
         let theme = cx.theme();

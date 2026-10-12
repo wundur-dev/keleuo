@@ -200,6 +200,31 @@ pub fn section_header(
         }))
 }
 
+/// A session id, short (its first 8 characters) and quiet; the whole id in the tooltip, and a
+/// click copies it.
+pub fn short_id(id: String, key: impl Into<ElementId>, cx: &App) -> Stateful<Div> {
+    let muted = cx.theme().muted_foreground;
+    let short: String = id.chars().take(8).collect();
+    let tip = SharedString::from(format!("Session {id}. Click to copy."));
+    div()
+        .id(key.into())
+        .flex_none()
+        .px(px(3.))
+        .rounded_sm()
+        .font_family(crate::terminal_view::FONT_FAMILY)
+        .text_size(px(10.))
+        .text_color(muted.opacity(0.75))
+        .cursor_pointer()
+        .hover(|d| d.text_color(cx.theme().foreground))
+        .child(short)
+        .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(w, cx))
+        .on_click(move |_, window, cx| {
+            cx.stop_propagation();
+            cx.write_to_clipboard(ClipboardItem::new_string(id.clone()));
+            gpui_kit::component::WindowExt::push_notification(window, "Session id copied", cx);
+        })
+}
+
 fn list_title(icon: IconName, title: &'static str) -> AnyElement {
     div()
         .flex()

@@ -80,10 +80,57 @@ impl Tally {
     }
 }
 
+/// Whether Claude Code is billed per use, told from what it would use to sign in, without
+/// reading any credential: an API key or token in the environment (`local`: this process's
+/// environment is the agent's), a cloud provider switched on, or an `apiKeyHelper` or such a
+/// variable in a settings file (`settings`: their text; only the names are looked at).
+/// Otherwise it signs in with a subscription plan.
+pub fn billed_per_use(local: bool, env: &dyn Fn(&str) -> bool, settings: &[String]) -> bool {
+    const VARS: [&str; 5] =
+        ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY"];
+    if local && VARS.iter().any(|v| env(v)) {
+        return true;
+    }
+    settings.iter().any(|text| {
+        let Ok(v) = serde_json::from_str::<Value>(text) else { return false };
+        v.get("apiKeyHelper").is_some_and(|h| !h.is_null())
+            || v.get("env").and_then(Value::as_object).is_some_and(|e| VARS.iter().any(|k| e.contains_key(*k)))
+    })
+}
+
+/// The context window of a model in Claude Code, in tokens: a million for models run with
+/// the `[1m]` suffix and for the current Opus, Sonnet and Fable families, 200,000 otherwise.
+pub fn context_window(model: &str) -> u64 {
+    let m = model.to_ascii_lowercase();
+    let million = m.contains("[1m]")
+        || ["fable", "mythos", "opus-5", "sonnet-5", "opus-4-6", "opus-4-7", "opus-4-8", "sonnet-4-6"]
+            .iter()
+            .any(|f| m.contains(f));
+    if million { 1_000_000 } else { 200_000 }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn billing_is_told_without_credentials() {
+        let none = |_: &str| false;
+        assert!(!billed_per_use(true, &none, &["{\"model\": \"opus\"}".into()]));
+        assert!(billed_per_use(true, &|k: &str| k == "ANTHROPIC_API_KEY", &[]));
+        // The environment of this process says nothing about a remote host.
+        assert!(!billed_per_use(false, &|k: &str| k == "ANTHROPIC_API_KEY", &[]));
+        assert!(billed_per_use(false, &none, &["{\"apiKeyHelper\": \"~/bin/key\"}".into()]));
+        assert!(billed_per_use(true, &none, &["{\"env\": {\"ANTHROPIC_API_KEY\": \"x\"}}".into()]));
+    }
+
+    #[test]
+    fn context_windows() {
+        assert_eq!(context_window("claude-haiku-4-5"), 200_000);
+        assert_eq!(context_window("claude-opus-5-5"), 1_000_000);
+        assert_eq!(context_window("claude-sonnet-4-5[1m]"), 1_000_000);
+    }
 
     #[test]
     fn prices_by_family() {

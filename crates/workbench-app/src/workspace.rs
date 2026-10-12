@@ -778,9 +778,11 @@ impl Workspace {
         self.terms_list.update(cx, |_, cx| cx.notify());
     }
 
+    /// A new terminal tab next to the agent's tab (in its tab group), wherever that group is;
+    /// it can be dragged anywhere from there.
     pub fn new_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let anchor = self.recent_code_panel(cx);
-        let beside = self.any_session_panel(cx).map(|s| (s, Placement::Right));
+        let anchor = self.any_session_panel(cx).or_else(|| self.recent_code_panel(cx));
+        let beside = None;
         let view = self.spawn_terminal(window, cx);
         self.place(panel_handle(view.clone()), anchor, beside, window, cx);
         let handle = view.read(cx).focus.clone();
@@ -1127,6 +1129,7 @@ impl Workspace {
                     "skills" => PanelId::from(self.skills.entity_id()),
                     "agent" => PanelId::from(self.agent_side.entity_id()),
                     "terminals" => PanelId::from(self.terms_list.entity_id()),
+                    "chat" => PanelId::from(self.claude.entity_id()),
                     _ => PanelId::from(self.files.entity_id()),
                 };
                 self.show_panel(id, window, cx);
@@ -1139,6 +1142,11 @@ impl Workspace {
                     _ => self.recent_code_panel(cx),
                 };
                 self.toggle_zoom(id, window, cx);
+            }
+            "chat-all" | "chat-scroll" => {
+                let dy = arg.parse::<f32>().unwrap_or(0.0);
+                let c = if cmd == "chat-all" { "all" } else { "scroll" };
+                self.claude.update(cx, |p, cx| p.test_command(c, dy, cx));
             }
             "chat" => {
                 // The session's chat state, briefly (tests).

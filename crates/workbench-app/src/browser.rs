@@ -541,7 +541,16 @@ impl Browser {
                         .gap_1()
                         .py_1()
                         .child(div().text_sm().text_color(fg).truncate().child(title))
-                        .child(div().text_xs().text_color(amber).child(format!("running in another terminal{when}")))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .text_xs()
+                                .text_color(amber)
+                                .child(format!("running in another terminal{when}"))
+                                .child(crate::panels::short_id(id.clone(), ("running-id", i), cx)),
+                        )
                         .child(
                             div()
                                 .flex()
@@ -600,7 +609,16 @@ impl Browser {
                             .flex()
                             .flex_col()
                             .child(div().text_sm().text_color(fg).truncate().child(s.title.clone()))
-                            .child(div().text_xs().text_color(muted).child(format!("{when} · {} messages", s.messages))),
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_1()
+                                    .text_xs()
+                                    .text_color(muted)
+                                    .child(format!("{when} · {} messages", s.messages))
+                                    .child(crate::panels::short_id(s.id.clone(), ("recent-id", i), cx)),
+                            ),
                     )
                     .child(div().text_xs().text_color(muted).child(if open { "Switch to it" } else { "Continue" }))
                     .on_click(cx.listener(move |_, _, _, cx| {

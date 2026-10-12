@@ -71,6 +71,14 @@ Then `workbench`, `workbench ~/code/app`, `workbench --new .` or `workbench --ss
   terminal at the same time; whichever answers first counts. Each session remembers its
   view; "New sessions open in" on the strip sets the default. Hidden for backends without a
   terminal interface, and for SSH folders (those run the structured stream, Chat only).
+- **Cost or context.** On a subscription plan the session shows how full its context is
+  ("22% of context", from the last turn's tokens against the model's window); billed per use
+  (an API key or token in the environment, a cloud provider, or an `apiKeyHelper` in Claude
+  Code's settings; no credential is read) it shows the cost. Click it to switch Auto, Always
+  (cost) or Never (context).
+- **Session ids**: the first 8 characters next to each session in the list and the browser;
+  the whole id in the tooltip, a click copies it.
+- **New terminals** (Cmd+T, "+" in Terminals) open as a tab next to the agent's tab.
 - **Panel headers and sheet tabs** (after an earlier app): a tool panel (Files, Skills,
   Terminals, Agent) has a title bar with a grip to drag it by, its title, its actions and
   options on hover; tool panels sharing a spot put their tabs along the bottom, the shown one
@@ -107,7 +115,7 @@ Environment: `WORKBENCH_MODEL=haiku` picks the model; `WORKBENCH_PERMISSION_MODE
 starts sessions in that permission mode; `WORKBENCH_PERF=1` prints timings;
 `WORKBENCH_CONTROL=<fifo>` accepts test commands (`open`, `term`, `type`, `split`, `send`,
 `allow`, `new`, `browse`, `tab`, `tabs`, `move-session`, `fold-sessions`, `view`,
-`term-type`, `term-screen`, `chat`, `panel`, `earlier`, `resume`, `fork`, `takeover`, `key`, `state`,
+`term-type`, `term-screen`, `chat`, `chat-all`, `chat-scroll`, `panel`, `earlier`, `resume`, `fork`, `takeover`, `key`, `state`,
 ...; see `control.rs`, `shell.rs`, `workspace.rs`); `WORKBENCH_BACKGROUND=1` opens windows
 without taking focus; `WORKBENCH_CONFIG_DIR` moves the settings folder (and the window's
 socket with it); `WORKBENCH_TEST_BACKENDS=1` adds the scripted test agent to the browser.

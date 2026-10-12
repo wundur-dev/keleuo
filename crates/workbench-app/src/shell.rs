@@ -75,6 +75,9 @@ pub struct Shell {
     focus: FocusHandle,
     subs: HashMap<EntityId, Vec<Subscription>>,
     _browser_sub: Option<Subscription>,
+    /// What the shown browser opened, if anything: a double or triple click (or Enter held)
+    /// must open one session, not one per click. Also guards resumes still loading.
+    opening: OpenGuard,
     /// The last `earlier` listing (control channel).
     earlier: Vec<(workbench_core::agent::SessionInfo, Option<u32>)>,
 }
@@ -91,6 +94,7 @@ impl Shell {
             focus: cx.focus_handle(),
             subs: HashMap::new(),
             _browser_sub: None,
+            opening: OpenGuard::default(),
             earlier: Vec::new(),
         };
         match start {
@@ -133,6 +137,7 @@ impl Shell {
             b
         }));
         self._browser_sub = Some(cx.subscribe_in(&browser, window, |s, _, ev: &BrowserEvent, window, cx| s.on_browser(ev, window, cx)));
+        self.opening.browser_shown();
         self.browser = Some(browser);
         cx.notify();
     }
@@ -170,6 +175,9 @@ impl Shell {
                 }
             }
             BrowserEvent::New { host, root, backend, worktree } => {
+                if !self.opening.choose() {
+                    return;
+                }
                 if *worktree {
                     if let Err(e) = self.new_session_in_worktree(root.clone(), backend.clone(), window, cx) {
                         window.push_notification(format!("Could not make a worktree: {e}"), cx);
@@ -179,6 +187,9 @@ impl Shell {
                 }
             }
             BrowserEvent::Resume { host, root, backend, id, fork, wait_for } => {
+                if !self.opening.choose() {
+                    return;
+                }
                 self.resume(host.clone(), root.clone(), backend.clone(), id.clone(), *fork, *wait_for, window, cx)
             }
         }
@@ -205,10 +216,36 @@ impl Shell {
             self.activate(ix, window, cx);
             return;
         }
+        // Still loading from an earlier click or command: one session per conversation.
+        let key = format!("{}{id}", if fork { "fork:" } else { "" });
+        if !self.opening.start(&key) {
+            return;
+        }
         cx.spawn_in(window, async move |this, cx| {
             let (h, b, r) = (host.clone(), backend.clone(), root.clone());
             let chat = cx.background_spawn(async move { b.load_session(h.as_ref(), &r, &id) }).await;
-            let _ = this.update_in(cx, |s, window, cx| match chat {
+            let _ = this.update_in(cx, |s, window, cx| {
+                s.opening.finish(&key);
+                s.opened(chat, host, root, backend, fork, wait_for, window, cx)
+            });
+        })
+        .detach();
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn opened(
+        &mut self,
+        chat: std::io::Result<workbench_core::conversation::Conversation>,
+        host: Arc<dyn Host>,
+        root: PathBuf,
+        backend: Arc<dyn Backend>,
+        fork: bool,
+        wait_for: Option<u32>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let s = self;
+        match chat {
                 Ok(chat) => {
                     let mut session = AgentSession::resumed(host.clone(), backend, root.clone(), chat, fork);
                     if let Some(pid) = wait_for {
@@ -219,10 +256,12 @@ impl Shell {
                     }
                     s.add_session(host, root, session, None, wait_for, window, cx);
                 }
-                Err(e) => window.push_notification(format!("Could not read the session: {e}"), cx),
-            });
-        })
-        .detach();
+                Err(e) => {
+                    // Nothing opened: the browser may be used again.
+                    s.opening.browser_shown();
+                    window.push_notification(format!("Could not read the session: {e}"), cx)
+                }
+        }
     }
 
     // ----- sessions -----
@@ -542,11 +581,8 @@ impl Shell {
             let place = if w.host().is_remote() { format!("{}: {place}", w.host().label()) } else { place };
             let worktree = w.worktree.clone();
             let activity = s.chat.last_activity(80);
-            let est = if s.chat.cost_estimated { "~" } else { "" };
-            let cost = (s.chat.total_cost_usd > 0.0).then(|| match s.chat.total_cost_usd {
-                c if c < 0.1 => format!("{est}${c:.3}"),
-                c => format!("{est}${c:.2}"),
-            });
+            let cost = s.spend(cx).map(|sp| sp.short());
+            let short_id = s.chat.session_id.clone();
             let dot = self.dot(ix, cx);
             let key = self.key(ix);
             let auto = self.list_name(ix, cx);
@@ -605,6 +641,7 @@ impl Shell {
                                     .text_size(px(11.))
                                     .text_color(muted)
                                     .child(div().min_w_0().truncate().child(place))
+                                    .children(short_id.map(|id| panels::short_id(id, ("session-id", number), cx)))
                                     .children(worktree.map(|_| {
                                         div().flex_none().px_1().rounded_sm().bg(border).text_size(px(10.)).child("worktree")
                                     })),
@@ -928,5 +965,62 @@ impl Render for Shell {
             }))
             .child(top)
             .child(div().flex_1().min_h_0().flex().children(list).child(div().flex_1().min_w_0().h_full().child(main)))
+    }
+}
+
+/// Keeps one open from turning into several: the shown browser opens at most one session
+/// (a double or triple click sends one event per click), and a conversation still loading is
+/// not loaded again.
+#[derive(Default)]
+struct OpenGuard {
+    chosen: bool,
+    loading: std::collections::HashSet<String>,
+}
+
+impl OpenGuard {
+    /// A browser was shown: it may open one session.
+    fn browser_shown(&mut self) {
+        self.chosen = false;
+    }
+
+    /// The browser asks to open something: true the first time only.
+    fn choose(&mut self) -> bool {
+        !std::mem::replace(&mut self.chosen, true)
+    }
+
+    /// Start loading `key`: false while it is loading already.
+    fn start(&mut self, key: &str) -> bool {
+        self.loading.insert(key.to_string())
+    }
+
+    fn finish(&mut self, key: &str) {
+        self.loading.remove(key);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::OpenGuard;
+
+    #[::core::prelude::v1::test]
+    fn a_triple_click_opens_one_session() {
+        let mut g = OpenGuard::default();
+        g.browser_shown();
+        assert!(g.choose());
+        assert!(!g.choose());
+        assert!(!g.choose());
+        // The next browser may open again.
+        g.browser_shown();
+        assert!(g.choose());
+    }
+
+    #[::core::prelude::v1::test]
+    fn a_conversation_loading_is_not_loaded_twice() {
+        let mut g = OpenGuard::default();
+        assert!(g.start("abc"));
+        assert!(!g.start("abc"));
+        assert!(g.start("fork:abc"));
+        g.finish("abc");
+        assert!(g.start("abc"));
     }
 }

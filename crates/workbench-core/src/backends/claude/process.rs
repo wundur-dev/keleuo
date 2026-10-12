@@ -38,7 +38,7 @@ impl Options {
             env: Vec::new(),
             // Claude Code marks processes it starts; a window started from inside a Claude
             // session must not pass that on, or the agent stops saving its transcript.
-            unset: vec!["CLAUDE_CODE_CHILD_SESSION".into()],
+            unset: inherited_session_vars(),
             cwd: self.cwd.clone(),
         }
     }
@@ -186,6 +186,30 @@ fn read_lines<R: std::io::Read + Send + 'static>(
             sink(Message::Closed);
         }
     });
+}
+
+/// The variables a running Claude Code sets for the programs it starts. When the window was
+/// itself started from inside a Claude Code session they would make the window's `claude`
+/// behave as that session's child; a person's terminal has none of them, so they are unset.
+pub fn inherited_session_vars() -> Vec<String> {
+    const VARS: [&str; 11] = [
+        "CLAUDECODE",
+        "CLAUDE_CODE_ENTRYPOINT",
+        "CLAUDE_CODE_SESSION_ID",
+        "CLAUDE_CODE_CHILD_SESSION",
+        "CLAUDE_CODE_SESSION_ATTENDED",
+        "CLAUDE_CODE_MESSAGING_SOCKET",
+        "CLAUDE_CODE_MESSAGING_TOKEN",
+        "CLAUDE_CODE_BRIDGE_SESSION_ID",
+        "CLAUDE_CODE_EXECPATH",
+        "CLAUDE_PID",
+        "CLAUDE_EFFORT",
+    ];
+    let mut out = vec!["CLAUDE_CODE_CHILD_SESSION".to_string()];
+    if std::env::var_os("CLAUDECODE").is_some() {
+        out = VARS.iter().map(|v| v.to_string()).collect();
+    }
+    out
 }
 
 #[cfg(test)]

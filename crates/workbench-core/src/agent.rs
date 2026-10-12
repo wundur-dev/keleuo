@@ -248,6 +248,15 @@ pub trait Backend: Send + Sync {
     fn parse_hook(&self, _event: &str, _payload: &Value, _cwd: &str) -> Option<Hook> {
         None
     }
+    /// Whether `host`'s agent is billed per use (an API key) rather than by a subscription
+    /// plan, as far as can be told without reading any credential. `None`: cannot tell.
+    fn billed_per_use(&self, _host: &dyn Host, _project: &Path) -> Option<bool> {
+        None
+    }
+    /// The context window of `model`, in tokens, when known.
+    fn context_window(&self, _model: &str) -> Option<u64> {
+        None
+    }
     /// What a waiting permission hook answers.
     fn hook_reply(&self, _allow: bool) -> String {
         String::new()

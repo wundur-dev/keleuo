@@ -176,6 +176,10 @@ pub fn load_conversation(text: &str, cwd: &str) -> Conversation {
             chat.session_id = v.get("sessionId").and_then(Value::as_str).map(str::to_string);
         }
         chat.apply_all(line_events(&v, &mut mapper));
+        if let Some(end) = turn_end(&v) {
+            // The token counts of each finished turn (the last one gives the context in use).
+            chat.apply(end);
+        }
         if v.get("isSidechain").and_then(Value::as_bool) != Some(true) {
             let usd = tally.add(&v);
             if usd > 0.0 {

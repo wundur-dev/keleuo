@@ -24,6 +24,28 @@ use workbench_core::host::Host;
 use crate::hooks::{self, Registration, Reply};
 use crate::terminal_view::{Placeholder, TerminalView};
 
+/// What a session has used, as the window shows it.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Spend {
+    /// Dollars (`estimated`: from token counts and published prices).
+    Cost { total: f64, turn: Option<f64>, estimated: bool },
+    /// How full the context window is after the last turn.
+    Context { percent: u32, tokens: u64, window: u64 },
+}
+
+impl Spend {
+    /// Short, for the session list.
+    pub fn short(&self) -> String {
+        match self {
+            Spend::Cost { total, estimated, .. } => {
+                let est = if *estimated { "~" } else { "" };
+                if *total < 0.1 { format!("{est}${total:.3}") } else { format!("{est}${total:.2}") }
+            }
+            Spend::Context { percent, .. } => format!("{percent}%"),
+        }
+    }
+}
+
 /// Something the rest of the window should react to.
 #[derive(Clone, Debug)]
 pub enum SessionEvent {
@@ -92,6 +114,8 @@ pub struct AgentSession {
     asked: u64,
     /// With `WORKBENCH_PERF=1`: when the last message was sent, until its reply shows.
     sent_at: Option<std::time::Instant>,
+    /// Billed per use (an API key) rather than by a plan; `None` until known.
+    pub per_use: Option<bool>,
 }
 
 impl EventEmitter<SessionEvent> for AgentSession {}
@@ -121,6 +145,7 @@ impl AgentSession {
             starting: VecDeque::new(),
             asked: 0,
             sent_at: None,
+            per_use: None,
         }
     }
 
@@ -148,6 +173,17 @@ impl AgentSession {
     /// Start the session: its agent's interface (unless it waits for another process), in the
     /// view it was last shown in, else the default for new sessions.
     pub fn begin(&mut self, cx: &mut Context<Self>) {
+        // How it is billed decides whether cost or context shows (settings files: off the UI
+        // thread).
+        let (host, backend, cwd) = (self.host.clone(), self.backend.clone(), self.cwd.clone());
+        cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let per_use = cx.background_spawn(async move { backend.billed_per_use(host.as_ref(), &cwd) }).await;
+            let _ = this.update(cx, |s, cx| {
+                s.per_use = per_use;
+                cx.notify();
+            });
+        })
+        .detach();
         if !self.interactive() {
             return;
         }
@@ -167,6 +203,28 @@ impl AgentSession {
             self.start_terminal(cx);
         }
         cx.notify();
+    }
+
+    /// Cost when it is billed per use (or the setting says always), else how full the context
+    /// is. `None` before there is anything to show.
+    pub fn spend(&self, cx: &App) -> Option<Spend> {
+        let setting = cx.global::<crate::AppSettings>().0.borrow().cost_display.clone();
+        let cost = match setting.as_str() {
+            "always" => true,
+            "never" => false,
+            _ => self.per_use == Some(true),
+        };
+        if cost {
+            return (self.chat.total_cost_usd > 0.0).then_some(Spend::Cost {
+                total: self.chat.total_cost_usd,
+                turn: self.chat.last_turn_cost_usd,
+                estimated: self.chat.cost_estimated,
+            });
+        }
+        let tokens = self.chat.last_turn_tokens?.0;
+        let model = self.chat.model.clone().or_else(|| self.model.clone())?;
+        let window = self.backend.context_window(&model)?;
+        Some(Spend::Context { percent: ((tokens * 100) / window.max(1)) as u32, tokens, window })
     }
 
     // ----- the agent's own interface -----

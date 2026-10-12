@@ -109,7 +109,7 @@ impl Backend for ClaudeBackend {
             program: self.program_name(),
             args,
             env: Vec::new(),
-            unset: vec!["CLAUDE_CODE_CHILD_SESSION".into()],
+            unset: process::inherited_session_vars(),
             cwd: options.cwd.clone(),
         })
     }
@@ -133,6 +133,21 @@ impl Backend for ClaudeBackend {
 
     fn hook_reply(&self, allow: bool) -> String {
         hooks::reply(allow)
+    }
+
+    fn billed_per_use(&self, host: &dyn Host, project: &Path) -> Option<bool> {
+        let env = |k: &str| std::env::var_os(k).is_some_and(|v| !v.is_empty());
+        let settings = [
+            skills::claude_home(host).map(|h| h.join("settings.json")),
+            Some(project.join(".claude/settings.json")),
+            Some(project.join(".claude/settings.local.json")),
+        ];
+        let texts: Vec<String> = settings.into_iter().flatten().filter_map(|p| host.read_to_string(&p).ok()).collect();
+        Some(pricing::billed_per_use(!host.is_remote(), &env, &texts))
+    }
+
+    fn context_window(&self, model: &str) -> Option<u64> {
+        Some(pricing::context_window(model))
     }
 
     fn running(&self, host: &dyn Host, own_pid: u32) -> Vec<Running> {
