@@ -799,11 +799,13 @@ impl ChatPanel {
         if let Some(s) = &chat.status {
             status.push(s.clone());
         }
+        // "~": worked out from token counts and published prices.
+        let est = if chat.cost_estimated { "~" } else { "" };
         if let Some(c) = chat.last_turn_cost_usd {
-            status.push(format!("turn ${c:.4}"));
+            status.push(format!("turn {est}${c:.4}"));
         }
         if chat.total_cost_usd > 0.0 {
-            status.push(format!("total ${:.4}", chat.total_cost_usd));
+            status.push(format!("total {est}${:.4}", chat.total_cost_usd));
         }
         if let Some((i, o)) = chat.last_turn_tokens {
             status.push(format!("{}k in / {} out", i / 1000, o));
@@ -898,10 +900,10 @@ impl ChatPanel {
             View::Chat => 0,
             View::Terminal => 1,
         };
-        let waiting = session.chat_when_idle;
         let default_terminal = cx.global::<crate::AppSettings>().0.borrow().view_for(None) == "terminal";
         let muted = theme.muted_foreground;
         let weak = self.session.downgrade();
+        let input = self.input.clone();
         let strip = sheet_tabs::simple_strip(
             &self.views,
             "session-view",
@@ -910,16 +912,22 @@ impl ChatPanel {
             Joined::Top,
             palette,
             24.,
-            Rc::new(move |ix, _, cx| {
+            Rc::new(move |ix, window, cx| {
                 let view = if ix == 0 { View::Chat } else { View::Terminal };
                 let _ = weak.update(cx, |s, cx| s.set_view(view, cx));
+                // Typing goes where the view is: the terminal, or the message box.
+                let term = weak.upgrade().and_then(|s| s.read(cx).terminal_view());
+                match (view, term) {
+                    (View::Terminal, Some(t)) => {
+                        let f = t.read(cx).focus.clone();
+                        window.focus(&f, cx)
+                    }
+                    _ => input.update(cx, |i, cx| i.focus(window, cx)),
+                }
             }),
         );
         Some(
             strip
-                .when(waiting, |d| {
-                    d.child(div().px_2().text_size(px(10.5)).text_color(muted).child("Chat when this turn ends"))
-                })
                 .child(
                     div()
                         .id("default-view")
@@ -1054,6 +1062,7 @@ impl Render for ChatPanel {
             (s.view == View::Terminal).then(|| s.terminal_view()).flatten()
         };
         crate::perf::record("chat build (elements)", started.elapsed());
+        crate::perf::switch_shown(window);
         div()
             .size_full()
             .flex()

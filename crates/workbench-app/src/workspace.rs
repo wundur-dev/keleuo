@@ -166,7 +166,7 @@ impl Workspace {
         let skills = cx.new(|cx| SkillsPanel::new(host.clone(), backend.clone(), root.clone(), cx));
         let session = cx.new(|_| session);
         // The view this session was last shown in, else the default for new sessions.
-        session.update(cx, |s, cx| s.apply_remembered_view(cx));
+        session.update(cx, |s, cx| s.begin(cx));
         let claude = cx.new(|cx| ChatPanel::new(session.clone(), window, cx));
         let agent_side = cx.new(|cx| AgentSide::new(session.clone(), claude.clone(), cx));
         let terminals = Rc::new(RefCell::new(Vec::new()));
@@ -1072,7 +1072,7 @@ impl Workspace {
                 cx,
             ),
             "send" | "allow" | "deny" => {
-                let text = arg.to_string();
+                let text = arg.replace("\\n", "\n");
                 self.session.update(cx, |s, cx| match cmd {
                     "send" => s.send(&text, cx),
                     c => s.answer_first(c == "allow", cx),

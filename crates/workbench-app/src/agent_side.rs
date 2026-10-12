@@ -152,10 +152,9 @@ pub fn watch_takeover(
                 if let Some(chat) = reloaded {
                     s.chat = chat;
                 }
-                s.waiting_for = None;
                 s.chat
                     .push_notice("The other terminal finished: this session continues here.");
-                cx.notify();
+                s.takeover_done(cx);
             });
             break;
         }

@@ -4,7 +4,9 @@
 //! summaries ([`summary`]) and where skills, agents and commands are kept ([`skills`]).
 
 pub mod history;
+pub mod hooks;
 pub mod map;
+pub mod pricing;
 pub mod process;
 pub mod skills;
 pub mod stream;
@@ -15,7 +17,7 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
 
-use crate::agent::{Agent, Backend, Capabilities, Follow, Message, Running, SessionInfo, Sink, StartOptions};
+use crate::agent::{Agent, Backend, Capabilities, Follow, Hook, Message, Running, SessionInfo, Sink, StartOptions};
 use crate::conversation::Conversation;
 use crate::host::{Host, ProgramSpec};
 use map::Mapper;
@@ -91,6 +93,12 @@ impl Backend for ClaudeBackend {
     fn terminal_program(&self, options: &StartOptions, id: &str, new: bool) -> Option<ProgramSpec> {
         let mut args: Vec<String> = Vec::new();
         args.extend([if new { "--session-id" } else { "--resume" }.to_string(), id.to_string()]);
+        if options.fork && !new {
+            args.push("--fork-session".into());
+        }
+        if let Some(settings) = &options.settings {
+            args.extend(["--settings".into(), settings.to_string_lossy().to_string()]);
+        }
         if let Some(model) = &options.model {
             args.extend(["--model".into(), model.clone()]);
         }
@@ -115,9 +123,16 @@ impl Backend for ClaudeBackend {
         Some(follow)
     }
 
-    fn terminal_exit_input(&self) -> Vec<String> {
-        // Ctrl+C clears whatever is half typed; then the exit command.
-        vec!["\u{3}".into(), "/exit\r".into()]
+    fn hook_settings(&self, command: &dyn Fn(&str) -> String) -> Option<String> {
+        Some(hooks::settings(command))
+    }
+
+    fn parse_hook(&self, event: &str, payload: &Value, cwd: &str) -> Option<Hook> {
+        hooks::parse(event, payload, cwd)
+    }
+
+    fn hook_reply(&self, allow: bool) -> String {
+        hooks::reply(allow)
     }
 
     fn running(&self, host: &dyn Host, own_pid: u32) -> Vec<Running> {

@@ -136,6 +136,10 @@ pub struct Conversation {
     pub total_cost_usd: f64,
     /// What the last finished turn cost.
     pub last_turn_cost_usd: Option<f64>,
+    /// The cost is computed from token counts and published prices, not reported by the agent.
+    pub cost_estimated: bool,
+    /// The total when the current turn began (for an estimated turn cost).
+    turn_cost_from: f64,
     pub last_turn_tokens: Option<(u64, u64)>,
     pub last_turn_ms: Option<u64>,
     /// The latest status note (`requesting`, ...), cleared at the end of a turn.
@@ -162,6 +166,7 @@ impl Conversation {
     pub fn push_user(&mut self, text: &str) {
         self.items.push(Item::User(text.to_string()));
         self.turn_agents_from = self.agents.len();
+        self.turn_cost_from = self.total_cost_usd;
         self.busy = true;
         self.status = Some("sending".into());
         self.revision += 1;
@@ -353,6 +358,7 @@ impl Conversation {
                 if !self.replaying {
                     self.busy = true;
                     self.status = Some("working".into());
+                    self.turn_cost_from = self.total_cost_usd;
                 }
             }
             Event::ToolCall { id, name, summary, input, diff, parent } => {
@@ -468,12 +474,18 @@ impl Conversation {
                     let total = self.cost_base + total;
                     self.last_turn_cost_usd = Some((total - self.total_cost_usd).max(0.0));
                     self.total_cost_usd = total;
+                } else if self.cost_estimated {
+                    self.last_turn_cost_usd = Some((self.total_cost_usd - self.turn_cost_from).max(0.0));
                 }
                 self.last_turn_tokens = Some((input_tokens, output_tokens));
                 self.last_turn_ms = duration_ms;
                 if let Some(e) = error {
                     self.items.push(Item::Error(format!("The turn ended with an error: {}", one_line(&e, 300))));
                 }
+            }
+            Event::CostEstimate { usd } => {
+                self.total_cost_usd += usd;
+                self.cost_estimated = true;
             }
             Event::Notice(line) => {
                 if !line.trim().is_empty() {

@@ -11,6 +11,11 @@ rust-version.workspace = true
 name = "workbench"
 path = "src/main.rs"
 
+# The command the agent's terminal interface runs on its hook events (see src/hooks.rs).
+[[bin]]
+name = "workbench-hook"
+path = "src/bin/workbench-hook.rs"
+
 [dependencies]
 workbench-core = { workspace = true }
 anyhow = { workspace = true }

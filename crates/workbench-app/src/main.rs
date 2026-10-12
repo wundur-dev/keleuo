@@ -28,6 +28,7 @@ mod control;
 mod doc_panel;
 mod dock_skin;
 mod file_tree;
+mod hooks;
 mod icons;
 mod palette;
 mod panels;
@@ -178,12 +179,17 @@ fn main() {
             workspace::register_panels(cx);
             theme::apply(cx);
             control::start(cx);
+            hooks::init(cx);
             bind_keys(cx);
             cx.set_menus(menus());
-            cx.on_action(|_: &Quit, cx| cx.quit());
+            cx.on_action(|_: &Quit, cx| {
+                hooks::cleanup(cx);
+                cx.quit()
+            });
             cx.on_window_closed(|cx, _| {
                 if cx.windows().is_empty() {
                     instance::stop_listening();
+                    hooks::cleanup(cx);
                     cx.quit();
                 }
             })

@@ -55,6 +55,29 @@ pub enum Event {
     },
     /// A quiet note (warnings the agent printed).
     Notice(String),
+    /// Spend worked out from token counts and published prices (the agent reported none).
+    CostEstimate { usd: f64 },
+}
+
+/// What the agent's own interface reports through the window's hooks, in neutral terms (see
+/// [`Backend::hook_settings`] and [`Backend::parse_hook`]).
+#[derive(Clone, Debug, PartialEq)]
+pub enum Hook {
+    /// The interface is up on this session (its id and file).
+    Started { session_id: Option<String>, transcript: Option<PathBuf> },
+    /// The person's message went in (typed in the window or in the terminal).
+    Prompt(String),
+    /// A tool is about to run.
+    ToolStarting { id: Option<String>, tool: String, input: Value },
+    /// The agent asks before running a tool. The hook waits for [`Backend::hook_reply`]; the
+    /// interface asks in the terminal at the same time, and whichever answers first counts.
+    Permission { tool: String, summary: String, description: Option<String>, input: Value },
+    /// A tool finished, failed or was refused.
+    ToolFinished { id: Option<String>, tool: String, input: Value },
+    /// The turn is over: the agent waits for the person.
+    TurnEnded,
+    /// The interface wants the person's attention.
+    Attention(String),
 }
 
 /// What an agent's reader threads report.
@@ -81,6 +104,8 @@ pub struct StartOptions {
     pub resume: Option<String>,
     /// Continue it in a copy (the original keeps running elsewhere).
     pub fork: bool,
+    /// Extra settings for the agent's own interface (a file with the window's hooks).
+    pub settings: Option<PathBuf>,
 }
 
 /// A running conversation with an agent.
@@ -113,8 +138,10 @@ pub struct Capabilities {
     pub accept_edits_mode: Option<String>,
     /// Models it can be asked to use (empty: its default only).
     pub models: Vec<String>,
-    /// Its own terminal interface can run a session ([`Backend::terminal_program`]) while the
-    /// window follows the session's file ([`Backend::follow_session`]).
+    /// Its own terminal interface drives the session for the session's whole life
+    /// ([`Backend::terminal_program`]): the Terminal view shows it, and Chat is drawn from the
+    /// session's file ([`Backend::follow_session`]) and types into it. Without it, the agent
+    /// runs behind the window in its structured mode ([`Agent`]) and there is only Chat.
     pub terminal_view: bool,
 }
 
@@ -191,7 +218,8 @@ pub trait Backend: Send + Sync {
         Err(std::io::Error::other("this agent cannot resume sessions"))
     }
     /// The agent's own terminal interface for session `id` (`new`: a session not started yet,
-    /// to be created under that id). Run in a pseudo-terminal while the window follows the file.
+    /// to be created under that id; `options.fork`: continue `id` in a copy). Run in a
+    /// pseudo-terminal while the window follows the file.
     fn terminal_program(&self, _options: &StartOptions, _id: &str, _new: bool) -> Option<crate::host::ProgramSpec> {
         None
     }
@@ -200,10 +228,29 @@ pub trait Backend: Send + Sync {
     fn follow_session(&self, _host: Arc<dyn Host>, _project: &Path, _id: &str, _sink: Sink) -> Option<Follow> {
         None
     }
-    /// What to type into the terminal interface to leave it cleanly, in pieces sent a moment
-    /// apart.
-    fn terminal_exit_input(&self) -> Vec<String> {
-        Vec::new()
+    /// What to type into the terminal interface to send `text` as the person's message, in
+    /// pieces written a moment apart. `bracketed`: the interface asked for bracketed paste.
+    fn terminal_message(&self, text: &str, bracketed: bool) -> Vec<Vec<u8>> {
+        let body = if bracketed { format!("\x1b[200~{text}\x1b[201~") } else { text.replace('\n', " ") };
+        vec![body.into_bytes(), b"\r".to_vec()]
+    }
+    /// What to type to stop the current turn.
+    fn terminal_interrupt(&self) -> Vec<u8> {
+        b"\x1b".to_vec()
+    }
+    /// The contents of a settings file that makes the terminal interface run `command(event)`
+    /// on each of its hook events, or `None` when it has no hooks.
+    fn hook_settings(&self, _command: &dyn Fn(&str) -> String) -> Option<String> {
+        None
+    }
+    /// One hook call (`event` as named in [`Backend::hook_settings`], and what the interface
+    /// passed it), in neutral terms.
+    fn parse_hook(&self, _event: &str, _payload: &Value, _cwd: &str) -> Option<Hook> {
+        None
+    }
+    /// What a waiting permission hook answers.
+    fn hook_reply(&self, _allow: bool) -> String {
+        String::new()
     }
     /// Every agent process of this kind on this machine except this window's own (children of
     /// `own_pid`). Read-only: nothing is signalled. Empty for a remote host.

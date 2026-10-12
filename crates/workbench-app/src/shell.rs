@@ -542,9 +542,10 @@ impl Shell {
             let place = if w.host().is_remote() { format!("{}: {place}", w.host().label()) } else { place };
             let worktree = w.worktree.clone();
             let activity = s.chat.last_activity(80);
+            let est = if s.chat.cost_estimated { "~" } else { "" };
             let cost = (s.chat.total_cost_usd > 0.0).then(|| match s.chat.total_cost_usd {
-                c if c < 0.1 => format!("${c:.3}"),
-                c => format!("${c:.2}"),
+                c if c < 0.1 => format!("{est}${c:.3}"),
+                c => format!("{est}${c:.2}"),
             });
             let dot = self.dot(ix, cx);
             let key = self.key(ix);

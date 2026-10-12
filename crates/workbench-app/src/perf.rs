@@ -167,3 +167,16 @@ pub fn switch_step(what: &str) {
         }
     });
 }
+
+/// The view after a switch is being drawn: report when its frame is on screen, once.
+pub fn switch_shown(window: &mut gpui_kit::Window) {
+    if !enabled() {
+        return;
+    }
+    let pending = SWITCH.with(|s| s.borrow_mut().take());
+    if let Some(start) = pending {
+        window.on_next_frame(move |_, _| {
+            eprintln!("workbench: switch   shown: +{:.1} ms", start.elapsed().as_secs_f64() * 1000.0);
+        });
+    }
+}

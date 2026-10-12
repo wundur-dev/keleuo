@@ -109,9 +109,10 @@ impl EventEmitter<TerminalEvent> for TerminalView {}
 impl TerminalView {
     pub fn new(spec: workbench_core::host::CommandSpec, cx: &mut Context<Self>) -> Self {
         let focus = cx.focus_handle();
+        // Until it is first drawn (an agent's interface may start in a hidden view).
         let initial = GridSize {
-            cols: 100,
-            rows: 12,
+            cols: 120,
+            rows: 36,
             cell_w: 8,
             cell_h: 16,
         };
@@ -181,6 +182,11 @@ impl TerminalView {
             .as_ref()
             .map(|p| *p.term.lock().mode())
             .unwrap_or(TermMode::empty())
+    }
+
+    /// The program asked for bracketed paste.
+    pub fn bracketed_paste(&self) -> bool {
+        self.mode().contains(TermMode::BRACKETED_PASTE)
     }
 
     fn write_str(&self, s: &str) {

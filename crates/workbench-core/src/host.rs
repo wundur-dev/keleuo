@@ -78,6 +78,16 @@ pub trait Host: Send + Sync {
         String::from_utf8(self.read(path)?)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
     }
+    /// The bytes of `path` from `offset` on (a file being appended to, read as it grows).
+    fn read_from(&self, path: &Path, offset: u64) -> io::Result<Vec<u8>> {
+        let mut bytes = self.read(path)?;
+        let start = (offset as usize).min(bytes.len());
+        Ok(bytes.split_off(start))
+    }
+    /// The length of `path` in bytes.
+    fn len(&self, path: &Path) -> io::Result<u64> {
+        self.read(path).map(|b| b.len() as u64)
+    }
     fn write(&self, path: &Path, contents: &[u8]) -> io::Result<()>;
     fn create_dir_all(&self, path: &Path) -> io::Result<()>;
     fn exists(&self, path: &Path) -> bool;
@@ -132,6 +142,19 @@ impl Host for LocalHost {
 
     fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
         std::fs::read(path)
+    }
+
+    fn read_from(&self, path: &Path, offset: u64) -> io::Result<Vec<u8>> {
+        use std::io::{Read, Seek, SeekFrom};
+        let mut f = std::fs::File::open(path)?;
+        f.seek(SeekFrom::Start(offset))?;
+        let mut out = Vec::new();
+        f.read_to_end(&mut out)?;
+        Ok(out)
+    }
+
+    fn len(&self, path: &Path) -> io::Result<u64> {
+        Ok(std::fs::metadata(path)?.len())
     }
 
     fn write(&self, path: &Path, contents: &[u8]) -> io::Result<()> {
@@ -347,6 +370,18 @@ impl Host for SshHost {
 
     fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
         self.run(&format!("cat {}", q(path)), None)
+    }
+
+    fn read_from(&self, path: &Path, offset: u64) -> io::Result<Vec<u8>> {
+        self.run(&format!("tail -c +{} {}", offset + 1, q(path)), None)
+    }
+
+    fn len(&self, path: &Path) -> io::Result<u64> {
+        let out = self.run(&format!("wc -c < {}", q(path)), None)?;
+        String::from_utf8_lossy(&out)
+            .trim()
+            .parse()
+            .map_err(|_| io::Error::other("no length"))
     }
 
     fn write(&self, path: &Path, contents: &[u8]) -> io::Result<()> {

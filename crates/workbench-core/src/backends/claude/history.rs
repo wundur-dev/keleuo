@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use super::map::Mapper;
+use super::pricing::Tally;
 use super::stream;
 pub use crate::agent::SessionInfo;
 use crate::agent::Event;
@@ -168,12 +169,19 @@ pub fn load_conversation(text: &str, cwd: &str) -> Conversation {
     chat.replaying = true;
     let mut mapper = Mapper::new(cwd);
     mapper.history = true;
+    let mut tally = Tally::default();
     for line in text.lines() {
         let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
         if chat.session_id.is_none() {
             chat.session_id = v.get("sessionId").and_then(Value::as_str).map(str::to_string);
         }
         chat.apply_all(line_events(&v, &mut mapper));
+        if v.get("isSidechain").and_then(Value::as_bool) != Some(true) {
+            let usd = tally.add(&v);
+            if usd > 0.0 {
+                chat.apply(Event::CostEstimate { usd });
+            }
+        }
     }
     chat.busy = false;
     chat.status = None;
@@ -186,9 +194,14 @@ pub fn load_conversation(text: &str, cwd: &str) -> Conversation {
 pub fn attach_subagent(chat: &mut Conversation, tool_use_id: &str, text: &str) {
     chat.replaying = true;
     let mut mapper = Mapper::new(chat.cwd.clone());
+    let mut tally = Tally::default();
     for line in text.lines() {
         if let Ok(v) = serde_json::from_str::<Value>(line) {
             chat.apply_all(subagent_line_events(&v, tool_use_id, &mut mapper));
+            let usd = tally.add(&v);
+            if usd > 0.0 {
+                chat.apply(Event::CostEstimate { usd });
+            }
         }
     }
     chat.replaying = false;
@@ -211,63 +224,101 @@ fn subagent_line_events(v: &Value, tool_use_id: &str, mapper: &mut Mapper) -> Ve
 
 /// Follow a session file being written by Claude Code in a terminal: every complete line added
 /// after now (and to its subagents' transcripts) is mapped and sent to `sink`, until `stop`.
-/// An assistant message that ends its turn also ends the turn here, with its token counts.
+/// An assistant message that ends its turn also ends the turn here, with its token counts, and
+/// each new message's cost is estimated from its usage. The file is checked every 100 ms and
+/// only what was added is read.
 pub fn follow(host: &dyn Host, path: &Path, cwd: &str, sink: &crate::agent::Sink, stop: &std::sync::atomic::AtomicBool) {
     use crate::agent::Message;
     use std::collections::HashMap;
     use std::sync::atomic::Ordering;
 
-    let size = |p: &Path| host.read(p).map(|b| b.len()).unwrap_or(0);
-    let mut main = (size(path), Mapper::new(cwd));
-    main.1.history = true;
-    let agents_dir = path.with_extension("").join("subagents");
-    // Subagent transcripts: file name to (offset, mapper, the tool call that started it).
-    let mut agents: HashMap<String, (usize, Mapper, Option<String>)> = HashMap::new();
-    if let Ok(entries) = host.read_dir(&agents_dir) {
-        for e in entries.iter().filter(|e| e.name.ends_with(".jsonl")) {
-            agents.insert(e.name.clone(), (size(&agents_dir.join(&e.name)), Mapper::new(cwd), None));
+    struct Tail {
+        offset: u64,
+        /// The start of a line not yet complete.
+        partial: Vec<u8>,
+        mapper: Mapper,
+        tally: Tally,
+    }
+    impl Tail {
+        fn new(offset: u64, cwd: &str) -> Self {
+            Self { offset, partial: Vec::new(), mapper: Mapper::new(cwd), tally: Tally::default() }
+        }
+        /// New complete lines, read from where the last read stopped.
+        fn lines(&mut self, host: &dyn Host, p: &Path) -> Vec<Value> {
+            let Ok(len) = host.len(p) else { return Vec::new() };
+            if len < self.offset {
+                // Rewritten: start over.
+                self.offset = 0;
+                self.partial.clear();
+            }
+            if len == self.offset {
+                return Vec::new();
+            }
+            let Ok(bytes) = host.read_from(p, self.offset) else { return Vec::new() };
+            self.offset += bytes.len() as u64;
+            self.partial.extend_from_slice(&bytes);
+            let Some(end) = self.partial.iter().rposition(|b| *b == b'\n') else { return Vec::new() };
+            let rest = self.partial.split_off(end + 1);
+            let chunk = std::mem::replace(&mut self.partial, rest);
+            String::from_utf8_lossy(&chunk).lines().filter_map(|l| serde_json::from_str(l).ok()).collect()
         }
     }
-    // New complete lines of `p` from `offset` on.
-    let new_lines = |p: &Path, offset: &mut usize| -> Vec<Value> {
-        let Ok(bytes) = host.read(p) else { return Vec::new() };
-        if bytes.len() < *offset {
-            *offset = 0;
+
+    let size = |p: &Path| host.len(p).unwrap_or(0);
+    let mut main = Tail::new(size(path), cwd);
+    main.mapper.history = true;
+    let agents_dir = path.with_extension("").join("subagents");
+    // Subagent transcripts: file name to (tail, the tool call that started it).
+    let mut agents: HashMap<String, (Tail, Option<String>)> = HashMap::new();
+    if let Ok(entries) = host.read_dir(&agents_dir) {
+        for e in entries.iter().filter(|e| e.name.ends_with(".jsonl")) {
+            agents.insert(e.name.clone(), (Tail::new(size(&agents_dir.join(&e.name)), cwd), None));
         }
-        let Some(end) = bytes[*offset..].iter().rposition(|b| *b == b'\n') else { return Vec::new() };
-        let chunk = String::from_utf8_lossy(&bytes[*offset..*offset + end + 1]).to_string();
-        *offset += end + 1;
-        chunk.lines().filter_map(|l| serde_json::from_str(l).ok()).collect()
-    };
+    }
+    let mut round = 0u64;
     while !stop.load(Ordering::Relaxed) {
-        for v in new_lines(path, &mut main.0) {
-            for e in line_events(&v, &mut main.1) {
+        for v in main.lines(host, path) {
+            for e in line_events(&v, &mut main.mapper) {
                 sink(Message::Event(e));
+            }
+            if v.get("isSidechain").and_then(Value::as_bool) != Some(true) {
+                let usd = main.tally.add(&v);
+                if usd > 0.0 {
+                    sink(Message::Event(Event::CostEstimate { usd }));
+                }
             }
             if let Some(end) = turn_end(&v) {
                 sink(Message::Event(end));
             }
         }
-        if let Ok(entries) = host.read_dir(&agents_dir) {
+        // Subagents less often: a directory listing per check.
+        if round.is_multiple_of(3)
+            && let Ok(entries) = host.read_dir(&agents_dir)
+        {
             for e in entries.iter().filter(|e| e.name.ends_with(".jsonl")) {
-                let entry = agents.entry(e.name.clone()).or_insert_with(|| (0, Mapper::new(cwd), None));
-                if entry.2.is_none() {
+                let entry = agents.entry(e.name.clone()).or_insert_with(|| (Tail::new(0, cwd), None));
+                if entry.1.is_none() {
                     let meta = agents_dir.join(e.name.replace(".jsonl", ".meta.json"));
-                    entry.2 = host
+                    entry.1 = host
                         .read_to_string(&meta)
                         .ok()
                         .and_then(|m| serde_json::from_str::<Value>(&m).ok())
                         .and_then(|m| m.get("toolUseId").and_then(Value::as_str).map(str::to_string));
                 }
-                let Some(parent) = entry.2.clone() else { continue };
-                for v in new_lines(&agents_dir.join(&e.name), &mut entry.0) {
-                    for ev in subagent_line_events(&v, &parent, &mut entry.1) {
+                let Some(parent) = entry.1.clone() else { continue };
+                for v in entry.0.lines(host, &agents_dir.join(&e.name)) {
+                    for ev in subagent_line_events(&v, &parent, &mut entry.0.mapper) {
                         sink(Message::Event(ev));
+                    }
+                    let usd = entry.0.tally.add(&v);
+                    if usd > 0.0 {
+                        sink(Message::Event(Event::CostEstimate { usd }));
                     }
                 }
             }
         }
-        std::thread::sleep(std::time::Duration::from_millis(400));
+        round += 1;
+        std::thread::sleep(std::time::Duration::from_millis(100));
     }
 }
 

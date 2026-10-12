@@ -62,18 +62,15 @@ Then `workbench`, `workbench ~/code/app`, `workbench --new .` or `workbench --ss
   (Continue); plus "Start a new session here" (Enter) and "New session in a git worktree"
   (Cmd+Enter). A session already open in the window just shows. Folder discovery runs off the
   UI thread and only for the rows on screen.
-- **Chat and Terminal views** of one session, the tabs along the bottom of the chat: Chat is
-  the native view; Terminal runs the agent's own interface (`claude --resume <id>`) in a
-  pseudo-terminal on the same conversation. Only one process ever drives a session: switching
-  waits for the turn to end, then ends one process before starting the other. The view
-  switches at once: the terminal shows the last lines of the conversation and "Starting..."
-  until the interface has drawn (about 0.6 s), and Chat shows while the interface exits
-  behind it (Ctrl+C, then `/exit`); a message sent meanwhile goes once it has, and the next
-  stream process starts as soon as the terminal has closed. `WORKBENCH_PERF=1` prints each
-  step of a switch. In Terminal view the
-  window follows the session's file, so subagents, edits (a strip of changed files), tokens
-  and the status dot keep working. Each session remembers its view; "New sessions open in"
-  on the strip sets the default. Hidden for backends without a terminal interface.
+- **Chat and Terminal views** of one session, the tabs along the bottom of the chat. A
+  Claude Code session runs the real `claude` interface once, in a pseudo-terminal, for the
+  session's whole life. Terminal shows that terminal; Chat draws the same conversation from
+  the session's file (followed as it grows) and its message box types into that same process
+  (pasted, then Enter; Stop sends Escape). Switching only changes which view is shown, so it
+  is instant at any length. Permission prompts show in Chat with Allow and Deny and in the
+  terminal at the same time; whichever answers first counts. Each session remembers its
+  view; "New sessions open in" on the strip sets the default. Hidden for backends without a
+  terminal interface, and for SSH folders (those run the structured stream, Chat only).
 - **Panel headers and sheet tabs** (after an earlier app): a tool panel (Files, Skills,
   Terminals, Agent) has a title bar with a grip to drag it by, its title, its actions and
   options on hover; tool panels sharing a spot put their tabs along the bottom, the shown one
@@ -106,7 +103,8 @@ Then `workbench`, `workbench ~/code/app`, `workbench --new .` or `workbench --ss
 | Ctrl+- / Ctrl+Shift+- | Back / forward through jumps |
 | Cmd+L | Focus the message box |
 
-Environment: `WORKBENCH_MODEL=haiku` picks the model; `WORKBENCH_PERF=1` prints timings;
+Environment: `WORKBENCH_MODEL=haiku` picks the model; `WORKBENCH_PERMISSION_MODE=default`
+starts sessions in that permission mode; `WORKBENCH_PERF=1` prints timings;
 `WORKBENCH_CONTROL=<fifo>` accepts test commands (`open`, `term`, `type`, `split`, `send`,
 `allow`, `new`, `browse`, `tab`, `tabs`, `move-session`, `fold-sessions`, `view`,
 `term-type`, `term-screen`, `chat`, `panel`, `earlier`, `resume`, `fork`, `takeover`, `key`, `state`,
@@ -153,12 +151,31 @@ socket with it); `WORKBENCH_TEST_BACKENDS=1` adds the scripted test agent to the
 
 ## How Claude runs
 
-`claude -p --output-format stream-json --input-format stream-json --verbose
---include-partial-messages --permission-prompt-tool stdio`, in the project folder. Text
-streams in as it is written. Permission prompts arrive as `control_request` /
-`can_use_tool` lines and are answered from the chat with Allow or Deny, so Claude's normal
-"ask first" mode works without falling back to `acceptEdits`. The session id is kept so a
-restarted process continues with `--resume`.
+Each session runs `claude` (`--session-id <new id>`, or `--resume <id>`, with
+`--fork-session` for a fork) in a pseudo-terminal in the project folder, plus
+`--settings <file>`: a settings file of the window's own (in a `workbench-<pid>` folder in
+the system's temporary folder, removed when the window closes) that adds hooks. Nothing in
+`~/.claude` is changed. Each hook runs `workbench-hook <socket> <token> <event>` (built next
+to `workbench`; standard library only), which passes the hook's input to the window over a
+local socket:
+
+- `SessionStart`: the interface is up; messages typed before it wait until then.
+- `UserPromptSubmit`, `PreToolUse`, `Stop`, `Notification`: the status dot (working, which
+  tool, idle, unseen) from what the interface says rather than guessed.
+- `PermissionRequest`: the hook waits; Chat shows Allow and Deny, and the answer goes back as
+  the hook's decision. The interface shows its own prompt at the same moment; answered there,
+  `PostToolUse` ends the wait.
+
+The chat itself comes from the session file under `~/.claude/projects`, read from where the
+last read stopped every 100 ms: messages, tool calls and results, diffs, subagents and token
+counts. The interface writes whole messages, not a stream, so a reply shows when its block is
+done (the status line says what is running meanwhile). The cost is an estimate, marked `~`,
+from the token counts and the published per-token prices (`backends/claude/pricing.rs`).
+
+The structured route (`claude -p --output-format stream-json --input-format stream-json
+--verbose --include-partial-messages --permission-prompt-tool stdio`, permission prompts as
+`control_request` lines) stays for backends without a terminal interface and for SSH
+folders, whose hooks could not reach the window.
 
 ## Remote over SSH: the plan
 
@@ -208,10 +225,10 @@ For reading and navigating code in the editor (not for the Claude panel).
 - Session list and browser: the list order and the open sessions are not saved; the browser
   has no remote recent folders and lists folders only (not files). The live dot sees agents
   on this machine only.
-- Terminal view: the agent's own interface does not write its cost to the session file, so
-  the cost shown is what Chat counted; a permission prompt inside the terminal interface does
-  not turn the dot amber (it is not in the file). Leaving the terminal types Ctrl+C and
-  `/exit`; if the person has the interface in another mode, they finish there.
+- Claude Code sessions: the cost is an estimate from token counts; text shows a block at a
+  time (the file has no partial messages); a slash command typed in Chat is pasted as text.
+  A permission answered in the terminal shows as allowed in Chat even when it was refused
+  there.
 - Terminal: no mouse reporting, no kitty keyboard protocol, no IME composition (dead keys
   and CJK input), no cursor blink, fixed colours and font (Menlo 12.5).
 - Skills: plugin skills are found from `installed_plugins.json` and their `skills/` folder
