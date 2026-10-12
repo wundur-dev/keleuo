@@ -178,6 +178,36 @@ pub fn list_sessions(
         .collect()
 }
 
+/// The folder `old` was renamed to `new`: its project folder under `claude_home` (sessions,
+/// memory) moves to the new name. When the new name has one already (a session was started
+/// there first), what it lacks is moved in, folder by folder, and the rest stays where it was.
+pub fn move_project(claude_home: &Path, old: &Path, new: &Path) -> std::io::Result<()> {
+    let (from, to) = (project_sessions_dir(claude_home, old), project_sessions_dir(claude_home, new));
+    if from == to || !from.is_dir() {
+        return Ok(());
+    }
+    if !to.exists() {
+        return std::fs::rename(&from, &to);
+    }
+    merge_into(&from, &to)?;
+    // Gone if everything moved; kept (with what could not) otherwise.
+    let _ = std::fs::remove_dir(&from);
+    Ok(())
+}
+
+fn merge_into(from: &Path, to: &Path) -> std::io::Result<()> {
+    for entry in std::fs::read_dir(from)?.flatten() {
+        let target = to.join(entry.file_name());
+        if !target.exists() {
+            std::fs::rename(entry.path(), &target)?;
+        } else if entry.path().is_dir() && target.is_dir() {
+            merge_into(&entry.path(), &target)?;
+            let _ = std::fs::remove_dir(entry.path());
+        }
+    }
+    Ok(())
+}
+
 /// How many sessions `folder` has and when the newest changed, without reading them.
 pub fn session_count(host: &dyn Host, claude_home: &Path, folder: &Path) -> (usize, Option<u64>) {
     let dir = project_sessions_dir(claude_home, folder);
@@ -815,6 +845,32 @@ mod tests {
                 .join(name),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn a_renamed_folder_takes_its_sessions_and_notes_along() {
+        let home = std::env::temp_dir().join(format!("kl-move-{}", std::process::id()));
+        let (old, new) = (Path::new("/work/keleion"), Path::new("/work/keleuo"));
+        let from = project_sessions_dir(&home, old);
+        std::fs::create_dir_all(from.join("memory")).unwrap();
+        std::fs::write(from.join("a.jsonl"), "a").unwrap();
+        std::fs::write(from.join("memory/note.md"), "n").unwrap();
+        // A sibling whose name starts the same way is left alone.
+        let sibling = project_sessions_dir(&home, Path::new("/work/keleion-site"));
+        std::fs::create_dir_all(&sibling).unwrap();
+        // The new name has a session and a note of its own already.
+        let to = project_sessions_dir(&home, new);
+        std::fs::create_dir_all(to.join("memory")).unwrap();
+        std::fs::write(to.join("b.jsonl"), "b").unwrap();
+        std::fs::write(to.join("memory/note.md"), "kept").unwrap();
+        move_project(&home, old, new).unwrap();
+        assert!(to.join("a.jsonl").exists() && to.join("b.jsonl").exists());
+        assert_eq!(std::fs::read_to_string(to.join("memory/note.md")).unwrap(), "kept", "the newer copy stays");
+        assert!(sibling.exists());
+        assert!(from.join("memory/note.md").exists(), "what could not move stays where it was");
+        // Nothing there: nothing to do.
+        move_project(&home, Path::new("/work/none"), Path::new("/work/other")).unwrap();
+        let _ = std::fs::remove_dir_all(home);
     }
 
     #[test]

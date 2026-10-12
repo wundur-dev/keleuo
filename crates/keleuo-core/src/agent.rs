@@ -378,6 +378,11 @@ pub trait Backend: Send + Sync {
     fn session_live(&self, _host: &dyn Host, _project: &Path, _id: &str, _own_pid: u32) -> Option<LiveSession> {
         None
     }
+    /// The folder `old` was renamed to `new`: move what the agent keeps for it (its sessions,
+    /// its notes) so they belong to the new name. Nothing to move by default.
+    fn folder_renamed(&self, _host: &dyn Host, _old: &Path, _new: &Path) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 /// The backends a window can start sessions with.

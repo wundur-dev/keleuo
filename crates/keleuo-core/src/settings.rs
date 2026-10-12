@@ -105,6 +105,17 @@ impl Settings {
     }
 
     /// Put `folder` first in the recent list.
+    /// A folder was renamed: recent folders at or under it follow.
+    pub fn folder_renamed(&mut self, old: &Path, new: &Path) {
+        for p in &mut self.recent {
+            if let Ok(rest) = p.strip_prefix(old) {
+                *p = if rest.as_os_str().is_empty() { new.to_path_buf() } else { new.join(rest) };
+            }
+        }
+        let mut seen = std::collections::HashSet::new();
+        self.recent.retain(|p| seen.insert(p.clone()));
+    }
+
     pub fn add_recent(&mut self, folder: &Path) {
         self.recent.retain(|p| p != folder);
         self.recent.insert(0, folder.to_path_buf());
@@ -145,6 +156,17 @@ pub fn encode_folder(folder: &std::path::Path) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn recent_folders_follow_a_rename() {
+        let mut s = Settings::default();
+        for p in ["/w/other", "/w/keleion/sub", "/w/keleion-site", "/w/keleion"] {
+            s.add_recent(Path::new(p));
+        }
+        s.folder_renamed(Path::new("/w/keleion"), Path::new("/w/keleuo"));
+        let got: Vec<_> = s.recent.iter().map(|p| p.display().to_string()).collect();
+        assert_eq!(got, ["/w/keleuo", "/w/keleion-site", "/w/keleuo/sub", "/w/other"]);
+    }
 
     #[test]
     fn the_old_folder_moves_to_the_new_name() {

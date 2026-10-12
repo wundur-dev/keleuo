@@ -86,6 +86,34 @@ impl NameStore {
         self.set(key, "")
     }
 
+    /// A folder was renamed: names of its tabs (keyed by the folder, and for files by their
+    /// path in it) follow.
+    pub fn folder_renamed(&mut self, old: &Path, new: &Path) -> std::io::Result<()> {
+        let (old, new) = (old.display().to_string(), new.display().to_string());
+        let moved: Vec<(String, String)> = self
+            .names
+            .keys()
+            .filter_map(|k| {
+                let (project, tab) = k.split_once('#')?;
+                let rest = project.strip_prefix(&old).filter(|r| r.is_empty() || r.starts_with('/'))?;
+                let tab = match tab.strip_prefix("file:").and_then(|f| f.strip_prefix(&old)).filter(|r| r.starts_with('/')) {
+                    Some(r) => format!("file:{new}{r}"),
+                    None => tab.to_string(),
+                };
+                Some((k.clone(), format!("{new}{rest}#{tab}")))
+            })
+            .collect();
+        if moved.is_empty() {
+            return Ok(());
+        }
+        for (from, to) in moved {
+            if let Some(name) = self.names.remove(&from) {
+                self.names.insert(to, name);
+            }
+        }
+        self.save()
+    }
+
     fn save(&self) -> std::io::Result<()> {
         let Some(path) = &self.path else {
             return Ok(());
@@ -115,6 +143,20 @@ mod tests {
             "keleuo (main)"
         );
         assert_eq!(auto_name(f, Some("main"), Some("less"), "/bin/zsh"), "less");
+    }
+
+    #[test]
+    fn names_follow_a_renamed_folder() {
+        let mut store = NameStore::open(None);
+        let old = Path::new("/w/keleion");
+        store.set(&NameStore::key(old, "terminal:1"), "server").unwrap();
+        store.set(&NameStore::key(old, "file:/w/keleion/src/main.rs"), "entry").unwrap();
+        store.set(&NameStore::key(Path::new("/w/keleion-site"), "terminal:1"), "site").unwrap();
+        store.folder_renamed(old, Path::new("/w/keleuo")).unwrap();
+        assert_eq!(store.get("/w/keleuo#terminal:1"), Some("server"));
+        assert_eq!(store.get("/w/keleuo#file:/w/keleuo/src/main.rs"), Some("entry"));
+        assert_eq!(store.get("/w/keleion-site#terminal:1"), Some("site"), "a sibling keeps its names");
+        assert_eq!(store.get("/w/keleion#terminal:1"), None);
     }
 
     #[test]

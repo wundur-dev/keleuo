@@ -237,6 +237,13 @@ impl Backend for ClaudeBackend {
         })
     }
 
+    fn folder_renamed(&self, host: &dyn Host, old: &Path, new: &Path) -> std::io::Result<()> {
+        match skills::claude_home(host) {
+            Some(home) if !host.is_remote() => history::move_project(&home, old, new),
+            _ => Ok(()),
+        }
+    }
+
     fn session_live(&self, host: &dyn Host, project: &Path, id: &str, own_pid: u32) -> Option<LiveSession> {
         let home = skills::claude_home(host)?;
         let path = history::project_sessions_dir(&home, project).join(format!("{id}.jsonl"));

@@ -11,6 +11,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::menu::{ContextMenuExt, PopupMenuItem};
 use gpui_kit::component::{ActiveTheme, Icon, IconName, Sizable, TitleBar, WindowExt};
 use gpui_kit::prelude::*;
@@ -79,6 +81,8 @@ pub struct Shell {
     peek: bool,
     /// The pointer is over the rail (the list peeks out after a moment).
     rail_hover: bool,
+    /// The folder being renamed, asked for its new name.
+    folder_rename: Option<FolderRename>,
     focus: FocusHandle,
     subs: HashMap<EntityId, Vec<Subscription>>,
     _browser_sub: Option<Subscription>,
@@ -100,6 +104,7 @@ impl Shell {
             folded,
             peek: false,
             rail_hover: false,
+            folder_rename: None,
             focus: cx.focus_handle(),
             subs: HashMap::new(),
             _browser_sub: None,
@@ -200,7 +205,7 @@ impl Shell {
                 if !self.opening.choose() {
                     return;
                 }
-                self.resume(host.clone(), root.clone(), backend.clone(), id.clone(), *fork, *wait_for, window, cx)
+                self.resume(host.clone(), root.clone(), backend.clone(), id.clone(), *fork, *wait_for, false, window, cx)
             }
         }
     }
@@ -210,6 +215,8 @@ impl Shell {
     }
 
     /// Continue an earlier session (read off the UI thread). One already open here just shows.
+    /// `closed_here`: this window stopped it just now, so it is not checked for being open
+    /// elsewhere (its file changed seconds ago, which would otherwise say it may be).
     #[allow(clippy::too_many_arguments)]
     fn resume(
         &mut self,
@@ -219,6 +226,7 @@ impl Shell {
         id: String,
         fork: bool,
         wait_for: Option<u32>,
+        closed_here: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -233,7 +241,7 @@ impl Shell {
         }
         cx.spawn_in(window, async move |this, cx| {
             let (h, b, r) = (host.clone(), backend.clone(), root.clone());
-            let plain = !fork && wait_for.is_none();
+            let plain = !fork && wait_for.is_none() && !closed_here;
             let (live, chat) = cx
                 .background_spawn(async move {
                     // Checked now, not when the list was drawn: never a second writer on a
@@ -307,6 +315,183 @@ impl Shell {
                     window.push_notification(format!("Could not read the session: {e}"), cx)
                 }
         }
+    }
+
+    // ----- renaming a folder -----
+
+    /// Ask for a new name for `folder` (a session's folder on this machine).
+    pub fn ask_rename_folder(&mut self, folder: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let name = folder_name(&folder);
+        let input = cx.new(|cx| InputState::new(window, cx).default_value(name));
+        input.update(cx, |i, cx| {
+            i.focus(window, cx);
+            i.select_all(window, cx);
+        });
+        let sub = cx.subscribe_in(&input, window, |s, _, ev: &InputEvent, window, cx| match ev {
+            InputEvent::PressEnter { .. } => s.rename_folder(window, cx),
+            InputEvent::Change => {
+                if let Some(r) = s.folder_rename.as_mut() {
+                    r.error = None;
+                }
+                cx.notify();
+            }
+            _ => {}
+        });
+        self.folder_rename = Some(FolderRename { folder, input, error: None, _sub: sub });
+        cx.notify();
+    }
+
+    /// Rename the folder asked about: its sessions close, the folder and what the agents keep
+    /// for it (sessions, notes) move to the new name, tab names and recent folders follow,
+    /// and the same sessions open again there.
+    fn rename_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(r) = self.folder_rename.as_mut() else { return };
+        let name = r.input.read(cx).value().trim().to_string();
+        let old = r.folder.clone();
+        let Some(parent) = old.parent().map(Path::to_path_buf) else { return };
+        let new = parent.join(&name);
+        let problem = if name.is_empty() || name == "." || name == ".." || name.contains('/') {
+            Some("A folder name, without slashes.".to_string())
+        } else if new == old {
+            None
+        } else if new.exists() {
+            Some(format!("{name} exists already in {}.", parent.display()))
+        } else {
+            None
+        };
+        if let Some(p) = problem {
+            r.error = Some(p);
+            cx.notify();
+            return;
+        }
+        self.folder_rename = None;
+        if new == old {
+            cx.notify();
+            return;
+        }
+        // The sessions working in it (or below it), closed now and opened again after.
+        let mut reopen: Vec<Reopen> = Vec::new();
+        for ix in (0..self.tabs.len()).rev() {
+            let (host, root, backend, id) = {
+                let w = self.tabs[ix].ws.read(cx);
+                let s = w.session.read(cx);
+                (w.host(), w.root().to_path_buf(), s.backend.clone(), s.chat.session_id.clone())
+            };
+            if host.is_remote() || !root.starts_with(&old) {
+                continue;
+            }
+            let moved = new.join(root.strip_prefix(&old).unwrap_or(Path::new("")));
+            let moved = if moved.as_os_str().to_string_lossy().ends_with('/') { new.clone() } else { moved };
+            reopen.push((host, moved, backend, id));
+            self.close(ix, window, cx);
+        }
+        reopen.reverse();
+        let backends: Vec<Arc<dyn Backend>> = cx.global::<crate::backends::Backends>().0.all().to_vec();
+        let (from, to) = (old.clone(), new.clone());
+        cx.spawn_in(window, async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    // The closed sessions' agents a moment to exit.
+                    std::thread::sleep(std::time::Duration::from_millis(600));
+                    std::fs::rename(&from, &to)?;
+                    let mut kept = Vec::new();
+                    for b in &backends {
+                        if let Err(e) = b.folder_renamed(&LocalHost, &from, &to) {
+                            kept.push(format!("{}: {e}", b.name()));
+                        }
+                    }
+                    Ok::<_, std::io::Error>(kept)
+                })
+                .await;
+            let _ = this.update_in(cx, |s, window, cx| {
+                let renamed = result.is_ok();
+                match &result {
+                    Ok(kept) => {
+                        let settings = cx.global::<AppSettings>().0.clone();
+                        settings.borrow_mut().folder_renamed(&old, &new);
+                        let _ = settings.borrow().save();
+                        let _ = cx.global::<panels::Names>().0.borrow_mut().folder_renamed(&old, &new);
+                        let note = if kept.is_empty() {
+                            format!("Renamed {} to {}.", folder_name(&old), folder_name(&new))
+                        } else {
+                            format!("Renamed {} to {}, but some history stayed behind ({}).", folder_name(&old), folder_name(&new), kept.join("; "))
+                        };
+                        window.push_notification(note, cx);
+                    }
+                    Err(e) => window.push_notification(format!("Could not rename {}: {e}", folder_name(&old)), cx),
+                }
+                // Open the same sessions again: in the new place, or where they were.
+                for (host, moved, backend, id) in reopen {
+                    let root = if renamed { moved } else { old.join(moved.strip_prefix(&new).unwrap_or(Path::new(""))) };
+                    match id {
+                        // Closed by this window a moment ago: its file is fresh, not open elsewhere.
+                        Some(id) => s.resume(host, root, backend, id, false, None, true, window, cx),
+                        None => s.new_session_in(host, root, backend, window, cx),
+                    }
+                }
+                if s.tabs.is_empty() {
+                    let dir = if renamed { new.clone() } else { old.clone() };
+                    s.open_browser(Arc::new(LocalHost), dir, None, window, cx);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn render_folder_rename(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let r = self.folder_rename.as_ref()?;
+        let theme = cx.theme();
+        let (fg, muted, border, bg, red) = (theme.foreground, theme.muted_foreground, theme.border, theme.background, theme.red);
+        let open_here = self.tabs.iter().filter(|t| t.ws.read(cx).root().starts_with(&r.folder)).count();
+        let note = match open_here {
+            0 => "Claude Code's sessions and notes for it move along.".to_string(),
+            1 => "Its session closes, and opens again in the renamed folder. Claude Code's sessions and notes for it move along.".to_string(),
+            n => format!("Its {n} sessions close, and open again in the renamed folder. Claude Code's sessions and notes for it move along."),
+        };
+        Some(
+            div()
+                .absolute()
+                .inset_0()
+                .flex()
+                .justify_center()
+                .pt(px(90.))
+                .bg(gpui_kit::black().opacity(0.25))
+                .occlude()
+                .child(
+                    div()
+                        .w(px(440.))
+                        .h_auto()
+                        .p_4()
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .rounded_lg()
+                        .border_1()
+                        .border_color(border)
+                        .bg(bg)
+                        .shadow_lg()
+                        .child(div().text_base().font_weight(FontWeight::SEMIBOLD).text_color(fg).child("Rename folder"))
+                        .child(div().text_xs().text_color(muted).child(r.folder.display().to_string()))
+                        .child(Input::new(&r.input).small())
+                        .children(r.error.clone().map(|e| div().text_xs().text_color(red).child(e)))
+                        .child(div().text_xs().line_height(rems(1.4)).text_color(muted).child(note))
+                        .child(
+                            div()
+                                .pt_1()
+                                .flex()
+                                .justify_end()
+                                .gap_2()
+                                .child(Button::new("folder-rename-cancel").small().ghost().label("Cancel").on_click(cx.listener(|s, _, _, cx| {
+                                    s.folder_rename = None;
+                                    cx.notify();
+                                })))
+                                .child(Button::new("folder-rename-go").small().primary().label("Rename").on_click(cx.listener(|s, _, window, cx| s.rename_folder(window, cx)))),
+                        ),
+                )
+                .into_any_element(),
+        )
     }
 
     // ----- sessions -----
@@ -568,7 +753,7 @@ impl Shell {
                     "takeover" => (false, pid.filter(|p| *p != 0)),
                     _ => (false, None),
                 };
-                self.resume(host, root, backend, s.id, fork, wait, window, cx);
+                self.resume(host, root, backend, s.id, fork, wait, false, window, cx);
                 "ok".into()
             }
             "fold-sessions" => {
@@ -657,6 +842,7 @@ impl Shell {
             let current = self.name(ix, cx);
             let title = panels::title_element(&key, auto.clone(), None, None, cx);
             let weak = cx.entity().downgrade();
+            let (remote, folder) = (w.host().is_remote(), w.root().to_path_buf());
             let (k1, a1, c1) = (key.clone(), auto.clone(), current.clone());
             let drag = SessionDrag { number, name: current.clone().into() };
             col = col.child(
@@ -739,6 +925,12 @@ impl Shell {
                             start_tab_rename(k.clone(), a.clone(), c.clone(), window, cx)
                         }))
                         .item(PopupMenuItem::new("Reset name").on_click(move |_, window, cx| panels::reset_tab_name(&k2, window, cx)))
+                        .when(!remote, |m| {
+                            let (w2, f) = (weak.clone(), folder.clone());
+                            m.item(PopupMenuItem::new("Rename folder…").on_click(move |_, window, cx| {
+                                let _ = w2.update(cx, |s, cx| s.ask_rename_folder(f.clone(), window, cx));
+                            }))
+                        })
                         .separator()
                         .item(PopupMenuItem::new("Close session").on_click(move |_, window, cx| {
                             let _ = w1.update(cx, |s, cx| {
@@ -1096,6 +1288,7 @@ impl Render for Shell {
         } else {
             Some(self.render_list(cx))
         };
+        let folder_rename = self.render_folder_rename(cx);
         // The folded list, peeking out over the content until the pointer leaves it.
         let peek = (self.folded && self.peek && !self.tabs.is_empty()).then(|| {
             div()
@@ -1139,6 +1332,17 @@ impl Render for Shell {
                 s.activate(ix, w, cx)
             }))
             .on_action(cx.listener(|s, _: &OpenFolder, w, cx| s.new_session(w, cx)))
+            .on_action(cx.listener(|s, _: &RenameFolder, w, cx| {
+                if let Some(ws) = s.active_workspace() {
+                    let (host, root) = {
+                        let w = ws.read(cx);
+                        (w.host(), w.root().to_path_buf())
+                    };
+                    if !host.is_remote() {
+                        s.ask_rename_folder(root, w, cx);
+                    }
+                }
+            }))
             .on_action(cx.listener(|s, _: &RenameSession, w, cx| {
                 if s.tabs.is_empty() {
                     return;
@@ -1158,7 +1362,19 @@ impl Render for Shell {
                     .child(div().flex_1().min_w_0().h_full().child(main))
                     .children(peek),
             )
+            .children(folder_rename)
     }
+}
+
+/// A session closed for a folder rename, to open again: where, with what, and its id.
+type Reopen = (Arc<dyn Host>, PathBuf, Arc<dyn Backend>, Option<String>);
+
+/// A folder being renamed: its new name in the input, and what is wrong with it, if anything.
+struct FolderRename {
+    folder: PathBuf,
+    input: Entity<InputState>,
+    error: Option<String>,
+    _sub: Subscription,
 }
 
 /// Keeps one open from turning into several: the shown browser opens at most one session
