@@ -77,7 +77,10 @@ Then `workbench`, `workbench ~/code/app`, `workbench --new .` or `workbench --ss
 - **Panel headers and sheet tabs** (after an earlier app): a tool panel (Files, Skills,
   Terminals, Agent) has a title bar with a grip to drag it by, its title, its actions and
   options on hover; tool panels sharing a spot put their tabs along the bottom, the shown one
-  joined to the content above with an accent line. Documents (the chat, files, terminals) keep
+  joined to the content above with an accent line. Rows carry icons: files by type and coloured
+  by language (folders in one warm tone), skills by kind and coloured by source (green
+  project, cyan user, violet plugin; the description is the row's tooltip), terminals green
+  while running, subagents by status. Blue is kept for focus. Documents (the chat, files, terminals) keep
   their tabs on top in the same style. Everything drags between groups or onto an edge to
   split (gpui-component's DockArea under a custom renderer, `dock_skin.rs`); "Reset layout"
   restores the default, and the arrangement is saved per folder.
@@ -106,7 +109,7 @@ Then `workbench`, `workbench ~/code/app`, `workbench --new .` or `workbench --ss
 Environment: `WORKBENCH_MODEL=haiku` picks the model; `WORKBENCH_PERF=1` prints timings;
 `WORKBENCH_CONTROL=<fifo>` accepts test commands (`open`, `term`, `type`, `split`, `send`,
 `allow`, `new`, `browse`, `tab`, `tabs`, `move-session`, `fold-sessions`, `view`,
-`term-type`, `term-screen`, `chat`, `earlier`, `resume`, `fork`, `takeover`, `key`, `state`,
+`term-type`, `term-screen`, `chat`, `panel`, `earlier`, `resume`, `fork`, `takeover`, `key`, `state`,
 ...; see `control.rs`, `shell.rs`, `workspace.rs`); `WORKBENCH_BACKGROUND=1` opens windows
 without taking focus; `WORKBENCH_CONFIG_DIR` moves the settings folder (and the window's
 socket with it); `WORKBENCH_TEST_BACKENDS=1` adds the scripted test agent to the browser.

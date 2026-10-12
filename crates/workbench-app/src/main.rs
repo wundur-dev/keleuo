@@ -28,6 +28,7 @@ mod control;
 mod doc_panel;
 mod dock_skin;
 mod file_tree;
+mod icons;
 mod palette;
 mod panels;
 mod perf;
@@ -163,7 +164,7 @@ fn main() {
         return;
     }
     gpui_kit::application()
-        .with_assets(gpui_kit::assets::Assets)
+        .with_assets(icons::AppAssets)
         .run(move |cx: &mut App| {
             perf::step("gpui init", || gpui_kit::init(cx));
             Theme::change(ThemeMode::Dark, None, cx);

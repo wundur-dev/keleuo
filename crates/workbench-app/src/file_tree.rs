@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use gpui_kit::component::{ActiveTheme, Icon, IconName, Sizable};
+use gpui_kit::component::ActiveTheme;
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 use workbench_core::files::{self, Node};
@@ -23,6 +23,7 @@ struct Row {
     name: String,
     path: PathBuf,
     is_dir: bool,
+    open: bool,
 }
 
 pub struct FileTree {
@@ -90,6 +91,7 @@ impl FileTree {
                     name: n.name.clone(),
                     path: n.path.clone(),
                     is_dir: n.is_dir(),
+                    open: expanded.contains(&n.path),
                 });
                 if let Some(children) = &n.children
                     && expanded.contains(&n.path)
@@ -152,6 +154,7 @@ impl Render for FileTree {
             theme.accent,
             theme.secondary_hover,
         );
+        let quiet = theme.sidebar_foreground.opacity(0.88);
         if self.loading {
             return div()
                 .p_2()
@@ -164,16 +167,16 @@ impl Render for FileTree {
         let selected = self.selected.clone();
         let entity = cx.entity().downgrade();
         let sidebar_bg = cx.theme().sidebar;
-        let list = uniform_list("file-tree", rows.len(), move |range, _window, _cx| {
+        let list = uniform_list("file-tree", rows.len(), move |range, _window, cx| {
             range
                 .map(|ix| {
                     let row = &rows[ix];
                     let is_sel = selected.as_ref() == Some(&row.path);
                     let entity = entity.clone();
                     let icon = if row.is_dir {
-                        IconName::Folder
+                        crate::icons::folder(row.open)
                     } else {
-                        IconName::File
+                        crate::icons::file(&row.name, cx)
                     };
                     div()
                         .id(ix)
@@ -184,10 +187,10 @@ impl Render for FileTree {
                         .items_center()
                         .gap_1()
                         .text_xs()
-                        .text_color(if row.is_dir { fg } else { fg.opacity(0.9) })
+                        .text_color(if row.is_dir || is_sel { fg } else { quiet })
                         .when(is_sel, |d| d.bg(sel_bg))
                         .hover(|d| d.bg(hover))
-                        .child(Icon::new(icon).xsmall().text_color(muted))
+                        .child(icon)
                         .child(div().truncate().child(row.name.clone()))
                         .on_click(move |_, _, cx| {
                             let _ = entity.update(cx, |tree, cx| tree.click(ix, cx));

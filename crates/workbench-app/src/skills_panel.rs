@@ -5,12 +5,15 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use gpui_kit::component::{ActiveTheme, Icon, IconName, Sizable};
+use gpui_kit::component::tooltip::Tooltip;
+use gpui_kit::component::{ActiveTheme, Icon, Sizable};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 use workbench_core::host::Host;
 use workbench_core::agent::Backend;
 use workbench_core::skills::{Catalog, Entry, Kind};
+
+use crate::icons::{self, Source};
 
 pub enum SkillsEvent {
     Open(Entry),
@@ -93,77 +96,64 @@ impl SkillsPanel {
 
     fn group(
         &self,
+        first: bool,
         key: &str,
         title: String,
         entries: &[Entry],
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = cx.theme();
-        let (muted, fg, sel_bg, hover) = (
-            theme.muted_foreground,
-            theme.foreground,
+        let (fg, sel_bg, hover) = (
+            theme.sidebar_foreground,
             theme.accent,
             theme.secondary_hover,
         );
+        let source = Source::of_group(key);
+        let tint = source.color(cx);
         let folded = self.collapsed.contains(key);
         let key_owned = key.to_string();
-        let header = div()
-            .id(SharedString::from(format!("group-{key}")))
-            .h(px(20.))
-            .px_1()
-            .flex()
-            .items_center()
-            .gap_1()
-            .text_xs()
-            .font_weight(FontWeight::SEMIBOLD)
-            .text_color(muted)
-            .hover(|d| d.bg(hover))
-            .child(
-                Icon::new(if folded {
-                    IconName::ChevronRight
-                } else {
-                    IconName::ChevronDown
-                })
-                .xsmall(),
-            )
-            .child(div().flex_1().truncate().child(title))
-            .child(div().child(entries.len().to_string()))
-            .on_click(cx.listener(move |panel, _, _, cx| {
-                if !panel.collapsed.remove(&key_owned) {
-                    panel.collapsed.insert(key_owned.clone());
-                }
-                cx.notify();
-            }));
+        let header = crate::panels::section_header(
+            SharedString::from(format!("group-{key}")),
+            Some(Icon::new(source.icon()).xsmall().text_color(tint.opacity(0.85))),
+            title,
+            Some(entries.len().to_string()),
+            Some(!folded),
+            first,
+            cx,
+        )
+        .on_click(cx.listener(move |panel, _, _, cx| {
+            if !panel.collapsed.remove(&key_owned) {
+                panel.collapsed.insert(key_owned.clone());
+            }
+            cx.notify();
+        }));
         let mut col = div().flex().flex_col().child(header);
         if !folded {
             for e in entries {
                 let is_sel = self.selected.as_ref() == Some(&e.path);
                 let entry = e.clone();
                 let label = match e.kind {
-                    Kind::Agent => format!("{} (agent)", e.name),
                     Kind::Command => format!("/{}", e.name),
                     _ => e.name.clone(),
                 };
+                let description = SharedString::from(e.description.clone());
                 col = col.child(
                     div()
                         .id(SharedString::from(e.path.to_string_lossy().to_string()))
+                        .h(px(20.))
                         .pl(px(18.))
                         .pr_1()
-                        .py(px(2.))
                         .flex()
-                        .flex_col()
+                        .items_center()
+                        .gap(px(6.))
+                        .text_xs()
+                        .text_color(if is_sel { theme.foreground } else { fg })
                         .when(is_sel, |d| d.bg(sel_bg))
                         .hover(|d| d.bg(hover))
-                        .child(div().text_xs().text_color(fg).truncate().child(label))
-                        .when(!e.description.is_empty(), |d| {
-                            d.child(
-                                div()
-                                    .text_size(px(10.5))
-                                    .line_height(px(13.))
-                                    .text_color(muted)
-                                    .line_clamp(2)
-                                    .child(e.description.clone()),
-                            )
+                        .child(Icon::new(icons::entry(e.kind)).xsmall().text_color(tint))
+                        .child(div().flex_1().min_w_0().truncate().child(label))
+                        .when(!description.is_empty(), |d| {
+                            d.tooltip(move |w, cx| Tooltip::new(description.clone()).build(w, cx))
                         })
                         .on_click(cx.listener(move |panel, _, _, cx| {
                             panel.selected = Some(entry.path.clone());
@@ -203,8 +193,8 @@ impl Render for SkillsPanel {
                 )
             }
             Some(cat) => {
-                for g in &cat.groups {
-                    list = list.child(self.group(&g.key, g.title.clone(), &g.entries, cx));
+                for (i, g) in cat.groups.iter().enumerate() {
+                    list = list.child(self.group(i == 0, &g.key, g.title.clone(), &g.entries, cx));
                 }
             }
         }

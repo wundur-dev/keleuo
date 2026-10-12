@@ -94,7 +94,7 @@ pub fn title_element(
     key: &str,
     auto: String,
     dot: Option<Hsla>,
-    icon: Option<IconName>,
+    icon: Option<Icon>,
     cx: &App,
 ) -> AnyElement {
     if let Some(r) = cx.global::<Renaming>().0.as_ref().filter(|r| r.key == key) {
@@ -110,7 +110,7 @@ pub fn title_element(
         .flex()
         .items_center()
         .gap_1()
-        .children(icon.map(|i| Icon::new(i).xsmall()))
+        .children(icon)
         .child(div().when(renamed, |d| d.italic()).child(label))
         .children(dot.map(|c| div().size(px(6.)).rounded_full().bg(c)))
         .into_any_element()
@@ -162,6 +162,43 @@ list_panel!(
     "Terminals",
     IconName::SquareTerminal
 );
+
+/// A quiet section header in a sidebar list: an icon, the title, a faint count and, when the
+/// section folds, a chevron. Space above it separates groups (none for the first); the rows
+/// below stay tight.
+pub fn section_header(
+    id: SharedString,
+    icon: Option<Icon>,
+    title: impl Into<SharedString>,
+    count: Option<String>,
+    open: Option<bool>,
+    first: bool,
+    cx: &App,
+) -> Stateful<Div> {
+    let theme = cx.theme();
+    let (muted, fg, hover) = (theme.muted_foreground, theme.foreground, theme.secondary_hover);
+    div()
+        .id(id)
+        .h(px(20.))
+        .mt(px(if first { 3. } else { 9. }))
+        .pl(px(6.))
+        .pr(px(6.))
+        .flex()
+        .items_center()
+        .gap(px(6.))
+        .text_size(px(10.5))
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(muted.opacity(0.85))
+        .hover(|d| d.bg(hover).text_color(fg))
+        .children(icon)
+        .child(div().flex_1().min_w_0().truncate().child(title.into()))
+        .children(count.map(|c| div().flex_none().text_color(muted.opacity(0.6)).child(c)))
+        .children(open.map(|open| {
+            Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight })
+                .xsmall()
+                .text_color(muted.opacity(0.6))
+        }))
+}
 
 fn list_title(icon: IconName, title: &'static str) -> AnyElement {
     div()
@@ -273,11 +310,12 @@ impl Panel for TerminalsList {
 impl Render for TerminalsList {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let (fg, muted, hover, bg) = (
-            theme.foreground,
+        let (fg, muted, hover, bg, green) = (
+            theme.sidebar_foreground,
             theme.muted_foreground,
             theme.secondary_hover,
             theme.sidebar,
+            theme.green,
         );
         let terms = self.terminals.borrow().clone();
         let mut col = div()
@@ -302,6 +340,7 @@ impl Render for TerminalsList {
             let key = term_key(view);
             let auto = view.auto_name();
             let unseen = view.unseen;
+            let exited = view.exited;
             let name = tab_label(&key, auto.clone(), cx);
             let editing = cx
                 .global::<Renaming>()
@@ -312,25 +351,26 @@ impl Render for TerminalsList {
             let entity = t.clone();
             let row = div()
                 .id(SharedString::from(format!("term-row-{}", t.entity_id())))
-                .h(px(22.))
-                .px_2()
+                .h(px(20.))
+                .px(px(6.))
                 .flex()
                 .items_center()
-                .gap_1()
+                .gap(px(6.))
                 .text_xs()
                 .text_color(fg)
                 .hover(|d| d.bg(hover))
                 .child(
+                    // Green while its program runs, grey once it has exited.
                     Icon::new(IconName::SquareTerminal)
                         .xsmall()
-                        .text_color(muted),
+                        .text_color(if exited { muted } else { green }),
                 );
             let row = match editing {
                 Some(input) => row.child(div().flex_1().child(Input::new(&input).xsmall())),
                 None => row
                     .child(div().flex_1().min_w_0().truncate().child(name.clone()))
                     .when(unseen, |d| {
-                        d.child(div().size(px(6.)).rounded_full().bg(fg))
+                        d.child(div().size(px(6.)).rounded_full().bg(cx.theme().foreground))
                     })
                     .on_click(cx.listener(move |_, ev: &ClickEvent, window, cx| {
                         if ev.click_count() >= 2 {
@@ -439,7 +479,8 @@ pub fn doc_key(doc: &DocPanel) -> String {
 impl Panel for DocPanel {
     fn title(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let dot = self.dirty.then(|| cx.theme().foreground);
-        title_element(&doc_key(self), self.auto_name(), dot, None, cx)
+        let icon = self.path.file_name().map(|n| crate::icons::file(&n.to_string_lossy(), cx));
+        title_element(&doc_key(self), self.auto_name(), dot, icon, cx)
     }
     fn dropdown_menu(
         &mut self,
@@ -482,7 +523,7 @@ impl Panel for TerminalView {
             &term_key(self),
             self.auto_name(),
             dot,
-            Some(IconName::SquareTerminal),
+            Some(Icon::new(IconName::SquareTerminal).xsmall()),
             cx,
         )
     }

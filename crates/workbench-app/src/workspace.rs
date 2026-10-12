@@ -1121,6 +1121,16 @@ impl Workspace {
                     }
                 });
             }
+            "panel" => {
+                // Show a tool panel in its group: files, skills, agent or terminals (tests).
+                let id = match arg {
+                    "skills" => PanelId::from(self.skills.entity_id()),
+                    "agent" => PanelId::from(self.agent_side.entity_id()),
+                    "terminals" => PanelId::from(self.terms_list.entity_id()),
+                    _ => PanelId::from(self.files.entity_id()),
+                };
+                self.show_panel(id, window, cx);
+            }
             "fold" => self.toggle_sidebar(window, cx),
             "reset" => self.reset_layout(window, cx),
             "zoom" => {

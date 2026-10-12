@@ -29,7 +29,8 @@ impl AgentSide {
 
     fn render_agents(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let theme = cx.theme();
-        let (muted, hover, green, red, violet) = (
+        let (fg, muted, hover, green, red, violet) = (
+            theme.sidebar_foreground,
             theme.muted_foreground,
             theme.secondary_hover,
             theme.green,
@@ -39,21 +40,24 @@ impl AgentSide {
         let agents = self.session.read(cx).chat.turn_agents().to_vec();
         let panel = self.panel.downgrade();
         let mut out = vec![
-            div()
-                .h(px(20.))
-                .pl(px(6.))
-                .flex()
-                .items_center()
-                .text_size(px(10.5))
-                .text_color(muted)
-                .child(format!("Subagents ({})", agents.len()))
-                .into_any_element(),
+            crate::panels::section_header(
+                "subagents-head".into(),
+                Some(Icon::new(IconName::Bot).xsmall().text_color(violet.opacity(0.85))),
+                "Subagents",
+                Some(agents.len().to_string()),
+                None,
+                true,
+                cx,
+            )
+            .into_any_element(),
         ];
         if agents.is_empty() {
             out.push(
                 div()
-                    .pl(px(14.))
+                    .pl(px(24.))
                     .h(px(20.))
+                    .flex()
+                    .items_center()
                     .text_size(px(11.))
                     .text_color(muted.opacity(0.7))
                     .child("None in this turn")
@@ -83,20 +87,20 @@ impl AgentSide {
                 div()
                     .id(SharedString::from(format!("agent-row-{}", a.tool_use_id)))
                     .h(px(20.))
-                    .pl(px(14.))
-                    .pr_1()
+                    .pl(px(18.))
+                    .pr(px(6.))
                     .flex()
                     .items_center()
-                    .gap_1()
+                    .gap(px(6.))
                     .text_size(px(11.))
-                    .text_color(muted)
+                    .text_color(fg)
                     .hover(|d| d.bg(hover))
                     .child(icon)
                     .child(div().flex_1().min_w_0().truncate().child(title))
                     .when_some(a.current_tool.clone(), |d, t| {
-                        d.child(div().flex_none().child(t))
+                        d.child(div().flex_none().text_color(muted).child(t))
                     })
-                    .child(div().flex_none().child(elapsed))
+                    .child(div().flex_none().text_color(muted).child(elapsed))
                     .on_click(move |_, window, cx| {
                         let _ = panel.update(cx, |p, cx| {
                             p.expand_agent(&id, cx);
