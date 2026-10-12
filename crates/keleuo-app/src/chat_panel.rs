@@ -13,8 +13,6 @@ use crate::agent_session::{Asking, Spend, View};
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::menu::DropdownMenu;
 use crate::sheet_tabs::{self, Joined, Palette, StripState};
-use gpui_kit::component::shimmer::ShimmerText;
-use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::text::TextView;
 use gpui_kit::component::{ActiveTheme, Icon, IconName, Sizable};
 use gpui_kit::prelude::*;
@@ -70,6 +68,8 @@ pub struct ChatPanel {
     ticker: Option<Task<()>>,
     /// When the agent became busy with the current turn (for the time on the thinking line).
     busy_since: Option<std::time::Instant>,
+    /// The step the spinners are at: the ticker moves it on while something runs.
+    phase: u32,
     /// The Chat and Terminal view tabs.
     views: Rc<StripState>,
     _subs: Vec<Subscription>,
@@ -83,6 +83,11 @@ const TAIL: usize = 4;
 impl EventEmitter<ChatPanelEvent> for ChatPanel {}
 
 const MONO: &str = "Menlo";
+/// How often the chat redraws while something runs: the spinners' step and the clocks.
+/// Ten a second reads as motion; continuous animation would redraw every frame.
+const TICK: std::time::Duration = std::time::Duration::from_millis(100);
+/// Steps in a spinner's turn (one turn a little over a second at the tick above).
+const SPINNER_STEPS: u32 = 12;
 /// How many of a running command's latest output lines its card shows.
 const LIVE_LINES: usize = 10;
 /// Space below the Chat / Terminal tabs, before the window's bottom edge.
@@ -137,11 +142,10 @@ impl ChatPanel {
                     panel.ticker = Some(cx.spawn(
                         async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
                             loop {
-                                cx.background_executor()
-                                    .timer(std::time::Duration::from_secs(1))
-                                    .await;
+                                cx.background_executor().timer(TICK).await;
                                 let alive = this.update(cx, |p, cx| {
                                     let still = clocks_running(&p.session.read(cx).chat);
+                                    p.phase = p.phase.wrapping_add(1);
                                     cx.notify();
                                     if !still {
                                         p.ticker = None;
@@ -178,6 +182,7 @@ impl ChatPanel {
             index: Arc::new(FileIndex::default()),
             last_revision: 0,
             busy_since: None,
+            phase: 0,
             ticker: None,
             views: Rc::new(StripState::default()),
             _subs: vec![s1, s2],
@@ -206,6 +211,13 @@ impl ChatPanel {
             Some(id) => chat.agent(id)?.items.get(ix).cloned(),
             None => chat.items.get(ix).cloned(),
         }
+    }
+
+    /// A spinner at the panel's step: turned by the ticker, a few steps a second, rather
+    /// than animated every frame (an animation redraws the whole chat on every frame).
+    fn spinner(&self, color: Hsla) -> Icon {
+        let turn = (self.phase % SPINNER_STEPS) as f32 / SPINNER_STEPS as f32;
+        Icon::new(IconName::LoaderCircle).text_color(color).transform(Transformation::rotate(percentage(turn)))
     }
 
     /// Keyboard focus is in this session (its message box or the panel).
@@ -681,7 +693,7 @@ impl ChatPanel {
         let open = default_open != self.toggled.contains(&tool.id);
         let id = tool.id.clone();
         let status = if tool.running() {
-            Spinner::new().icon(IconName::LoaderCircle).xsmall().color(muted).into_any_element()
+            self.spinner(muted).xsmall().into_any_element()
         } else if !tool.done() {
             // Interrupted, or replayed without its result.
             Icon::new(IconName::Minus).xsmall().text_color(muted).into_any_element()
@@ -1080,11 +1092,7 @@ impl ChatPanel {
         let open = self.agent_open(&agent.tool_use_id);
         let id = agent.tool_use_id.clone();
         let status = match agent.status {
-            AgentStatus::Running => Spinner::new()
-                .icon(IconName::LoaderCircle)
-                .xsmall()
-                .color(violet)
-                .into_any_element(),
+            AgentStatus::Running => self.spinner(violet).xsmall().into_any_element(),
             AgentStatus::Done => Icon::new(IconName::Check).xsmall().text_color(green).into_any_element(),
             AgentStatus::Failed => Icon::new(IconName::CircleX).xsmall().text_color(red).into_any_element(),
         };
@@ -1500,7 +1508,7 @@ impl ChatPanel {
             Some(_) => format!("{name} is working…"),
         };
         let theme = cx.theme();
-        let (ring, border, accent, muted) = (theme.ring, theme.border, theme.accent, theme.muted_foreground);
+        let (ring, border, accent, muted, theme_fg) = (theme.ring, theme.border, theme.accent, theme.muted_foreground, theme.foreground);
         let elapsed = self.busy_since.map(|t| format_elapsed(t.elapsed()));
         Some(
             div()
@@ -1514,8 +1522,8 @@ impl ChatPanel {
                 .border_color(border)
                 .bg(accent)
                 .text_sm()
-                .child(Spinner::new().color(ring))
-                .child(ShimmerText::new(label).id("thinking"))
+                .child(self.spinner(ring).small())
+                .child(div().text_color(theme_fg).child(label))
                 // How long this turn has been going, at the right.
                 .child(div().flex_1())
                 .when_some(elapsed, |d, e| d.child(div().flex_none().text_xs().text_color(muted).child(e)))

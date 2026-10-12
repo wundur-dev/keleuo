@@ -1323,13 +1323,6 @@ impl Render for Shell {
                 .h_full()
                 .occlude()
                 .shadow_lg()
-                .on_hover(cx.listener(|s, hovered: &bool, _, cx| {
-                    if !*hovered {
-                        s.peek = false;
-                        s.rail_hover = false;
-                        cx.notify();
-                    }
-                }))
                 .child(self.render_list(cx))
         });
         div()
@@ -1389,7 +1382,25 @@ impl Render for Shell {
                     .relative()
                     .flex()
                     .children(list)
-                    .child(div().flex_1().min_w_0().h_full().child(main))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .h_full()
+                            // The peeking list goes when the pointer moves on over the content
+                            // (not when it merely leaves the list: a menu opened from the list
+                            // floats outside it, and holds the pointer while it is open).
+                            .when(self.peek, |d| {
+                                d.on_mouse_move(cx.listener(|s, _: &MouseMoveEvent, _, cx| {
+                                    if s.peek {
+                                        s.peek = false;
+                                        s.rail_hover = false;
+                                        cx.notify();
+                                    }
+                                }))
+                            })
+                            .child(main),
+                    )
                     .children(peek),
             )
             .children(folder_rename)
