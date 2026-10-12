@@ -1,4 +1,4 @@
-# Workbench
+# Keleion
 
 A native desktop app for working with coding agents (Claude Code so far): a list of
 sessions, each a whole workspace with its chat or the agent's own terminal, files, skills
@@ -14,27 +14,27 @@ Keep the build output on the internal disk:
 
 ```sh
 export CARGO_TARGET_DIR="$HOME/Library/Caches/workbench-target"
-cargo run -p workbench-app --release -- /path/to/project      # the browser at that folder
-cargo run -p workbench-app --release -- --new /path/to/project # a session there at once
+cargo run -p keleion-app --release -- /path/to/project      # the browser at that folder
+cargo run -p keleion-app --release -- --new /path/to/project # a session there at once
 cargo test --workspace
 ```
 
 The window opens on the **session browser** at the folder given (or the current folder, like
 `code .`; started from the Finder, the last folder). Remote: `--ssh host:/path/on/host`.
 
-### The `workbench` command
+### The `keleion` command
 
-`scripts/workbench` opens the browser at the current folder, or hands the request to the
+`scripts/keleion` opens the browser at the current folder, or hands the request to the
 window that is already open (one window for everything; the first one listens on a socket in
 `$TMPDIR`). Install it once, after a release build:
 
 ```sh
-CARGO_TARGET_DIR="$HOME/Library/Caches/workbench-target" cargo build -p workbench-app --release
-ln -s "$PWD/scripts/workbench" "$HOME/.local/bin/workbench"   # any folder on your PATH
+CARGO_TARGET_DIR="$HOME/Library/Caches/workbench-target" cargo build -p keleion-app --release
+ln -s "$PWD/scripts/keleion" "$HOME/.local/bin/keleion"   # any folder on your PATH
 ```
 
-Then `workbench`, `workbench ~/code/app`, `workbench --new .` or `workbench --ssh dev:/srv/app`.
-`WORKBENCH_BIN` points it at another binary.
+Then `keleion`, `keleion ~/code/app`, `keleion --new .` or `keleion --ssh dev:/srv/app`.
+`KELEION_BIN` points it at another binary.
 
 ## Layout and keys
 
@@ -97,7 +97,7 @@ Then `workbench`, `workbench ~/code/app`, `workbench --new .` or `workbench --ss
   session's dot turns amber.
 - **Worktrees** are explicit: the browser's right side is titled with the folder's repository
   and branch, and "New session in a git worktree..." first shows what it will make ("Copy of
-  proj (main) into ../proj-2, branch workbench/proj-2") with the name editable.
+  proj (main) into ../proj-2, branch keleion/proj-2") with the name editable.
 - **Panel headers and sheet tabs** (after an earlier app): a tool panel (Files, Skills,
   Terminals, Agent) has a title bar with a grip to drag it by, its title, its actions and
   options on hover; tool panels sharing a spot put their tabs along the bottom, the shown one
@@ -130,18 +130,18 @@ Then `workbench`, `workbench ~/code/app`, `workbench --new .` or `workbench --ss
 | Ctrl+- / Ctrl+Shift+- | Back / forward through jumps |
 | Cmd+L | Focus the message box |
 
-Environment: `WORKBENCH_MODEL=haiku` picks the model; `WORKBENCH_PERMISSION_MODE=default`
-starts sessions in that permission mode; `WORKBENCH_PERF=1` prints timings;
-`WORKBENCH_CONTROL=<fifo>` accepts test commands (`open`, `term`, `type`, `split`, `send`,
+Environment: `KELEION_MODEL=haiku` picks the model; `KELEION_PERMISSION_MODE=default`
+starts sessions in that permission mode; `KELEION_PERF=1` prints timings;
+`KELEION_CONTROL=<fifo>` accepts test commands (`open`, `term`, `type`, `split`, `send`,
 `allow`, `new`, `browse`, `tab`, `tabs`, `move-session`, `fold-sessions`, `view`,
 `term-type`, `term-screen`, `chat`, `chat-top`, `chat-scroll`, `panel`, `earlier`, `resume`, `fork`, `takeover`, `key`, `state`,
-...; see `control.rs`, `shell.rs`, `workspace.rs`); `WORKBENCH_BACKGROUND=1` opens windows
-without taking focus; `WORKBENCH_CONFIG_DIR` moves the settings folder (and the window's
-socket with it); `WORKBENCH_TEST_BACKENDS=1` adds the scripted test agent to the browser.
+...; see `control.rs`, `shell.rs`, `workspace.rs`); `KELEION_BACKGROUND=1` opens windows
+without taking focus; `KELEION_CONFIG_DIR` moves the settings folder (and the window's
+socket with it); `KELEION_TEST_BACKENDS=1` adds the scripted test agent to the browser.
 
 ## Layout of the code
 
-- `crates/workbench-core`: no UI. The gitignore-aware file tree, skills and frontmatter, the
+- `crates/keleion-core`: no UI. The gitignore-aware file tree, skills and frontmatter, the
   chat state built from agent events (tool calls, permission prompts, diffs, subagents,
   cost), `path:line` link detection, tab names, and the `Host` interface every project
   operation and every program goes through.
@@ -152,13 +152,13 @@ socket with it); `WORKBENCH_TEST_BACKENDS=1` adds the scripted test agent to the
   - `backends::claude`: Claude Code. Its `stream-json` format, session files under
     `~/.claude/projects`, skill folders and process discovery live here and nowhere else.
   - `backends::scripted`: a fake agent for tests that plays a fixed turn of neutral events.
-- `crates/workbench-app`: the gpui window. It only knows `Backend`, `Agent` and `Event`;
+- `crates/keleion-app`: the gpui window. It only knows `Backend`, `Agent` and `Event`;
   `src/backends.rs` is the one file that names a backend, and a test fails if another file
   does.
 
 ## Adding an agent backend
 
-1. Add `crates/workbench-core/src/backends/<name>/` (or one file) and list it in
+1. Add `crates/keleion-core/src/backends/<name>/` (or one file) and list it in
    `backends/mod.rs`.
 2. Implement `Agent` for one running conversation: build a `ProgramSpec` (program, arguments,
    environment, folder) and start it with `host.program_command(&spec)`, so it runs locally or
@@ -170,20 +170,20 @@ socket with it); `WORKBENCH_TEST_BACKENDS=1` adds the scripted test agent to the
    `create_skill`, `earlier_sessions`, `session_count`, `load_session`, `running` and
    `running_elsewhere`. The window hides what `capabilities()` says is missing (skills, earlier
    sessions, forking, subagents, permission prompts, the accept-edits toggle, models).
-4. Register it in `crates/workbench-app/src/backends.rs`. The new-session browser then offers
+4. Register it in `crates/keleion-app/src/backends.rs`. The new-session browser then offers
    it.
 5. Test it the way `backends/scripted.rs` and `backends/claude/mod.rs` do: drive the `Agent`
    through the trait and apply its events to a `Conversation`. Recorded output belongs in
-   `crates/workbench-core/tests/fixtures`.
+   `crates/keleion-core/tests/fixtures`.
 
 ## How Claude runs
 
 Each session runs `claude` (`--session-id <new id>`, or `--resume <id>`, with
 `--fork-session` for a fork) in a pseudo-terminal in the project folder, plus
-`--settings <file>`: a settings file of the window's own (in a `workbench-<pid>` folder in
+`--settings <file>`: a settings file of the window's own (in a `keleion-<pid>` folder in
 the system's temporary folder, removed when the window closes) that adds hooks. Nothing in
-`~/.claude` is changed. Each hook runs `workbench-hook <socket> <token> <event>` (built next
-to `workbench`; standard library only), which passes the hook's input to the window over a
+`~/.claude` is changed. Each hook runs `keleion-hook <socket> <token> <event>` (built next
+to `keleion`; standard library only), which passes the hook's input to the window over a
 local socket. Otherwise it is started as in a person's terminal: no stream flags, TERM
 `xterm-256color`, LANG set when the window has none, and the variables a running Claude Code
 gives its children unset (when the window was itself started from one).
@@ -210,7 +210,7 @@ folders, whose hooks could not reach the window.
 
 ## Remote over SSH: the plan
 
-Every project operation goes through `workbench_core::host::Host`: list and read files, read
+Every project operation goes through `keleion_core::host::Host`: list and read files, read
 and write skills, watch for changes, the terminal's shell, and the `claude` command.
 
 - `LocalHost`: this machine.
@@ -218,7 +218,7 @@ and write skills, watch for changes, the terminal's shell, and the `claude` comm
   control connection (`ControlMaster`). The terminal is `ssh -t host 'cd dir && exec $SHELL -l'`
   in the local PTY; Claude is `ssh -T host claude -p ...` with the same stream over the ssh
   pipes. Files are read with `cat`, listed with `git ls-files`. No file watching.
-- Next: a small headless helper binary (`workbench-remote`), copied to the host on first
+- Next: a small headless helper binary (`keleion-remote`), copied to the host on first
   connect and started over `ssh` (the approach Zed uses for remote development). It speaks a
   compact length-prefixed protocol over its stdin and stdout: list, read, write, watch
   (notify on the remote), spawn PTY, spawn `claude`, and later spawn language servers. One
