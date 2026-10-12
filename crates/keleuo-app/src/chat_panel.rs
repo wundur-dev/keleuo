@@ -694,11 +694,16 @@ impl ChatPanel {
         TextView::markdown(id, md)
             .selectable(true)
             .text_sm()
-            // Code blocks: the language and a copy button.
-            .code_block_actions(|block, _, cx| {
+            // Code blocks: the language and a copy button; a one-line `!` command (one for the
+            // agent's own shell) also gets Run, which sends it as if typed in the message box.
+            .code_block_actions({
+                let panel = entity.clone();
+                move |block, _, cx| {
                 let code = block.code();
                 let lang = block.lang().unwrap_or_else(|| "code".into());
                 let muted = cx.theme().muted_foreground;
+                let command = shell_command(&code);
+                let panel = panel.clone();
                 div()
                     .flex()
                     .items_center()
@@ -706,6 +711,20 @@ impl ChatPanel {
                     .text_size(px(11.))
                     .text_color(muted)
                     .child(lang)
+                    .when_some(command, |d, command| {
+                        d.child(
+                            Button::new("run-code")
+                                .xsmall()
+                                .label("Run")
+                                .icon(gpui_kit::assets::IconName::Play)
+                                .tooltip("Run it in this session, as if typed in the message box")
+                                .on_click(move |_, window, cx| {
+                                    let text = command.clone();
+                                    let _ = panel.update(cx, |p, cx| p.session.update(cx, |s, cx| s.send_with(&text, Vec::new(), cx)));
+                                    gpui_kit::component::WindowExt::push_notification(window, "Sent to the session", cx);
+                                }),
+                        )
+                    })
                     .child(
                         Button::new("copy-code")
                             .xsmall()
@@ -717,6 +736,7 @@ impl ChatPanel {
                                 gpui_kit::component::WindowExt::push_notification(window, "Copied", cx);
                             }),
                     )
+                }
             })
             .on_link_click(move |url, ev, _, cx| {
                 if let Some((path, line)) = links::parse_url(url) {
@@ -2265,5 +2285,25 @@ mod elapsed_tests {
         assert_eq!(t(185), "3m 05s");
         assert_eq!(t(2 * 3600 + 5 * 60 + 9), "2h 05m 09s");
         assert_eq!(t(86_400 + 3 * 3600 + 5 * 60 + 9), "1d 3h 05m 09s");
+    }
+}
+
+/// A code block that is one command for the agent's own shell (`! git push`): that line.
+fn shell_command(code: &str) -> Option<String> {
+    let mut lines = code.lines().map(str::trim).filter(|l| !l.is_empty());
+    let first = lines.next()?;
+    (lines.next().is_none() && first.starts_with('!') && first.len() > 1).then(|| first.to_string())
+}
+
+#[cfg(test)]
+mod shell_command_tests {
+    use super::shell_command;
+
+    #[test]
+    fn one_bang_line_is_a_command() {
+        assert_eq!(shell_command("! git push -u origin main\n").as_deref(), Some("! git push -u origin main"));
+        assert_eq!(shell_command("ls -la"), None);
+        assert_eq!(shell_command("! a\n! b"), None, "several commands: copy them instead");
+        assert_eq!(shell_command("!"), None);
     }
 }
