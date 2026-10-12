@@ -84,6 +84,24 @@ pub trait Host: Send + Sync {
         let start = (offset as usize).min(bytes.len());
         Ok(bytes.split_off(start))
     }
+    /// Each line of `path` from byte `from` up to `to` (the end when `None`), with the offset
+    /// it starts at, read as a stream where the host can (a session file can be hundreds of
+    /// megabytes). `f` returns false to stop.
+    fn for_each_line(&self, path: &Path, from: u64, to: Option<u64>, f: &mut dyn FnMut(u64, &str) -> bool) -> io::Result<()> {
+        let bytes = self.read_from(path, from)?;
+        let mut offset = from;
+        for line in bytes.split(|b| *b == b'\n') {
+            if to.is_some_and(|t| offset >= t) {
+                break;
+            }
+            let start = offset;
+            offset += line.len() as u64 + 1;
+            if !line.is_empty() && !f(start, &String::from_utf8_lossy(line)) {
+                break;
+            }
+        }
+        Ok(())
+    }
     /// The length of `path` in bytes.
     fn len(&self, path: &Path) -> io::Result<u64> {
         self.read(path).map(|b| b.len() as u64)
@@ -155,6 +173,32 @@ impl Host for LocalHost {
 
     fn len(&self, path: &Path) -> io::Result<u64> {
         Ok(std::fs::metadata(path)?.len())
+    }
+
+    fn for_each_line(&self, path: &Path, from: u64, to: Option<u64>, f: &mut dyn FnMut(u64, &str) -> bool) -> io::Result<()> {
+        use std::io::{BufRead, Seek, SeekFrom};
+        let mut file = std::fs::File::open(path)?;
+        file.seek(SeekFrom::Start(from))?;
+        let mut reader = io::BufReader::with_capacity(1 << 20, file);
+        let mut buf = Vec::new();
+        let mut offset = from;
+        loop {
+            if to.is_some_and(|t| offset >= t) {
+                break;
+            }
+            buf.clear();
+            let n = reader.read_until(b'\n', &mut buf)?;
+            if n == 0 {
+                break;
+            }
+            let start = offset;
+            offset += n as u64;
+            let line = buf.strip_suffix(b"\n").unwrap_or(&buf);
+            if !line.is_empty() && !f(start, &String::from_utf8_lossy(line)) {
+                break;
+            }
+        }
+        Ok(())
     }
 
     fn write(&self, path: &Path, contents: &[u8]) -> io::Result<()> {

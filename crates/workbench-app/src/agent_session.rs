@@ -46,6 +46,18 @@ impl Spend {
     }
 }
 
+/// Seconds to wait for the interface to say it is up before pointing to the terminal.
+const ASK_AFTER_SECS: u64 = 6;
+
+/// The agent's interface waits on a question Chat does not draw itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Asking {
+    /// "Do you trust the files in this folder?": answered from Chat with Trust or Don't trust.
+    Trust,
+    /// Something else (a login, an approval, a list to choose from): answered in the terminal.
+    Other,
+}
+
 /// Something the rest of the window should react to.
 #[derive(Clone, Debug)]
 pub enum SessionEvent {
@@ -116,6 +128,10 @@ pub struct AgentSession {
     sent_at: Option<std::time::Instant>,
     /// Billed per use (an API key) rather than by a plan; `None` until known.
     pub per_use: Option<bool>,
+    /// The interface waits on a question before it is up (see [`Asking`]).
+    pub asking: Option<Asking>,
+    /// The agent's own record of whether this folder is trusted, when known.
+    trusted: Option<bool>,
 }
 
 impl EventEmitter<SessionEvent> for AgentSession {}
@@ -146,6 +162,8 @@ impl AgentSession {
             asked: 0,
             sent_at: None,
             per_use: None,
+            asking: None,
+            trusted: None,
         }
     }
 
@@ -164,6 +182,13 @@ impl AgentSession {
         s
     }
 
+    /// Read an earlier part of this session's file (off the UI thread).
+    pub fn earlier_loader(&self) -> Option<impl FnOnce(u64, u64) -> std::io::Result<Vec<workbench_core::conversation::Item>> + Send + 'static> {
+        let (host, backend, cwd) = (self.host.clone(), self.backend.clone(), self.cwd.clone());
+        let id = self.chat.session_id.clone()?;
+        Some(move |from, to| backend.load_segment(host.as_ref(), &cwd, &id, from, to))
+    }
+
     /// Whether the agent's own terminal interface drives this session (Chat is then a view of
     /// its session file). Local folders only: its hooks reach the window over a local socket.
     pub fn interactive(&self) -> bool {
@@ -177,9 +202,12 @@ impl AgentSession {
         // thread).
         let (host, backend, cwd) = (self.host.clone(), self.backend.clone(), self.cwd.clone());
         cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
-            let per_use = cx.background_spawn(async move { backend.billed_per_use(host.as_ref(), &cwd) }).await;
+            let (per_use, trusted) = cx
+                .background_spawn(async move { (backend.billed_per_use(host.as_ref(), &cwd), backend.folder_trusted(host.as_ref(), &cwd)) })
+                .await;
             let _ = this.update(cx, |s, cx| {
                 s.per_use = per_use;
+                s.trusted = trusted;
                 cx.notify();
             });
         })
@@ -225,6 +253,59 @@ impl AgentSession {
         let model = self.chat.model.clone().or_else(|| self.model.clone())?;
         let window = self.backend.context_window(&model)?;
         Some(Spend::Context { percent: ((tokens * 100) / window.max(1)) as u32, tokens, window })
+    }
+
+    // ----- questions before the interface is up -----
+
+    /// Before the interface is up: is its screen a question Chat should point to?
+    fn check_asking(&mut self, view: &Entity<TerminalView>, cx: &mut Context<Self>) {
+        let screen = view.read(cx).screen_text();
+        let asking = if screen.contains("trust this folder") || (self.trusted == Some(false) && screen.contains("Enter to confirm")) {
+            Some(Asking::Trust)
+        } else if screen.contains("Enter to confirm") || screen.contains("Esc to cancel") || screen.contains("Press Enter") {
+            Some(Asking::Other)
+        } else {
+            self.asking.filter(|a| *a == Asking::Other)
+        };
+        if asking != self.asking {
+            self.asking = asking;
+            self.unseen = true;
+            cx.notify();
+        }
+    }
+
+    /// Answer the trust question as a person would: move the selection to the answer with the
+    /// arrow keys, then Enter. Don't trust makes the interface exit.
+    pub fn answer_trust(&mut self, trust: bool, cx: &mut Context<Self>) {
+        let Some(view) = self.terminal_view() else { return };
+        let target = if trust { "Yes, I trust" } else { "No, exit" };
+        self.asking = None;
+        cx.notify();
+        cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            for _ in 0..6 {
+                let (pty, chosen, present) = view.update(cx, |v, _| {
+                    let screen = v.screen_text();
+                    let line = screen.lines().find(|l| l.contains(target)).map(str::to_string);
+                    (v.pty.clone(), line.as_deref().is_some_and(|l| l.contains('❯')), line.is_some())
+                });
+                let Some(pty) = pty else { return };
+                if !present {
+                    break;
+                }
+                if chosen {
+                    pty.write(b"\r".to_vec());
+                    return;
+                }
+                pty.write(b"\x1b[B".to_vec());
+                cx.background_executor().timer(std::time::Duration::from_millis(120)).await;
+            }
+            // Not found as expected: the person answers in the terminal.
+            let _ = this.update(cx, |s, cx| {
+                s.asking = Some(Asking::Other);
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     // ----- the agent's own interface -----
@@ -276,8 +357,22 @@ impl AgentSession {
             } else if !s.ready && s.hooks.is_none() && view.read(cx).drawn {
                 // No hooks to say when it is up: the first screen will do.
                 s.set_ready(cx);
+            } else if !s.ready {
+                s.check_asking(&view, cx);
             }
         });
+        // Up within a few seconds, or it is waiting on something in the terminal.
+        cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            cx.background_executor().timer(std::time::Duration::from_secs(ASK_AFTER_SECS)).await;
+            let _ = this.update(cx, |s, cx| {
+                if !s.ready && s.asking.is_none() && s.running(cx) {
+                    s.asking = Some(Asking::Other);
+                    s.unseen = true;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
         self.ready = false;
         self.terminal = Some(TerminalRun { view, _exit: exit });
         if fork {
@@ -351,6 +446,8 @@ impl AgentSession {
 
     /// A hook call from the interface.
     pub fn on_hook(&mut self, call: hooks::Call, cx: &mut Context<Self>) {
+        // It is past any question it was asking.
+        self.asking = None;
         let Some(hook) = self.backend.parse_hook(&call.event, &call.payload, &self.chat.cwd) else { return };
         match hook {
             Hook::Started { session_id, .. } => {

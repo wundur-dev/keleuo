@@ -1143,11 +1143,15 @@ impl Workspace {
                 };
                 self.toggle_zoom(id, window, cx);
             }
-            "chat-all" | "chat-scroll" => {
+            "chat-top" | "chat-scroll" => {
                 let dy = arg.parse::<f32>().unwrap_or(0.0);
-                let c = if cmd == "chat-all" { "all" } else { "scroll" };
+                let c = if cmd == "chat-top" { "top" } else { "scroll" };
                 self.claude.update(cx, |p, cx| p.test_command(c, dy, cx));
             }
+            "trust" | "distrust" => {
+                self.session.update(cx, |s, cx| s.answer_trust(cmd == "trust", cx));
+            }
+            "asking" => return format!("{:?}", self.session.read(cx).asking),
             "chat" => {
                 // The session's chat state, briefly (tests).
                 let s = self.session.read(cx);

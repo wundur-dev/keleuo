@@ -17,12 +17,13 @@ use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::{ActiveTheme, Icon, IconName, Sizable};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
-use workbench_core::agent::{Backend, Running, SessionInfo};
+use workbench_core::agent::{Backend, LiveReason, LiveSession, Running, SessionInfo};
 use workbench_core::host::Host;
 
 /// What the person chose.
 pub enum BrowserEvent {
-    New { host: Arc<dyn Host>, root: PathBuf, backend: Arc<dyn Backend>, worktree: bool },
+    /// A new session in `root`, or (`worktree`: its name) in a new git worktree of its repository.
+    New { host: Arc<dyn Host>, root: PathBuf, backend: Arc<dyn Backend>, worktree: Option<String> },
     Resume { host: Arc<dyn Host>, root: PathBuf, backend: Arc<dyn Backend>, id: String, fork: bool, wait_for: Option<u32> },
     /// A session already open in this window.
     Switch(String),
@@ -52,8 +53,10 @@ struct Detail {
     folder: PathBuf,
     sessions: Vec<SessionInfo>,
     /// `(pid, session id)` of agents running there outside this window.
-    running: Vec<(u32, String)>,
+    running: Vec<LiveSession>,
     is_git: bool,
+    /// The repository the folder is in: its top folder and checked-out branch.
+    repo: Option<(PathBuf, Option<String>)>,
     loading: bool,
 }
 
@@ -65,6 +68,8 @@ pub struct Browser {
     subfolders: Vec<PathBuf>,
     recent: Vec<PathBuf>,
     filter: Entity<InputState>,
+    /// The worktree form: its name field, while shown.
+    worktree: Option<(Entity<InputState>, Subscription)>,
     rows: Vec<Row>,
     selected: Option<usize>,
     badges: HashMap<PathBuf, Badge>,
@@ -111,6 +116,7 @@ impl Browser {
             subfolders: Vec::new(),
             recent,
             filter,
+            worktree: None,
             rows: Vec::new(),
             selected: None,
             badges: HashMap::new(),
@@ -221,25 +227,36 @@ impl Browser {
         }
     }
 
+    /// Look at the selected folder's sessions again (after an open was refused).
+    pub fn refresh_detail(&mut self, cx: &mut Context<Self>) {
+        if let Some(ix) = self.selected {
+            self.detail = None;
+            self.select(ix, cx);
+        }
+    }
+
     fn select(&mut self, ix: usize, cx: &mut Context<Self>) {
         let Some(Row::Folder { path, .. }) = self.rows.get(ix).cloned() else { return };
         self.selected = Some(ix);
+        self.worktree = None;
         self.scroll.scroll_to_item(ix, ScrollStrategy::Center);
         if self.detail.as_ref().is_some_and(|d| d.folder == path) {
             cx.notify();
             return;
         }
-        self.detail = Some(Detail { folder: path.clone(), sessions: Vec::new(), running: Vec::new(), is_git: false, loading: true });
+        self.detail = Some(Detail { folder: path.clone(), sessions: Vec::new(), running: Vec::new(), is_git: false, repo: None, loading: true });
         let (host, backend) = (self.host.clone(), self.backend.clone());
+        let own: Vec<String> = self.open.iter().filter_map(|o| o.id.clone()).collect();
         let task = cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
             let folder = path.clone();
-            let (sessions, running, is_git) = cx
+            let (sessions, running, is_git, repo) = cx
                 .background_spawn(async move {
                     let caps = backend.capabilities();
                     let sessions = if caps.earlier_sessions { backend.earlier_sessions(host.as_ref(), &folder, 30) } else { Vec::new() };
-                    let running = backend.running_elsewhere(host.as_ref(), &folder, &sessions, std::process::id());
-                    let is_git = !host.is_remote() && host.exists(&folder.join(".git"));
-                    (sessions, running, is_git)
+                    let running = backend.live_sessions(host.as_ref(), &folder, &sessions, std::process::id(), &own);
+                    let repo = if host.is_remote() { None } else { crate::shell::repo_of(&folder) };
+                    let is_git = repo.is_some();
+                    (sessions, running, is_git, repo)
                 })
                 .await;
             let _ = this.update(cx, |b, cx| {
@@ -247,6 +264,7 @@ impl Browser {
                     d.sessions = sessions;
                     d.running = running;
                     d.is_git = is_git;
+                    d.repo = repo;
                     d.loading = false;
                     cx.notify();
                 }
@@ -291,11 +309,40 @@ impl Browser {
     }
 
     /// Enter: a new session in the selected folder (Cmd+Enter: in a git worktree).
-    fn open_default(&mut self, worktree: bool, _: &mut Window, cx: &mut Context<Self>) {
+    fn open_default(&mut self, worktree: bool, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(root) = self.selected_folder() {
             let is_git = self.detail.as_ref().is_some_and(|d| d.folder == root && d.is_git);
-            cx.emit(BrowserEvent::New { host: self.host.clone(), root, backend: self.backend.clone(), worktree: worktree && is_git });
+            if worktree && is_git {
+                // Never at once: first show what would be made, with a name to change.
+                self.ask_worktree(window, cx);
+            } else if !worktree {
+                cx.emit(BrowserEvent::New { host: self.host.clone(), root, backend: self.backend.clone(), worktree: None });
+            }
         }
+    }
+
+    /// Show the worktree form for the selected folder's repository, its name suggested.
+    fn ask_worktree(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(top) = self.detail.as_ref().and_then(|d| d.repo.as_ref()).map(|(t, _)| t.clone()) else { return };
+        let suggested = crate::shell::suggest_worktree_name(&top);
+        let input = cx.new(|cx| InputState::new(window, cx).default_value(suggested));
+        let sub = cx.subscribe_in(&input, window, |b, _, ev: &InputEvent, window, cx| match ev {
+            InputEvent::PressEnter { .. } => b.create_worktree(window, cx),
+            InputEvent::Change => cx.notify(),
+            _ => {}
+        });
+        input.update(cx, |i, cx| i.focus(window, cx));
+        self.worktree = Some((input, sub));
+        cx.notify();
+    }
+
+    fn create_worktree(&mut self, _: &mut Window, cx: &mut Context<Self>) {
+        let (Some(root), Some((input, _))) = (self.selected_folder(), self.worktree.as_ref()) else { return };
+        let name = input.read(cx).value().trim().to_string();
+        if name.is_empty() {
+            return;
+        }
+        cx.emit(BrowserEvent::New { host: self.host.clone(), root, backend: self.backend.clone(), worktree: Some(name) });
     }
 
     /// Every agent process on this machine, every few seconds (for the live dots).
@@ -457,8 +504,23 @@ impl Browser {
         let backend = self.backend.clone();
         let folder = d.folder.clone();
         let mut col = div().flex().flex_col().gap_2().p_3().min_w_0().max_w(px(820.));
+        // The repository it is in, named, so a worktree's source is never a surprise.
+        let heading = match &d.repo {
+            Some((top, branch)) => {
+                let inside = folder.strip_prefix(top).ok().filter(|p| !p.as_os_str().is_empty());
+                let place = match inside {
+                    Some(p) => format!("{} / {}", name_of(top), p.display()),
+                    None => name_of(top),
+                };
+                match branch {
+                    Some(b) => format!("{place}  ({b})"),
+                    None => place,
+                }
+            }
+            None => name_of(&folder),
+        };
         col = col
-            .child(div().text_lg().text_color(fg).child(name_of(&folder)))
+            .child(div().text_lg().text_color(fg).child(heading))
             .child(div().text_xs().text_color(muted).truncate().child(folder.display().to_string()));
         let (h1, b1, f1) = (host.clone(), backend.clone(), folder.clone());
         let mut actions = div().flex().gap_2().child(
@@ -468,22 +530,53 @@ impl Browser {
                 .label("Start a new session here")
                 .tooltip("Enter")
                 .on_click(cx.listener(move |_, _, _, cx| {
-                    cx.emit(BrowserEvent::New { host: h1.clone(), root: f1.clone(), backend: b1.clone(), worktree: false })
+                    cx.emit(BrowserEvent::New { host: h1.clone(), root: f1.clone(), backend: b1.clone(), worktree: None })
                 })),
         );
-        if d.is_git {
-            let (h2, b2, f2) = (host.clone(), backend.clone(), folder.clone());
+        if d.is_git && self.worktree.is_none() {
             actions = actions.child(
                 Button::new("start-worktree")
                     .small()
-                    .label("New session in a git worktree")
-                    .tooltip("A new branch and folder next to this one (Cmd+Enter)")
-                    .on_click(cx.listener(move |_, _, _, cx| {
-                        cx.emit(BrowserEvent::New { host: h2.clone(), root: f2.clone(), backend: b2.clone(), worktree: true })
-                    })),
+                    .label("New session in a git worktree...")
+                    .tooltip("Shows the repository, branch and new folder first (Cmd+Enter)")
+                    .on_click(cx.listener(|b, _, window, cx| b.ask_worktree(window, cx))),
             );
         }
         col = col.child(actions);
+        if let (Some((input, _)), Some((top, branch))) = (self.worktree.as_ref(), d.repo.as_ref()) {
+            let name = input.read(cx).value().trim().to_string();
+            let repo = name_of(top);
+            let from = branch.clone().map(|b| format!(" ({b})")).unwrap_or_default();
+            let parent = top.parent().map(|p| p.display().to_string()).unwrap_or_default();
+            col = col.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .p_2()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(border)
+                    .text_sm()
+                    .child(div().text_color(fg).child(format!("Copy of {repo}{from} into ../{name}, branch workbench/{name}")))
+                    .child(div().text_xs().text_color(muted).child(format!("A new folder {parent}/{name} next to {repo}, checked out on a new branch from the current commit.")))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(div().text_xs().text_color(muted).child("Name"))
+                            .child(div().w(px(240.)).child(Input::new(input).small()))
+                            .child(Button::new("worktree-create").small().primary().label("Create and start").on_click(cx.listener(
+                                |b, _, window, cx| b.create_worktree(window, cx),
+                            )))
+                            .child(Button::new("worktree-cancel").small().label("Cancel").on_click(cx.listener(|b, _, _, cx| {
+                                b.worktree = None;
+                                cx.notify();
+                            }))),
+                    ),
+            );
+        }
         if self.backends.len() > 1 {
             let mut pick = div().flex().items_center().gap_1().text_xs().text_color(muted).child("Agent:");
             for (i, b) in self.backends.iter().enumerate() {
@@ -528,11 +621,18 @@ impl Browser {
         let since = |pid: u32| self.running.iter().find(|r| r.pid == pid).and_then(|r| r.since.clone());
         if !d.running.is_empty() {
             col = col.child(section("RUNNING NOW".into()));
-            for (i, (pid, id)) in d.running.iter().enumerate() {
+            for (i, live) in d.running.iter().enumerate() {
+                let id = &live.id;
                 let info = d.sessions.iter().find(|s| s.id == *id);
                 let title = info.map(|s| s.title.clone()).unwrap_or_else(|| id.clone());
-                let when = since(*pid).map(|t| format!(" since {t}")).unwrap_or_default();
-                let (h, b, f, id1, id2, pid) = (host.clone(), backend.clone(), folder.clone(), id.clone(), id.clone(), *pid);
+                let state = match (live.reason, live.pid) {
+                    (LiveReason::RecentWrite, _) | (_, None) => "may be open elsewhere: its file changed seconds ago".to_string(),
+                    (_, Some(pid)) => {
+                        let when = since(pid).map(|t| format!(" since {t}")).unwrap_or_default();
+                        format!("running in another terminal{when} (process {pid})")
+                    }
+                };
+                let (h, b, f, id1, id2, pid) = (host.clone(), backend.clone(), folder.clone(), id.clone(), id.clone(), live.pid);
                 let (h2, b2, f2) = (host.clone(), backend.clone(), folder.clone());
                 col = col.child(
                     div()
@@ -548,7 +648,7 @@ impl Browser {
                                 .gap_1()
                                 .text_xs()
                                 .text_color(amber)
-                                .child(format!("running in another terminal{when}"))
+                                .child(state)
                                 .child(crate::panels::short_id(id.clone(), ("running-id", i), cx)),
                         )
                         .child(
@@ -569,23 +669,25 @@ impl Browser {
                                         },
                                     )))
                                 })
-                                .child(Button::new(("takeover", i)).xsmall().label("Take over when it stops").on_click(cx.listener(
-                                    move |_, _, _, cx| {
-                                        cx.emit(BrowserEvent::Resume {
-                                            host: h2.clone(),
-                                            root: f2.clone(),
-                                            backend: b2.clone(),
-                                            id: id2.clone(),
-                                            fork: false,
-                                            wait_for: Some(pid),
-                                        })
-                                    },
-                                ))),
+                                .when_some(pid, |d, pid| {
+                                    d.child(Button::new(("takeover", i)).xsmall().label("Take over when it stops").on_click(cx.listener(
+                                        move |_, _, _, cx| {
+                                            cx.emit(BrowserEvent::Resume {
+                                                host: h2.clone(),
+                                                root: f2.clone(),
+                                                backend: b2.clone(),
+                                                id: id2.clone(),
+                                                fork: false,
+                                                wait_for: Some(pid),
+                                            })
+                                        },
+                                    )))
+                                }),
                         ),
                 );
             }
         }
-        let recent: Vec<&SessionInfo> = d.sessions.iter().filter(|s| !d.running.iter().any(|(_, id)| *id == s.id)).collect();
+        let recent: Vec<&SessionInfo> = d.sessions.iter().filter(|s| !d.running.iter().any(|l| l.id == s.id)).collect();
         col = col.child(section(if recent.is_empty() { "NO EARLIER SESSIONS HERE".into() } else { "RECENT SESSIONS".into() }));
         for (i, s) in recent.into_iter().enumerate() {
             let open = self.is_open(&s.id);

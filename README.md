@@ -79,6 +79,25 @@ Then `workbench`, `workbench ~/code/app`, `workbench --new .` or `workbench --ss
 - **Session ids**: the first 8 characters next to each session in the list and the browser;
   the whole id in the tooltip, a click copies it.
 - **New terminals** (Cmd+T, "+" in Terminals) open as a tab next to the agent's tab.
+- **A session open elsewhere is never continued here as it is.** It counts as open when a
+  `claude` process names it on its command line (`--resume`, `-r`, `--session-id`; found
+  wherever that process runs), when a `claude` without one works in the folder (its folder
+  from `proc_pidinfo`, else `lsof`), or when its file changed in the last 10 seconds. Such a
+  session offers only Fork here and (with a process) Take over when it stops, and a plain
+  Continue is checked again at the moment of opening and refused if it has become live.
+- **Long sessions**: the file is read as a stream, never whole. Chat builds only the context
+  after the last compaction; each earlier stretch is a line that is read when it is scrolled
+  to, under a "Context compacted here" divider whose summary opens on a click. Tool results
+  in a history keep their first 16 KB. A 150 MB scratch session with five compactions opens
+  in about 0.15 s.
+- **Questions before Claude is up**: the folder trust question shows in Chat with Trust and
+  Don't trust (answered in the terminal as a person would, with the arrow keys and Enter);
+  anything else it asks before it is up (no SessionStart hook within 6 seconds, or a list to
+  choose from) shows "is asking something in the terminal" with Show terminal, and the
+  session's dot turns amber.
+- **Worktrees** are explicit: the browser's right side is titled with the folder's repository
+  and branch, and "New session in a git worktree..." first shows what it will make ("Copy of
+  proj (main) into ../proj-2, branch workbench/proj-2") with the name editable.
 - **Panel headers and sheet tabs** (after an earlier app): a tool panel (Files, Skills,
   Terminals, Agent) has a title bar with a grip to drag it by, its title, its actions and
   options on hover; tool panels sharing a spot put their tabs along the bottom, the shown one
@@ -115,7 +134,7 @@ Environment: `WORKBENCH_MODEL=haiku` picks the model; `WORKBENCH_PERMISSION_MODE
 starts sessions in that permission mode; `WORKBENCH_PERF=1` prints timings;
 `WORKBENCH_CONTROL=<fifo>` accepts test commands (`open`, `term`, `type`, `split`, `send`,
 `allow`, `new`, `browse`, `tab`, `tabs`, `move-session`, `fold-sessions`, `view`,
-`term-type`, `term-screen`, `chat`, `chat-all`, `chat-scroll`, `panel`, `earlier`, `resume`, `fork`, `takeover`, `key`, `state`,
+`term-type`, `term-screen`, `chat`, `chat-top`, `chat-scroll`, `panel`, `earlier`, `resume`, `fork`, `takeover`, `key`, `state`,
 ...; see `control.rs`, `shell.rs`, `workspace.rs`); `WORKBENCH_BACKGROUND=1` opens windows
 without taking focus; `WORKBENCH_CONFIG_DIR` moves the settings folder (and the window's
 socket with it); `WORKBENCH_TEST_BACKENDS=1` adds the scripted test agent to the browser.

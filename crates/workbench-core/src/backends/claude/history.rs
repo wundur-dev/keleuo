@@ -34,33 +34,57 @@ pub fn project_sessions_dir(claude_home: &Path, folder: &Path) -> PathBuf {
 
 /// Title, message count and last activity of a session file's text.
 pub fn summarize(text: &str) -> (String, usize, Option<String>) {
-    let mut title = None;
-    let mut messages = 0;
-    let mut last = None;
+    let mut s = Summary::default();
     for line in text.lines() {
-        let Ok(v) = serde_json::from_str::<Value>(line) else {
-            continue;
-        };
+        s.add(line);
+    }
+    s.finish()
+}
+
+/// The same, read from the file as a stream (session files can be very large).
+pub fn summarize_file(host: &dyn Host, path: &Path) -> std::io::Result<(String, usize, Option<String>)> {
+    let mut s = Summary::default();
+    host.for_each_line(path, 0, None, &mut |_, line| {
+        s.add(line);
+        true
+    })?;
+    Ok(s.finish())
+}
+
+#[derive(Default)]
+struct Summary {
+    title: Option<String>,
+    messages: usize,
+    last: Option<String>,
+}
+
+impl Summary {
+    fn add(&mut self, line: &str) {
+        // Cheap test first: skip lines that cannot be a message without parsing them.
+        if !line.contains("\"user\"") && !line.contains("\"assistant\"") {
+            return;
+        }
+        let Ok(v) = serde_json::from_str::<Value>(line) else { return };
         let ty = v.get("type").and_then(Value::as_str).unwrap_or_default();
-        if !matches!(ty, "user" | "assistant")
-            || v.get("isSidechain").and_then(Value::as_bool) == Some(true)
-        {
-            continue;
+        if !matches!(ty, "user" | "assistant") || v.get("isSidechain").and_then(Value::as_bool) == Some(true) {
+            return;
         }
-        messages += 1;
+        self.messages += 1;
         if let Some(t) = v.get("timestamp").and_then(Value::as_str) {
-            last = Some(t.to_string());
+            self.last = Some(t.to_string());
         }
-        if title.is_none() && ty == "user" && v.get("isMeta").and_then(Value::as_bool) != Some(true)
+        if self.title.is_none()
+            && ty == "user"
+            && v.get("isMeta").and_then(Value::as_bool) != Some(true)
+            && v.get("isCompactSummary").and_then(Value::as_bool) != Some(true)
         {
-            title = user_text(&v).map(|t| one_line(&t, 80));
+            self.title = user_text(&v).map(|t| one_line(&t, 80));
         }
     }
-    (
-        title.unwrap_or_else(|| "(no messages)".into()),
-        messages,
-        last,
-    )
+
+    fn finish(self) -> (String, usize, Option<String>) {
+        (self.title.unwrap_or_else(|| "(no messages)".into()), self.messages, self.last)
+    }
 }
 
 /// The person's own text in a `user` line (not tool results, not command or system tags).
@@ -105,8 +129,7 @@ pub fn list_sessions(
         .into_iter()
         .take(max)
         .filter_map(|(path, modified)| {
-            let text = host.read_to_string(&path).ok()?;
-            let (title, messages, last_activity) = summarize(&text);
+            let (title, messages, last_activity) = summarize_file(host, &path).ok()?;
             let id = path.file_stem()?.to_string_lossy().to_string();
             (messages > 0).then_some(SessionInfo {
                 id,
@@ -150,6 +173,9 @@ fn line_events(v: &Value, mapper: &mut Mapper) -> Vec<Event> {
                 .is_some_and(|b| b.iter().any(|b| b.get("type").and_then(Value::as_str) == Some("tool_result")));
             if is_result {
                 mapper.map(stream::parse_value(v))
+            } else if v.get("isCompactSummary").and_then(Value::as_bool) == Some(true) {
+                // Shown as the compaction divider, not as something the person wrote.
+                Vec::new()
             } else if v.get("isMeta").and_then(Value::as_bool) != Some(true)
                 && let Some(text) = user_text(v)
             {
@@ -161,6 +187,150 @@ fn line_events(v: &Value, mapper: &mut Mapper) -> Vec<Event> {
         Some("assistant") => mapper.map(stream::parse_value(v)),
         _ => Vec::new(),
     }
+}
+
+/// A tool result in a history longer than this keeps only its start (the card shows the first
+/// lines anyway), so a long session costs memory for what can be seen.
+const RESULT_KEEP: usize = 16 * 1024;
+
+fn trim_results(items: &mut [crate::conversation::Item]) {
+    for item in items {
+        if let crate::conversation::Item::Tool(t) = item
+            && let Some(r) = t.result.as_mut()
+            && r.len() > RESULT_KEEP
+        {
+            let mut cut = RESULT_KEEP;
+            while !r.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            let more = (r.len() - cut) / 1024;
+            r.truncate(cut);
+            r.push_str(&format!("\n... ({more} KB more in the session file)"));
+        }
+    }
+}
+
+/// Whether a line is a compaction boundary.
+fn is_boundary(v: &Value) -> bool {
+    v.get("type").and_then(Value::as_str) == Some("system") && v.get("subtype").and_then(Value::as_str) == Some("compact_boundary")
+}
+
+/// A stretch of the file before a compaction, and the compaction that ended it.
+struct Segment {
+    from: u64,
+    to: u64,
+    messages: usize,
+}
+
+/// Rebuild a session's chat reading its file as a stream, never whole. Only the live context
+/// (after the last compaction) becomes items now; each stretch before a compaction becomes an
+/// [`Item::Earlier`] placeholder (read by [`load_segment`] when it is scrolled to) followed by
+/// an [`Item::Compacted`] divider with the summary. The cost estimate and the token counts
+/// come from the whole file.
+pub fn load_streaming(host: &dyn Host, path: &Path, cwd: &str) -> std::io::Result<Conversation> {
+    use crate::conversation::Item;
+    let fresh = || {
+        let mut c = Conversation::new(cwd);
+        c.replaying = true;
+        c
+    };
+    let mut chat = fresh();
+    let mut mapper = Mapper::new(cwd);
+    mapper.history = true;
+    let mut tally = Tally::default();
+    let mut cost = 0.0;
+    let mut session_id: Option<String> = None;
+    let mut last_turn: Option<Event> = None;
+    let mut segments: Vec<Segment> = Vec::new();
+    let mut dividers: Vec<Item> = Vec::new();
+    let (mut seg_from, mut seg_messages) = (0u64, 0usize);
+    host.for_each_line(path, 0, None, &mut |offset, line| {
+        let Ok(v) = serde_json::from_str::<Value>(line) else { return true };
+        if session_id.is_none() {
+            session_id = v.get("sessionId").and_then(Value::as_str).map(str::to_string);
+        }
+        if is_boundary(&v) {
+            segments.push(Segment { from: seg_from, to: offset, messages: seg_messages });
+            let meta = v.get("compactMetadata");
+            dividers.push(Item::Compacted {
+                summary: String::new(),
+                trigger: meta.and_then(|m| m.get("trigger")).and_then(Value::as_str).map(str::to_string),
+                tokens: meta.and_then(|m| m.get("preTokens")).and_then(Value::as_u64),
+            });
+            seg_from = offset;
+            seg_messages = 0;
+            // What came before is not kept: only the live context is built now.
+            chat = fresh();
+            mapper = Mapper::new(cwd);
+            mapper.history = true;
+            return true;
+        }
+        if v.get("isCompactSummary").and_then(Value::as_bool) == Some(true)
+            && let Some(Item::Compacted { summary, .. }) = dividers.last_mut()
+            && summary.is_empty()
+        {
+            *summary = user_text(&v).unwrap_or_default();
+        }
+        let sidechain = v.get("isSidechain").and_then(Value::as_bool) == Some(true);
+        if !sidechain && matches!(v.get("type").and_then(Value::as_str), Some("user" | "assistant")) {
+            seg_messages += 1;
+        }
+        chat.apply_all(line_events(&v, &mut mapper));
+        if let Some(end) = turn_end(&v) {
+            last_turn = Some(end.clone());
+            chat.apply(end);
+        }
+        if !sidechain {
+            cost += tally.add(&v);
+        }
+        true
+    })?;
+    let mut head: Vec<Item> = Vec::new();
+    for (seg, divider) in segments.into_iter().zip(dividers) {
+        if seg.messages > 0 {
+            head.push(Item::Earlier { from: seg.from, to: seg.to, messages: seg.messages });
+        }
+        head.push(divider);
+    }
+    if !head.is_empty() {
+        head.append(&mut chat.items);
+        chat.items = head;
+    }
+    if chat.last_turn_tokens.is_none()
+        && let Some(end) = last_turn
+    {
+        chat.apply(end);
+    }
+    if cost > 0.0 {
+        chat.apply(Event::CostEstimate { usd: cost - chat.total_cost_usd.min(cost) });
+    }
+    chat.session_id = session_id;
+    chat.busy = false;
+    chat.status = None;
+    chat.replaying = false;
+    trim_results(&mut chat.items);
+    Ok(chat)
+}
+
+/// The items of the stretch `from..to` of a session file (an [`Item::Earlier`]), read as a
+/// stream; the compaction line and its summary that open it are left out (the divider shows
+/// them).
+pub fn load_segment(host: &dyn Host, path: &Path, cwd: &str, from: u64, to: u64) -> std::io::Result<Vec<crate::conversation::Item>> {
+    let mut chat = Conversation::new(cwd);
+    chat.replaying = true;
+    let mut mapper = Mapper::new(cwd);
+    mapper.history = true;
+    host.for_each_line(path, from, Some(to), &mut |_, line| {
+        if let Ok(v) = serde_json::from_str::<Value>(line)
+            && !is_boundary(&v)
+        {
+            chat.apply_all(line_events(&v, &mut mapper));
+        }
+        true
+    })?;
+    chat.finish_replay();
+    trim_results(&mut chat.items);
+    Ok(chat.items)
 }
 
 /// Rebuild the chat of a session from its file.
@@ -350,7 +520,7 @@ fn turn_end(v: &Value) -> Option<Event> {
 
 /// Read a session's file and its subagents' transcripts and rebuild the chat.
 pub fn load_session(host: &dyn Host, path: &Path, cwd: &str) -> std::io::Result<Conversation> {
-    let mut chat = load_conversation(&host.read_to_string(path)?, cwd);
+    let mut chat = load_streaming(host, path, cwd)?;
     let dir = path.with_extension("").join("subagents");
     if let Ok(entries) = host.read_dir(&dir) {
         for e in entries.iter().filter(|e| e.name.ends_with(".meta.json")) {
@@ -400,32 +570,100 @@ pub fn parse_ps(output: &str) -> Vec<ClaudeProcess> {
             let pid = parts.next()?.parse().ok()?;
             let ppid = parts.next()?.parse().ok()?;
             let args: Vec<String> = parts.map(str::to_string).collect();
-            let program = args.first()?;
-            let base = program.rsplit('/').next().unwrap_or(program);
-            // The native binary is `claude`; an npm install runs `node .../claude`.
-            let is_claude = base == "claude"
-                || (base == "node"
-                    && args
-                        .get(1)
-                        .is_some_and(|a| a.ends_with("/claude") || a.ends_with("cli.js")));
+            // The words before the first option: the program, maybe split where its path has a
+            // space (`ps` joins argv with spaces), maybe `node` and a script.
+            let program: Vec<&str> = args.iter().map(String::as_str).take_while(|a| !a.starts_with('-')).take(4).collect();
+            let base = |a: &str| a.rsplit('/').next().unwrap_or(a).to_string();
+            // The native binary is `claude`; an npm install runs `node .../claude` or `cli.js`.
+            let is_claude = program.iter().any(|a| base(a) == "claude")
+                || (program.first().is_some_and(|a| base(a) == "node") && program.iter().any(|a| a.ends_with("cli.js")));
             is_claude.then_some(ClaudeProcess { pid, ppid, args })
         })
         .collect()
 }
 
-/// `claude` processes on this machine whose working folder is `folder`, except ours (those
-/// whose parent is `own_pid`). Read-only: `ps` and `lsof`, nothing is signalled.
-pub fn claude_processes_in(folder: &Path, own_pid: u32) -> Vec<ClaudeProcess> {
-    let Ok(out) = std::process::Command::new("ps")
-        .args(["-axo", "pid=,ppid=,command="])
-        .output()
-    else {
+/// Every `claude` process on this machine except this window's (children of `own_pid`), with
+/// whole command lines (`ps -ww`: never cut at a column). Read-only.
+pub fn other_claude_processes(own_pid: u32) -> Vec<ClaudeProcess> {
+    let Ok(out) = std::process::Command::new("ps").args(["-axww", "-o", "pid=,ppid=,args="]).output() else {
         return Vec::new();
     };
     parse_ps(&String::from_utf8_lossy(&out.stdout))
         .into_iter()
         .filter(|p| p.ppid != own_pid && p.pid != own_pid)
-        .filter(|p| process_cwd(p.pid).as_deref() == Some(folder))
+        .collect()
+}
+
+/// What is known about a folder's sessions and the agent processes on the machine.
+pub struct Seen<'a> {
+    pub processes: &'a [ClaudeProcess],
+    /// A process's working folder (`None`: could not tell).
+    pub cwd_of: &'a dyn Fn(u32) -> Option<PathBuf>,
+    pub folder: &'a Path,
+    /// Whether session `id` belongs to this folder.
+    pub has_session: &'a dyn Fn(&str) -> bool,
+    pub sessions: &'a [SessionInfo],
+    /// Seconds since each session file last changed.
+    pub ages: &'a [(String, u64)],
+    /// This window's own sessions.
+    pub own: &'a [String],
+}
+
+/// A session file changed this recently may be open somewhere even when no process is found.
+pub const RECENT_WRITE_SECS: u64 = 10;
+
+/// The folder's sessions that are, or may be, open outside this window. A session counts as
+/// open when a process names it on its command line (wherever that process runs, so a failed
+/// folder lookup cannot hide it); when a process without one works in the folder (the newest
+/// unclaimed session is taken as its); or when its file changed in the last few seconds.
+pub fn live_sessions(seen: &Seen) -> Vec<crate::agent::LiveSession> {
+    use crate::agent::{LiveReason, LiveSession};
+    let mut out: Vec<LiveSession> = Vec::new();
+    let claimed = |out: &Vec<LiveSession>, id: &str| out.iter().any(|l| l.id == id) || seen.own.iter().any(|o| o == id);
+    for p in seen.processes {
+        if let Some(id) = p.session_arg()
+            && (seen.has_session)(id)
+            && !claimed(&out, id)
+        {
+            out.push(LiveSession { id: id.to_string(), pid: Some(p.pid), reason: LiveReason::CommandLine });
+        }
+    }
+    let mut newest: Vec<&SessionInfo> = seen.sessions.iter().collect();
+    newest.sort_by_key(|s| std::cmp::Reverse(seen.ages.iter().find(|(id, _)| *id == s.id).map(|(_, a)| u64::MAX - a).or(s.modified)));
+    for p in seen.processes.iter().filter(|p| p.session_arg().is_none()) {
+        if (seen.cwd_of)(p.pid).as_deref() != Some(seen.folder) {
+            continue;
+        }
+        if let Some(s) = newest.iter().find(|s| !claimed(&out, &s.id)) {
+            out.push(LiveSession { id: s.id.clone(), pid: Some(p.pid), reason: LiveReason::Folder });
+        }
+    }
+    for (id, age) in seen.ages {
+        if *age <= RECENT_WRITE_SECS && !claimed(&out, id) {
+            out.push(LiveSession { id: id.clone(), pid: None, reason: LiveReason::RecentWrite });
+        }
+    }
+    out
+}
+
+/// A folder's session files, with their change times (no contents read).
+pub fn session_files(host: &dyn Host, claude_home: &Path, folder: &Path) -> Vec<SessionInfo> {
+    let dir = project_sessions_dir(claude_home, folder);
+    let Ok(entries) = host.read_dir(&dir) else { return Vec::new() };
+    entries
+        .into_iter()
+        .filter(|e| !e.is_dir && e.name.ends_with(".jsonl"))
+        .map(|e| {
+            let path = dir.join(&e.name);
+            SessionInfo {
+                id: e.name.trim_end_matches(".jsonl").to_string(),
+                modified: host.modified(&path),
+                path,
+                title: String::new(),
+                last_activity: None,
+                messages: 0,
+            }
+        })
         .collect()
 }
 
@@ -459,10 +697,15 @@ fn lstart_time(lstart: &str) -> Option<String> {
     Some(time[..5].to_string())
 }
 
-/// The working folder of a process (`lsof` on macOS, `/proc` on Linux).
+/// The working folder of a process: `proc_pidinfo` on macOS (falling back to `lsof`),
+/// `/proc` on Linux. `None` when it cannot be told.
 pub fn process_cwd(pid: u32) -> Option<PathBuf> {
     if cfg!(target_os = "linux") {
         return std::fs::read_link(format!("/proc/{pid}/cwd")).ok();
+    }
+    #[cfg(target_os = "macos")]
+    if let Some(p) = macos_cwd(pid) {
+        return Some(p);
     }
     let out = std::process::Command::new("lsof")
         .args(["-a", "-p", &pid.to_string(), "-d", "cwd", "-Fn"])
@@ -473,36 +716,27 @@ pub fn process_cwd(pid: u32) -> Option<PathBuf> {
         .find_map(|l| l.strip_prefix('n').map(PathBuf::from))
 }
 
-/// Which session each process is writing: the one on its command line, else the most
-/// recently changed session not already claimed (a heuristic: Claude Code does not keep the
-/// file open). Returns `(pid, session id)` pairs.
-pub fn match_processes(
-    processes: &[ClaudeProcess],
-    sessions: &[SessionInfo],
-) -> Vec<(u32, String)> {
-    let mut out: Vec<(u32, String)> = Vec::new();
-    let mut by_arg: Vec<&ClaudeProcess> = Vec::new();
-    let mut rest: Vec<&ClaudeProcess> = Vec::new();
-    for p in processes {
-        match p.session_arg() {
-            Some(id) if sessions.iter().any(|s| s.id == id) => by_arg.push(p),
-            _ => rest.push(p),
-        }
+/// `proc_pidinfo(PROC_PIDVNODEPATHINFO)`: the current directory is the path in the first
+/// `vnode_info_path` (152 bytes of `vnode_info`, then the path, 1024 bytes).
+#[cfg(target_os = "macos")]
+fn macos_cwd(pid: u32) -> Option<PathBuf> {
+    use std::os::unix::ffi::OsStrExt;
+    unsafe extern "C" {
+        fn proc_pidinfo(pid: i32, flavor: i32, arg: u64, buffer: *mut std::ffi::c_void, size: i32) -> i32;
     }
-    for p in by_arg {
-        out.push((p.pid, p.session_arg().unwrap().to_string()));
+    const PROC_PIDVNODEPATHINFO: i32 = 9;
+    const SIZE: usize = 2352;
+    const PATH_AT: usize = 152;
+    let mut buf = vec![0u8; SIZE];
+    // SAFETY: the buffer is as large as `struct proc_vnodepathinfo` and the call writes at
+    // most `SIZE` bytes into it.
+    let n = unsafe { proc_pidinfo(pid as i32, PROC_PIDVNODEPATHINFO, 0, buf.as_mut_ptr().cast(), SIZE as i32) };
+    if n as usize != SIZE {
+        return None;
     }
-    let mut newest: Vec<&SessionInfo> = sessions.iter().collect();
-    newest.sort_by_key(|s| std::cmp::Reverse(s.modified));
-    for p in rest {
-        if let Some(s) = newest
-            .iter()
-            .find(|s| !out.iter().any(|(_, id)| *id == s.id))
-        {
-            out.push((p.pid, s.id.clone()));
-        }
-    }
-    out
+    let path = &buf[PATH_AT..PATH_AT + 1024];
+    let end = path.iter().position(|b| *b == 0)?;
+    (end > 0).then(|| PathBuf::from(std::ffi::OsStr::from_bytes(&path[..end])))
 }
 
 #[cfg(test)]
@@ -551,6 +785,92 @@ mod tests {
         chat.apply_all(got.lock().unwrap().clone());
         // The first line was there before: not replayed. The two Agent calls and their ends came.
         assert_eq!(chat.agents.len(), 2, "{:?}", chat.items.len());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_session_named_on_a_command_line_is_live_even_when_its_folder_is_unknown() {
+        use crate::agent::LiveReason;
+        // A `claude --resume` started days ago from a path with a space; `lsof` and
+        // `proc_pidinfo` both fail for it.
+        let procs = parse_ps(
+            "  4242  1 /Volumes/Work Disk/bin/claude --resume 2e7649d1-33e0-49c7-a67f-11de7eed02ea --model opus\n\
+               4343  1 /usr/local/bin/node /opt/claude-code/cli.js -r aaaa1111\n",
+        );
+        assert_eq!(procs.len(), 2);
+        let s = |id: &str| SessionInfo { id: id.into(), path: PathBuf::new(), title: String::new(), last_activity: None, messages: 1, modified: Some(1) };
+        let sessions = [s("2e7649d1-33e0-49c7-a67f-11de7eed02ea"), s("aaaa1111"), s("old")];
+        let ages = vec![("old".to_string(), 100_000u64)];
+        let found = live_sessions(&Seen {
+            processes: &procs,
+            cwd_of: &|_| None,
+            folder: Path::new("/p"),
+            has_session: &|id| sessions.iter().any(|s| s.id == id),
+            sessions: &sessions,
+            ages: &ages,
+            own: &[],
+        });
+        assert_eq!(found.len(), 2);
+        assert_eq!((found[0].pid, found[0].reason), (Some(4242), LiveReason::CommandLine));
+        assert_eq!(found[1].id, "aaaa1111");
+    }
+
+    #[test]
+    fn a_file_written_seconds_ago_may_be_live() {
+        use crate::agent::LiveReason;
+        let s = |id: &str| SessionInfo { id: id.into(), path: PathBuf::new(), title: String::new(), last_activity: None, messages: 1, modified: None };
+        let sessions = [s("fresh"), s("mine"), s("stale")];
+        let ages = vec![("fresh".to_string(), 2u64), ("mine".to_string(), 1), ("stale".to_string(), 600)];
+        let own = ["mine".to_string()];
+        let found = live_sessions(&Seen {
+            processes: &[],
+            cwd_of: &|_| None,
+            folder: Path::new("/p"),
+            has_session: &|_| true,
+            sessions: &sessions,
+            ages: &ages,
+            own: &own,
+        });
+        assert_eq!(found.len(), 1);
+        assert_eq!((found[0].id.as_str(), found[0].pid, found[0].reason), ("fresh", None, LiveReason::RecentWrite));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn reads_a_process_folder_without_lsof() {
+        let here = std::env::current_dir().unwrap().canonicalize().unwrap();
+        assert_eq!(macos_cwd(std::process::id()).map(|p| p.canonicalize().unwrap()), Some(here));
+    }
+
+    #[test]
+    fn a_compacted_session_loads_its_live_context_and_reads_the_rest_on_request() {
+        use crate::conversation::Item;
+        let dir = std::env::temp_dir().join(format!("wb-compact-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("s.jsonl");
+        let user = |t: &str| format!("{{\"type\":\"user\",\"sessionId\":\"s\",\"message\":{{\"role\":\"user\",\"content\":\"{t}\"}}}}");
+        let said = |id: &str, t: &str| format!("{{\"type\":\"assistant\",\"message\":{{\"id\":\"{id}\",\"model\":\"claude-haiku-4-5\",\"role\":\"assistant\",\"stop_reason\":\"end_turn\",\"content\":[{{\"type\":\"text\",\"text\":\"{t}\"}}],\"usage\":{{\"input_tokens\":1000,\"output_tokens\":10}}}}}}");
+        let boundary = "{\"type\":\"system\",\"subtype\":\"compact_boundary\",\"content\":\"Conversation compacted\",\"compactMetadata\":{\"trigger\":\"auto\",\"preTokens\":150000}}";
+        let summary = "{\"type\":\"user\",\"isCompactSummary\":true,\"message\":{\"role\":\"user\",\"content\":\"Summary: we said hello.\"}}";
+        let lines = [user("first"), said("m1", "one"), boundary.into(), summary.into(), user("second"), said("m2", "two")];
+        std::fs::write(&path, lines.join("\n") + "\n").unwrap();
+        let chat = load_streaming(&crate::host::LocalHost, &path, "/p").unwrap();
+        let (from, to) = match &chat.items[0] {
+            Item::Earlier { from, to, messages } => {
+                assert_eq!(*messages, 2);
+                (*from, *to)
+            }
+            other => panic!("{other:?}"),
+        };
+        assert!(matches!(&chat.items[1], Item::Compacted { summary, tokens: Some(150000), .. } if summary.starts_with("Summary")));
+        assert!(matches!(&chat.items[2], Item::User(t) if t == "second"));
+        assert_eq!(chat.items.len(), 4);
+        // Both answers are counted in the cost, and the context is the last turn's.
+        assert!(chat.total_cost_usd > 0.0);
+        assert_eq!(chat.last_turn_tokens, Some((1000, 10)));
+        let earlier = load_segment(&crate::host::LocalHost, &path, "/p", from, to).unwrap();
+        assert!(matches!(&earlier[0], Item::User(t) if t == "first"));
+        assert!(matches!(&earlier[1], Item::Assistant { text, .. } if text == "one"));
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -653,8 +973,22 @@ mod tests {
             messages: 1,
             modified: Some(m),
         };
-        let sessions = [s("s1", 10), s("s2", 30), s("s3", 20)];
-        let matched = match_processes(&procs[..2], &sessions);
-        assert_eq!(matched, [(101, "s2".to_string()), (102, "s3".to_string())]);
+let sessions = [s("s1", 10), s("s2", 30), s("s3", 20)];
+        let folder = Path::new("/p");
+        let ages: Vec<(String, u64)> = vec![("s1".into(), 3000), ("s2".into(), 1000), ("s3".into(), 2000)];
+        let seen = |cwd: &'static dyn Fn(u32) -> Option<PathBuf>, procs: &[ClaudeProcess]| {
+            live_sessions(&Seen {
+                processes: procs,
+                cwd_of: cwd,
+                folder,
+                has_session: &|id| sessions.iter().any(|s| s.id == id),
+                sessions: &sessions,
+                ages: &ages,
+                own: &[],
+            })
+        };
+        let found = seen(&|_| Some(PathBuf::from("/p")), &procs[..2]);
+        let pairs: Vec<(Option<u32>, &str)> = found.iter().map(|l| (l.pid, l.id.as_str())).collect();
+        assert_eq!(pairs, [(Some(101), "s2"), (Some(102), "s3")]);
     }
 }

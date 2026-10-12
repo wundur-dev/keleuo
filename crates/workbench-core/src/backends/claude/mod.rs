@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
 
-use crate::agent::{Agent, Backend, Capabilities, Follow, Hook, Message, Running, SessionInfo, Sink, StartOptions};
+use crate::agent::{Agent, Backend, Capabilities, Follow, Hook, LiveSession, Message, Running, SessionInfo, Sink, StartOptions};
 use crate::conversation::Conversation;
 use crate::host::{Host, ProgramSpec};
 use map::Mapper;
@@ -26,11 +26,26 @@ use process::{Line, Options, Process};
 /// The id saved with sessions.
 pub const ID: &str = "claude-code";
 
+/// Whether Claude Code's own record (`~/.claude.json`) says the folder's trust prompt was
+/// accepted: `projects.<folder>.hasTrustDialogAccepted`.
+pub fn trusted_in(claude_json: &str, folder: &str) -> bool {
+    serde_json::from_str::<Value>(claude_json)
+        .ok()
+        .and_then(|v| v.get("projects")?.get(folder)?.get("hasTrustDialogAccepted")?.as_bool())
+        .unwrap_or(false)
+}
+
 /// Claude Code as a [`Backend`].
 #[derive(Default)]
 pub struct ClaudeBackend;
 
 impl ClaudeBackend {
+    /// The folder's session files with their change times only (no contents read).
+    fn earlier_sessions_quick(&self, host: &dyn Host, project: &Path) -> Vec<SessionInfo> {
+        let Some(home) = skills::claude_home(host) else { return Vec::new() };
+        history::session_files(host, &home, project)
+    }
+
     fn program_name(&self) -> String {
         "claude".into()
     }
@@ -90,6 +105,12 @@ impl Backend for ClaudeBackend {
         history::load_session(host, &path, &project.to_string_lossy())
     }
 
+    fn load_segment(&self, host: &dyn Host, project: &Path, id: &str, from: u64, to: u64) -> std::io::Result<Vec<crate::conversation::Item>> {
+        let home = skills::claude_home(host).ok_or_else(|| std::io::Error::other("no home folder"))?;
+        let path = history::project_sessions_dir(&home, project).join(format!("{id}.jsonl"));
+        history::load_segment(host, &path, &project.to_string_lossy(), from, to)
+    }
+
     fn terminal_program(&self, options: &StartOptions, id: &str, new: bool) -> Option<ProgramSpec> {
         let mut args: Vec<String> = Vec::new();
         args.extend([if new { "--session-id" } else { "--resume" }.to_string(), id.to_string()]);
@@ -146,6 +167,12 @@ impl Backend for ClaudeBackend {
         Some(pricing::billed_per_use(!host.is_remote(), &env, &texts))
     }
 
+    fn folder_trusted(&self, host: &dyn Host, project: &Path) -> Option<bool> {
+        // Only this folder's flag is looked at; nothing else in the file is used or shown.
+        let text = host.read_to_string(&host.home_dir()?.join(".claude.json")).ok()?;
+        Some(trusted_in(&text, &project.to_string_lossy()))
+    }
+
     fn context_window(&self, model: &str) -> Option<u64> {
         Some(pricing::context_window(model))
     }
@@ -157,11 +184,36 @@ impl Backend for ClaudeBackend {
         history::claude_processes(own_pid)
     }
 
-    fn running_elsewhere(&self, host: &dyn Host, project: &Path, sessions: &[SessionInfo], own_pid: u32) -> Vec<(u32, String)> {
-        if host.is_remote() {
-            return Vec::new();
+    fn live_sessions(&self, host: &dyn Host, project: &Path, sessions: &[SessionInfo], own_pid: u32, own: &[String]) -> Vec<LiveSession> {
+        let Some(home) = skills::claude_home(host) else { return Vec::new() };
+        let dir = history::project_sessions_dir(&home, project);
+        let processes = if host.is_remote() { Vec::new() } else { history::other_claude_processes(own_pid) };
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+        let recent: Vec<(String, u64)> = sessions
+            .iter()
+            .filter_map(|s| Some((s.id.clone(), now.saturating_sub(host.modified(&s.path)?))))
+            .collect();
+        history::live_sessions(&history::Seen {
+            processes: &processes,
+            cwd_of: &history::process_cwd,
+            folder: project,
+            has_session: &|id| host.exists(&dir.join(format!("{id}.jsonl"))),
+            sessions,
+            ages: &recent,
+            own,
+        })
+    }
+
+    fn session_live(&self, host: &dyn Host, project: &Path, id: &str, own_pid: u32) -> Option<LiveSession> {
+        let home = skills::claude_home(host)?;
+        let path = history::project_sessions_dir(&home, project).join(format!("{id}.jsonl"));
+        let info = SessionInfo { id: id.into(), path, title: String::new(), last_activity: None, messages: 0, modified: None };
+        // The folder's newest sessions too, so a process found by its folder is matched right.
+        let mut sessions = self.earlier_sessions_quick(host, project);
+        if !sessions.iter().any(|s| s.id == id) {
+            sessions.push(info);
         }
-        history::match_processes(&history::claude_processes_in(project, own_pid), sessions)
+        self.live_sessions(host, project, &sessions, own_pid, &[]).into_iter().find(|l| l.id == id)
     }
 }
 
@@ -243,6 +295,15 @@ impl Agent for ClaudeCode {
 
 #[cfg(all(test, unix))]
 mod tests {
+
+    #[test]
+    fn reads_only_the_folder_trust_flag() {
+        let json = r#"{"projects": {"/a": {"hasTrustDialogAccepted": true}, "/b": {"allowedTools": []}}}"#;
+        assert!(super::trusted_in(json, "/a"));
+        assert!(!super::trusted_in(json, "/b"));
+        assert!(!super::trusted_in(json, "/c"));
+        assert!(!super::trusted_in("not json", "/a"));
+    }
     use super::*;
     use crate::agent::Event;
     use crate::host::LocalHost;

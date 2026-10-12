@@ -65,6 +65,11 @@ pub enum Item {
     /// Turn summaries and other quiet notes.
     Notice(String),
     Error(String),
+    /// A stretch of earlier conversation not read yet (bytes `from..to` of the session file):
+    /// read when it comes into view.
+    Earlier { from: u64, to: u64, messages: usize },
+    /// The context was compacted here: what came before was replaced by `summary`.
+    Compacted { summary: String, trigger: Option<String>, tokens: Option<u64> },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -497,6 +502,14 @@ impl Conversation {
     }
 
     /// Apply a list of events (replays and tests).
+    /// A recorded history has been applied: no turn is running.
+    pub fn finish_replay(&mut self) {
+        self.finish_streaming();
+        self.busy = false;
+        self.status = None;
+        self.replaying = false;
+    }
+
     pub fn apply_all(&mut self, events: impl IntoIterator<Item = Event>) -> Vec<Applied> {
         events.into_iter().map(|e| self.apply(e)).collect()
     }

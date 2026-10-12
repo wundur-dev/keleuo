@@ -175,6 +175,27 @@ pub struct SessionInfo {
     pub modified: Option<u64>,
 }
 
+/// A session that is, or may be, open in an agent process outside this window. Such a
+/// session must not be continued here as it is: two processes would write one file.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LiveSession {
+    pub id: String,
+    /// The process, when one was found.
+    pub pid: Option<u32>,
+    pub reason: LiveReason,
+}
+
+/// How a live session was found.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LiveReason {
+    /// A process names the session on its command line.
+    CommandLine,
+    /// A process works in the folder (which of its sessions it writes is a guess).
+    Folder,
+    /// No process found, but the session file changed a moment ago.
+    RecentWrite,
+}
+
 /// An agent process running on this machine, outside this window or in it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Running {
@@ -213,9 +234,14 @@ pub trait Backend: Send + Sync {
     fn session_count(&self, _host: &dyn Host, _project: &Path) -> (usize, Option<u64>) {
         (0, None)
     }
-    /// A session's history as a chat.
+    /// A session's history as a chat. Long histories may leave parts as
+    /// [`crate::conversation::Item::Earlier`], read with [`Backend::load_segment`].
     fn load_session(&self, _host: &dyn Host, _project: &Path, _id: &str) -> std::io::Result<Conversation> {
         Err(std::io::Error::other("this agent cannot resume sessions"))
+    }
+    /// The items of an [`crate::conversation::Item::Earlier`] part of session `id`.
+    fn load_segment(&self, _host: &dyn Host, _project: &Path, _id: &str, _from: u64, _to: u64) -> std::io::Result<Vec<crate::conversation::Item>> {
+        Err(std::io::Error::other("this agent cannot read earlier parts"))
     }
     /// The agent's own terminal interface for session `id` (`new`: a session not started yet,
     /// to be created under that id; `options.fork`: continue `id` in a copy). Run in a
@@ -257,6 +283,10 @@ pub trait Backend: Send + Sync {
     fn context_window(&self, _model: &str) -> Option<u64> {
         None
     }
+    /// Whether the agent has been told it may work in `project` (its own record), when known.
+    fn folder_trusted(&self, _host: &dyn Host, _project: &Path) -> Option<bool> {
+        None
+    }
     /// What a waiting permission hook answers.
     fn hook_reply(&self, _allow: bool) -> String {
         String::new()
@@ -266,10 +296,16 @@ pub trait Backend: Send + Sync {
     fn running(&self, _host: &dyn Host, _own_pid: u32) -> Vec<Running> {
         Vec::new()
     }
-    /// Agent processes elsewhere on this machine working in `project`, as `(pid, session id)`.
-    /// Read-only: nothing is signalled.
-    fn running_elsewhere(&self, _host: &dyn Host, _project: &Path, _sessions: &[SessionInfo], _own_pid: u32) -> Vec<(u32, String)> {
+    /// Sessions of `project` that are, or may be, open in an agent process outside this window
+    /// (`own_pid`'s children and the sessions in `own` are this window's). Read-only: nothing
+    /// is signalled.
+    fn live_sessions(&self, _host: &dyn Host, _project: &Path, _sessions: &[SessionInfo], _own_pid: u32, _own: &[String]) -> Vec<LiveSession> {
         Vec::new()
+    }
+    /// Whether session `id` of `project` is, or may be, open outside this window, checked now
+    /// (just before it would be continued here).
+    fn session_live(&self, _host: &dyn Host, _project: &Path, _id: &str, _own_pid: u32) -> Option<LiveSession> {
+        None
     }
 }
 

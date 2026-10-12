@@ -15,6 +15,7 @@ use gpui_kit::component::menu::{ContextMenuExt, PopupMenuItem};
 use gpui_kit::component::{ActiveTheme, Icon, IconName, Sizable, TitleBar, WindowExt};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
+use workbench_core::agent::{LiveReason, LiveSession};
 use workbench_core::agent::Backend;
 use workbench_core::host::{Host, LocalHost};
 
@@ -175,11 +176,12 @@ impl Shell {
                 }
             }
             BrowserEvent::New { host, root, backend, worktree } => {
+                let worktree = worktree.clone();
                 if !self.opening.choose() {
                     return;
                 }
-                if *worktree {
-                    if let Err(e) = self.new_session_in_worktree(root.clone(), backend.clone(), window, cx) {
+                if let Some(name) = worktree {
+                    if let Err(e) = self.new_session_in_worktree(root.clone(), Some(name), backend.clone(), window, cx) {
                         window.push_notification(format!("Could not make a worktree: {e}"), cx);
                     }
                 } else {
@@ -223,13 +225,48 @@ impl Shell {
         }
         cx.spawn_in(window, async move |this, cx| {
             let (h, b, r) = (host.clone(), backend.clone(), root.clone());
-            let chat = cx.background_spawn(async move { b.load_session(h.as_ref(), &r, &id) }).await;
+            let plain = !fork && wait_for.is_none();
+            let (live, chat) = cx
+                .background_spawn(async move {
+                    // Checked now, not when the list was drawn: never a second writer on a
+                    // session open elsewhere.
+                    let live = if plain { b.session_live(h.as_ref(), &r, &id, std::process::id()) } else { None };
+                    let started = std::time::Instant::now();
+                    let chat = if live.is_some() { None } else { Some(b.load_session(h.as_ref(), &r, &id)) };
+                    if crate::perf::enabled() {
+                        eprintln!("workbench: session read in {:.0} ms", started.elapsed().as_secs_f64() * 1000.0);
+                    }
+                    (live, chat)
+                })
+                .await;
             let _ = this.update_in(cx, |s, window, cx| {
                 s.opening.finish(&key);
-                s.opened(chat, host, root, backend, fork, wait_for, window, cx)
+                match (live, chat) {
+                    (Some(live), _) => s.refused(live, window, cx),
+                    (None, Some(chat)) => s.opened(chat, host, root, backend, fork, wait_for, window, cx),
+                    (None, None) => {}
+                }
             });
         })
         .detach();
+    }
+
+    /// A plain continue of a session that is (or may be) open elsewhere: say so and offer
+    /// only what is safe, in the browser.
+    fn refused(&mut self, live: LiveSession, window: &mut Window, cx: &mut Context<Self>) {
+        self.opening.browser_shown();
+        let why = match (live.reason, live.pid) {
+            (LiveReason::RecentWrite, _) | (_, None) => "its file changed seconds ago, so it may be open elsewhere".to_string(),
+            (_, Some(pid)) => format!("it is open in another terminal (process {pid})"),
+        };
+        window.push_notification(
+            format!("Not continued here: {why}. Use Fork here, or Take over when it stops."),
+            cx,
+        );
+        if let Some(b) = &self.browser {
+            b.update(cx, |b, cx| b.refresh_detail(cx));
+        }
+        cx.notify();
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -406,11 +443,14 @@ impl Shell {
     pub fn new_session_in_worktree(
         &mut self,
         root: PathBuf,
+        name: Option<String>,
         backend: Arc<dyn Backend>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
-        let (path, branch) = make_worktree(&root)?;
+        let (top, _) = repo_of(&root).ok_or("the folder is not in a git repository")?;
+        let name = name.unwrap_or_else(|| suggest_worktree_name(&top));
+        let (path, branch) = make_worktree(&top, &name)?;
         let session = AgentSession::new(Arc::new(LocalHost), backend, path.clone());
         self.add_session(Arc::new(LocalHost), path, session, Some(branch), None, window, cx);
         Ok(())
@@ -448,7 +488,8 @@ impl Shell {
                     return Some("no session".into());
                 };
                 let b = crate::backends::backend(None, cx);
-                match self.new_session_in_worktree(root, b, window, cx) {
+                let name = (!arg.is_empty()).then(|| arg.to_string());
+                match self.new_session_in_worktree(root, name, b, window, cx) {
                     Ok(()) => "ok".into(),
                     Err(e) => e,
                 }
@@ -473,12 +514,13 @@ impl Shell {
                     (w.host(), w.root().to_path_buf(), w.session.read(cx).backend.clone())
                 };
                 let sessions = backend.earlier_sessions(host.as_ref(), &root, 20);
-                let running = backend.running_elsewhere(host.as_ref(), &root, &sessions, std::process::id());
+                let own: Vec<String> = self.open_sessions(cx).into_iter().filter_map(|o| o.id).collect();
+                let live = backend.live_sessions(host.as_ref(), &root, &sessions, std::process::id(), &own);
                 self.earlier = sessions
                     .into_iter()
                     .map(|s| {
-                        let pid = running.iter().find(|(_, id)| *id == s.id).map(|(p, _)| *p);
-                        (s, pid)
+                        let l = live.iter().find(|l| l.id == s.id);
+                        (s, l.map(|l| l.pid.unwrap_or(0)))
                     })
                     .collect();
                 self.earlier
@@ -499,7 +541,7 @@ impl Shell {
                 };
                 let (fork, wait) = match cmd {
                     "fork" => (true, None),
-                    "takeover" => (false, pid),
+                    "takeover" => (false, pid.filter(|p| *p != 0)),
                     _ => (false, None),
                 };
                 self.resume(host, root, backend, s.id, fork, wait, window, cx);
@@ -554,6 +596,8 @@ impl Shell {
         let s = self.tabs[ix].ws.read(cx).session.read(cx);
         if s.chat.needs_input() {
             Some((theme.warning, "Needs permission"))
+        } else if s.asking.is_some() {
+            Some((theme.warning, "Asking something in the terminal"))
         } else if s.chat.busy || s.waiting_for.is_some() {
             Some((theme.blue, "Working"))
         } else if s.unseen && ix != self.active {
@@ -826,22 +870,53 @@ fn folder_name(p: &Path) -> String {
     p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| p.display().to_string())
 }
 
-/// `git worktree add -b workbench/<name>-<n> <project>-<n>` next to the project.
-fn make_worktree(root: &Path) -> Result<(PathBuf, String), String> {
-    let parent = root.parent().ok_or("the folder has no parent")?;
-    let name = folder_name(root);
-    let mut n = 2;
-    let (path, branch) = loop {
-        let path = parent.join(format!("{name}-{n}"));
-        let branch = format!("workbench/{name}-{n}");
-        if !path.exists() {
-            break (path, branch);
-        }
-        n += 1;
-    };
+/// The repository a folder belongs to: its top folder and the branch checked out there.
+pub fn repo_of(folder: &Path) -> Option<(PathBuf, Option<String>)> {
+    let out = std::process::Command::new("git").arg("-C").arg(folder).args(["rev-parse", "--show-toplevel"]).output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let top = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
+    let branch = workbench_core::host::LocalHost.git_branch(&top);
+    Some((top, branch))
+}
+
+/// A free name for a worktree of the repository at `top`: `<repo>-2`, `<repo>-3`, ... (a
+/// folder next to the repository and a `workbench/<name>` branch, neither existing yet).
+pub fn suggest_worktree_name(top: &Path) -> String {
+    let name = folder_name(top);
+    let parent = top.parent().unwrap_or(top);
+    (2..).map(|n| format!("{name}-{n}")).find(|c| !parent.join(c).exists() && !branch_exists(top, &format!("workbench/{c}"))).unwrap_or(name)
+}
+
+fn branch_exists(top: &Path, branch: &str) -> bool {
+    std::process::Command::new("git")
+        .arg("-C")
+        .arg(top)
+        .args(["rev-parse", "--verify", "--quiet", &format!("refs/heads/{branch}")])
+        .output()
+        .is_ok_and(|o| o.status.success())
+}
+
+/// `git worktree add -b workbench/<name> <parent of top>/<name>`: the folder and branch the
+/// person saw and named. Refuses a name already taken.
+fn make_worktree(top: &Path, name: &str) -> Result<(PathBuf, String), String> {
+    let name = name.trim();
+    if name.is_empty() || name.contains('/') || name.starts_with('.') {
+        return Err(format!("\"{name}\" is not a usable folder name"));
+    }
+    let parent = top.parent().ok_or("the repository has no parent folder")?;
+    let path = parent.join(name);
+    let branch = format!("workbench/{name}");
+    if path.exists() {
+        return Err(format!("{} exists already", path.display()));
+    }
+    if branch_exists(top, &branch) {
+        return Err(format!("the branch {branch} exists already"));
+    }
     let out = std::process::Command::new("git")
         .arg("-C")
-        .arg(root)
+        .arg(top)
         .args(["worktree", "add", "-b", &branch])
         .arg(&path)
         .output()

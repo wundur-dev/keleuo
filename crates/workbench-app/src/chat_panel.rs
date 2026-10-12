@@ -9,7 +9,8 @@ use std::sync::Arc;
 
 use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
 
-use crate::agent_session::{Spend, View};
+use crate::agent_session::{Asking, Spend, View};
+use gpui_kit::component::button::{Button, ButtonVariants};
 use crate::sheet_tabs::{self, Joined, Palette, StripState};
 use gpui_kit::component::text::TextView;
 use gpui_kit::component::{ActiveTheme, Icon, IconName, Sizable};
@@ -44,6 +45,8 @@ pub struct ChatPanel {
     list: ListState,
     /// How many items the list knows of.
     list_len: usize,
+    /// Earlier parts being read (by their start in the session file).
+    loading: HashSet<u64>,
     /// Tool cards the user opened (or closed, for diffs which start open).
     toggled: HashSet<String>,
     pub index: Arc<FileIndex>,
@@ -140,6 +143,7 @@ impl ChatPanel {
                 list
             },
             list_len: 0,
+            loading: HashSet::new(),
             toggled: HashSet::new(),
             index: Arc::new(FileIndex::default()),
             last_revision: 0,
@@ -161,8 +165,10 @@ impl ChatPanel {
 
     /// Tests: scroll by `dy` pixels (down is positive). Every item is reachable already.
     pub fn test_command(&mut self, cmd: &str, dy: f32, cx: &mut Context<Self>) {
-        if cmd == "scroll" {
-            self.list.scroll_by(px(dy));
+        match cmd {
+            "scroll" => self.list.scroll_by(px(dy)),
+            "top" => self.list.scroll_to(ListOffset { item_ix: 0, offset_in_item: px(0.) }),
+            _ => {}
         }
         cx.notify();
     }
@@ -179,10 +185,110 @@ impl ChatPanel {
         self.list_len = len;
     }
 
+    /// An earlier part came into view: read it off the UI thread, then put its items in its
+    /// place, keeping the view where it was (on the part's last item).
+    fn load_earlier(&mut self, from: u64, to: u64, cx: &mut Context<Self>) {
+        // One part at a time: placeholders are one line each, so at the very top several are
+        // in view together, but only the one the person reaches should be read.
+        if !self.loading.is_empty() {
+            return;
+        }
+        self.loading.insert(from);
+        let Some(load) = self.session.read(cx).earlier_loader() else { return };
+        cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let started = std::time::Instant::now();
+            let items = cx.background_spawn(async move { load(from, to) }).await;
+            let _ = this.update(cx, |p, cx| {
+                p.loading.remove(&from);
+                let Ok(items) = items else { return };
+                if crate::perf::enabled() {
+                    eprintln!("workbench: earlier part ({} items) read in {:.0} ms", items.len(), started.elapsed().as_secs_f64() * 1000.0);
+                }
+                let at = p.session.read(cx).chat.items.iter().position(|i| matches!(i, Item::Earlier { from: f, .. } if *f == from));
+                let Some(ix) = at else { return };
+                let n = items.len();
+                let rev = p.session.update(cx, |s, _| {
+                    s.chat.items.splice(ix..ix + 1, items);
+                    s.chat.revision += 1;
+                    s.chat.revision
+                });
+                let top = p.list.logical_scroll_top();
+                p.list.splice(ix..ix + 1, n);
+                p.list_len = p.list_len + n - 1;
+                // Reached by scrolling up: carry on from its newest item. Jumped to the very top:
+                // stay at its start.
+                if top.item_ix == ix && ix > 0 && n > 0 {
+                    p.list.scroll_to(ListOffset { item_ix: ix + n - 1, offset_in_item: px(0.) });
+                }
+                p.last_revision = rev;
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// The divider where the context was compacted, its summary on request.
+    fn render_compacted(&self, summary: &str, trigger: Option<&str>, tokens: Option<u64>, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let (muted, border, hover) = (theme.muted_foreground, theme.border, theme.secondary_hover);
+        let key = format!("compact:{}:{}", summary.len(), summary.chars().take(40).collect::<String>());
+        let open = self.toggled.contains(&key);
+        let detail = match (trigger, tokens) {
+            (Some(t), Some(n)) => format!(" ({t}, at {}k tokens)", n / 1000),
+            (Some(t), None) => format!(" ({t})"),
+            (None, Some(n)) => format!(" (at {}k tokens)", n / 1000),
+            _ => String::new(),
+        };
+        let k = key.clone();
+        div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(
+                div()
+                    .id(SharedString::from(key))
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .text_size(px(11.))
+                    .text_color(muted)
+                    .cursor_pointer()
+                    .hover(|d| d.bg(hover))
+                    .child(div().flex_1().h(px(1.)).bg(border))
+                    .child(Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight }).xsmall())
+                    .child(format!("Context compacted here{detail}"))
+                    .child(div().flex_1().h(px(1.)).bg(border))
+                    .on_click(cx.listener(move |p, _, _, cx| {
+                        if !p.toggled.remove(&k) {
+                            p.toggled.insert(k.clone());
+                        }
+                        p.list.remeasure();
+                        cx.notify();
+                    })),
+            )
+            .when(open && !summary.is_empty(), |d| {
+                d.child(
+                    div()
+                        .px_2()
+                        .py_1()
+                        .rounded_md()
+                        .border_1()
+                        .border_color(border)
+                        .text_color(muted)
+                        .child(self.markdown(SharedString::from(format!("summary-{}", summary.len())), summary, cx)),
+                )
+            })
+            .into_any_element()
+    }
+
     /// One item of the conversation, for the list.
     fn render_entry(&mut self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
         let item = self.session.read(cx).chat.items.get(ix).cloned();
         let Some(item) = item else { return div().into_any_element() };
+        if let Item::Earlier { from, to, .. } = item {
+            // In view (or about to be): read it.
+            self.load_earlier(from, to, cx);
+        }
         let last = ix + 1 == self.list_len;
         div()
             .px_2()
@@ -651,6 +757,14 @@ impl ChatPanel {
                     .text_color(muted)
                     .child(t.clone())
                     .into_any_element(),
+                Item::Earlier { messages, .. } => div()
+                    .text_size(px(11.))
+                    .text_color(muted)
+                    .child(format!("Earlier conversation, {messages} messages: reading..."))
+                    .into_any_element(),
+                Item::Compacted { summary, trigger, tokens } => {
+                    self.render_compacted(summary, trigger.as_deref(), *tokens, cx)
+                }
                 Item::Error(t) => div()
                     .text_xs()
                     .text_color(red)
@@ -1035,6 +1149,62 @@ impl ChatPanel {
         )
     }
 
+    /// The interface waits on a question before it is up: Trust / Don't trust for the folder
+    /// question, else a pointer to the terminal.
+    fn render_asking(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let session = self.session.read(cx);
+        let asking = session.asking?;
+        if session.view == View::Terminal {
+            return None;
+        }
+        let name = session.backend.name();
+        let theme = cx.theme();
+        let (warning, border, muted) = (theme.warning, theme.border, theme.muted_foreground);
+        let weak = self.session.downgrade();
+        let show = {
+            let weak = weak.clone();
+            Button::new("asking-show").xsmall().label("Show terminal").on_click(move |_, window, cx| {
+                let _ = weak.update(cx, |s, cx| s.set_view(View::Terminal, cx));
+                if let Some(t) = weak.upgrade().and_then(|s| s.read(cx).terminal_view()) {
+                    let f = t.read(cx).focus.clone();
+                    window.focus(&f, cx);
+                }
+            })
+        };
+        let mut row = div()
+            .flex_none()
+            .px_2()
+            .py_1()
+            .flex()
+            .items_center()
+            .gap_2()
+            .border_t_1()
+            .border_color(border)
+            .text_size(px(11.5))
+            .child(Icon::new(IconName::TriangleAlert).xsmall().text_color(warning));
+        row = match asking {
+            Asking::Trust => {
+                let (w1, w2) = (weak.clone(), weak.clone());
+                row.child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(format!("{name} asks whether you trust this folder: it will be able to read, edit and run files here."))
+                        .child(div().text_color(muted).child("Your answer goes to its own prompt, as if typed.")),
+                )
+                .child(Button::new("trust").xsmall().primary().label("Trust").on_click(move |_, _, cx| {
+                    let _ = w1.update(cx, |s, cx| s.answer_trust(true, cx));
+                }))
+                .child(Button::new("distrust").xsmall().label("Don't trust").on_click(move |_, _, cx| {
+                    let _ = w2.update(cx, |s, cx| s.answer_trust(false, cx));
+                }))
+                .child(show)
+            }
+            Asking::Other => row.child(div().flex_1().min_w_0().child(format!("{name} is asking something in the terminal."))).child(show),
+        };
+        Some(row.into_any_element())
+    }
+
     /// In the terminal view, the files the agent changed this session, as links.
     fn render_edits(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let chat = &self.session.read(cx).chat;
@@ -1152,6 +1322,7 @@ impl Render for ChatPanel {
                             .size_full(),
                     )),
             )
+            .children(self.render_asking(cx))
             .child(
                 div()
                     .flex_none()
