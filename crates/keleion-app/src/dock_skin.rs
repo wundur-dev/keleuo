@@ -43,6 +43,10 @@ pub const BOTTOM_STRIP: f32 = 24.;
 pub const STRIP_GAP_ABOVE: f32 = 5.;
 /// Space below those tabs, before the panel's bottom edge.
 pub const STRIP_GAP_BELOW: f32 = 4.;
+/// Space above a document group's tabs, before the panel's top edge.
+pub const DOC_STRIP_GAP_ABOVE: f32 = 5.;
+/// How far a document group's first tab sits from the panel's left edge.
+pub const DOC_STRIP_INSET: f32 = 8.;
 /// A document group's tabs along the top.
 pub const TOP_STRIP: f32 = 28.;
 
@@ -327,7 +331,7 @@ impl SheetGroup {
             .h_full()
             .overflow_x_scroll()
             .track_scroll(&self.scroll)
-            .pl(px(4.));
+            .pl(px(if documents { DOC_STRIP_INSET } else { 4. }));
         let tabs_count = group.panels().len();
         if self.last_shown.replace(shown) != shown
             && let Some(pos) = shown.and_then(|ix| visible(group, cx).iter().position(|v| *v == ix))
@@ -487,7 +491,17 @@ impl TabGroupRenderer for SheetGroup {
         // and the recessed grey ones both read against it.
         let (ground, content) = (theme.sidebar, theme.background);
         let trailing = self.doc_actions(group, window, cx);
-        self.strip(group, Joined::Bottom, TOP_STRIP, ground, content, trailing, window, cx)
+        // Room above the tabs, in the strip's own colour (no line between the shown tab and
+        // its content below).
+        div()
+            .flex_none()
+            .w_full()
+            .flex()
+            .flex_col()
+            .bg(ground)
+            .pt(px(DOC_STRIP_GAP_ABOVE))
+            .child(self.strip(group, Joined::Bottom, TOP_STRIP, ground, content, trailing, window, cx))
+            .into_any_element()
     }
 
     fn render_active_panel(&self, panel: AnyView, group: &TabGroupContext, window: &mut Window, cx: &mut App) -> AnyElement {
