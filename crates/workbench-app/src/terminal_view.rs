@@ -26,6 +26,44 @@ fn hsla(rgb: u32) -> Hsla {
     gpui_kit::rgb(rgb).into()
 }
 
+/// What one turn of the wheel does in a terminal.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Wheel {
+    /// Scroll our own scrollback by this many lines (up is positive).
+    Scrollback(i32),
+    /// Send this to the program.
+    Send(String),
+}
+
+/// The wheel, as terminals do it: a program that asked for mouse reports gets wheel events
+/// (buttons 64 and 65; SGR form when it asked for that); a full-screen program in the
+/// alternate screen with alternate scroll on gets arrow keys; otherwise the scrollback
+/// scrolls. `col` and `row` are 1-based cells under the pointer.
+pub fn wheel_input(mode: TermMode, lines: i32, col: usize, row: usize) -> Wheel {
+    let n = lines.unsigned_abs() as usize;
+    if mode.intersects(TermMode::MOUSE_MODE) {
+        let button = if lines > 0 { 64 } else { 65 };
+        let one = if mode.contains(TermMode::SGR_MOUSE) {
+            format!("\x1b[<{button};{col};{row}M")
+        } else {
+            // The old X10 form: each value plus 32, as one character (cells past 223 clamp).
+            let c = |v: usize| char::from((32 + v.min(223)) as u8);
+            format!("\x1b[M{}{}{}", c(button), c(col), c(row))
+        };
+        return Wheel::Send(one.repeat(n));
+    }
+    if mode.contains(TermMode::ALT_SCREEN) && mode.contains(TermMode::ALTERNATE_SCROLL) {
+        let key = match (lines > 0, mode.contains(TermMode::APP_CURSOR)) {
+            (true, true) => "\x1bOA",
+            (false, true) => "\x1bOB",
+            (true, false) => "\x1b[A",
+            (false, false) => "\x1b[B",
+        };
+        return Wheel::Send(key.repeat(n));
+    }
+    Wheel::Scrollback(lines)
+}
+
 pub struct TerminalView {
     pub pty: Option<Rc<Pty>>,
     pub focus: FocusHandle,
@@ -37,6 +75,9 @@ pub struct TerminalView {
     bounds: Rc<Cell<Bounds<Pixels>>>,
     cell: Rc<Cell<Size<Pixels>>>,
     selecting: bool,
+    /// Wheel movement smaller than a line, kept for the next event (trackpads send many
+    /// small deltas).
+    wheel_rest: f32,
     /// 1, 2, ... in opening order: the key of its saved name.
     pub number: usize,
     /// For the automatic name: the folder, its git branch and the login shell.
@@ -105,6 +146,7 @@ impl TerminalView {
             bounds: Rc::new(Cell::new(Bounds::default())),
             cell: Rc::new(Cell::new(size(px(8.), px(16.)))),
             selecting: false,
+            wheel_rest: 0.,
             number: 0,
             folder: std::path::PathBuf::new(),
             branch: None,
@@ -281,17 +323,18 @@ impl TerminalView {
     fn scroll(&mut self, e: &ScrollWheelEvent, _: &mut Window, cx: &mut Context<Self>) {
         let Some(pty) = &self.pty else { return };
         let line_h = self.cell.get().height;
-        let lines = (e.delta.pixel_delta(line_h).y / line_h).round() as i32;
+        let exact = self.wheel_rest + e.delta.pixel_delta(line_h).y / line_h;
+        let lines = exact.trunc() as i32;
+        self.wheel_rest = exact.fract();
         if lines == 0 {
             return;
         }
-        let mode = self.mode();
-        if mode.contains(TermMode::ALT_SCREEN) && mode.contains(TermMode::ALTERNATE_SCROLL) {
-            // Full-screen programs (less, vim) get arrow keys.
-            let key = if lines > 0 { "\x1bOA" } else { "\x1bOB" };
-            self.write_str(&key.repeat(lines.unsigned_abs() as usize));
-        } else {
-            pty.term.lock().scroll_display(Scroll::Delta(lines));
+        let (cell, _) = self.grid_point(e.position);
+        let col = cell.column.0 + 1;
+        let row = (cell.line.0 + pty.term.lock().grid().display_offset() as i32).max(0) as usize + 1;
+        match wheel_input(self.mode(), lines, col, row) {
+            Wheel::Scrollback(n) => pty.term.lock().scroll_display(Scroll::Delta(n)),
+            Wheel::Send(bytes) => self.write_str(&bytes),
         }
         cx.notify();
     }
@@ -677,5 +720,37 @@ fn paint_grid(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[::core::prelude::v1::test]
+    fn the_wheel_scrolls_the_normal_screen() {
+        // A shell at its prompt: the default modes include alternate scroll, but there is no
+        // alternate screen, so nothing reaches the shell (no history cycling).
+        assert_eq!(wheel_input(TermMode::default(), 3, 5, 5), Wheel::Scrollback(3));
+        assert_eq!(wheel_input(TermMode::default(), -2, 5, 5), Wheel::Scrollback(-2));
+    }
+
+    #[::core::prelude::v1::test]
+    fn full_screen_programs_get_arrows() {
+        let mode = TermMode::default() | TermMode::ALT_SCREEN;
+        assert_eq!(wheel_input(mode, 2, 1, 1), Wheel::Send("\x1b[A\x1b[A".into()));
+        assert_eq!(wheel_input(mode | TermMode::APP_CURSOR, -1, 1, 1), Wheel::Send("\x1bOB".into()));
+        // Alternate scroll turned off: the scrollback.
+        assert_eq!(wheel_input(TermMode::ALT_SCREEN, 1, 1, 1), Wheel::Scrollback(1));
+    }
+
+    #[::core::prelude::v1::test]
+    fn programs_that_want_the_mouse_get_wheel_events() {
+        // Claude Code's interface: alternate screen, mouse reports, SGR form.
+        let mode = TermMode::default() | TermMode::ALT_SCREEN | TermMode::MOUSE_REPORT_CLICK | TermMode::SGR_MOUSE;
+        assert_eq!(wheel_input(mode, 1, 10, 4), Wheel::Send("\x1b[<64;10;4M".into()));
+        assert_eq!(wheel_input(mode, -2, 10, 4), Wheel::Send("\x1b[<65;10;4M".repeat(2)));
+        let x10 = TermMode::MOUSE_DRAG;
+        assert_eq!(wheel_input(x10, 1, 1, 1), Wheel::Send("\x1b[M`!!".into()));
     }
 }
