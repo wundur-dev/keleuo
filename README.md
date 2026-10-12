@@ -5,7 +5,12 @@ sessions, each a whole workspace with its chat or the agent's own terminal, file
 and terminals. Written in Rust with gpui (the UI framework behind Zed) and gpui-component.
 Prototype.
 
-MIT licence, copyright Wundur AI Learning, LLC.
+Keleuo started as a tool for our own work. Running many projects and many agent sessions at
+once, we needed something native, fast and easy to work with that fit how we actually work.
+It is a desktop app, not a harness: it runs Claude Code and stays out of its way, while
+keeping each session's folder, conversation, terminals and files together so nothing gets lost.
+
+Apache-2.0 licence, copyright Wundur AI Learning, LLC.
 
 ## Run it
 

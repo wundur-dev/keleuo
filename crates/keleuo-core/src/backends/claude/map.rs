@@ -112,6 +112,8 @@ impl Mapper {
                 if background {
                     out.push(Event::SubagentBackground { id: tool_use_id.clone(), agent_id: launched_agent_id(&content) });
                 }
+                // A known needless failure: say so, with the fixes.
+                let issue = super::issues::spot(&name, &content, std::path::Path::new(&self.cwd), dirs::home_dir().as_deref());
                 out.push(Event::ToolResult {
                     id: tool_use_id.clone(),
                     output: content,
@@ -120,6 +122,9 @@ impl Mapper {
                     file_changed,
                     parent: parent_tool_use_id,
                 });
+                if let Some(issue) = issue {
+                    out.push(Event::ToolIssue { id: tool_use_id.clone(), issue });
+                }
                 if is_agent_tool(&name) && !background {
                     out.push(Event::SubagentEnded {
                         id: tool_use_id,

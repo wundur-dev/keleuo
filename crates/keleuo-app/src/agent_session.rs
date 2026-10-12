@@ -151,6 +151,11 @@ pub struct AgentSession {
 impl EventEmitter<SessionEvent> for AgentSession {}
 
 impl AgentSession {
+    /// Apply a fix for a known tool failure (see `Issue`) in this session's folder.
+    pub fn apply_fix(&self, kind: &str, fix: &str) -> std::io::Result<String> {
+        self.backend.apply_fix(self.host.as_ref(), &self.cwd, kind, fix)
+    }
+
     pub fn new(host: Arc<dyn Host>, backend: Arc<dyn Backend>, cwd: PathBuf) -> Self {
         Self {
             agent: backend.new_agent(),

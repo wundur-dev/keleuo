@@ -5,6 +5,7 @@
 
 pub mod history;
 pub mod hooks;
+pub mod issues;
 pub mod live;
 pub mod map;
 pub mod messages;
@@ -235,6 +236,13 @@ impl Backend for ClaudeBackend {
             ages: &recent,
             own,
         })
+    }
+
+    fn apply_fix(&self, host: &dyn Host, project: &Path, kind: &str, fix: &str) -> std::io::Result<String> {
+        if host.is_remote() {
+            return Err(std::io::Error::other("fixes are applied on this machine only for now"));
+        }
+        issues::apply(kind, fix, project, dirs::home_dir().as_deref())
     }
 
     fn folder_renamed(&self, host: &dyn Host, old: &Path, new: &Path) -> std::io::Result<()> {

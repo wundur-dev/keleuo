@@ -40,6 +40,8 @@ pub struct ToolCall {
     pub duration_ms: Option<u64>,
     /// What it has printed so far while it runs (the latest part); dropped when it ends.
     pub live: Option<String>,
+    /// It failed in a known way, with fixes to offer.
+    pub issue: Option<Box<crate::agent::Issue>>,
 }
 
 impl ToolCall {
@@ -481,6 +483,7 @@ impl Conversation {
                     started: (!self.replaying).then(std::time::Instant::now),
                     duration_ms: None,
                     live: None,
+                    issue: None,
                 });
                 match parent {
                     Some(p) => {
@@ -553,6 +556,11 @@ impl Conversation {
                 agent.total_tokens = tokens.or(agent.total_tokens);
                 agent.tool_uses = tool_uses.or(agent.tool_uses);
                 agent.duration_ms = duration_ms.or(agent.duration_ms);
+            }
+            Event::ToolIssue { id, issue } => {
+                if let Some(tool) = self.tool_mut(&id) {
+                    tool.issue = Some(Box::new(issue));
+                }
             }
             Event::ToolOutput { id, text } => {
                 if let Some(tool) = self.tool_mut(&id)

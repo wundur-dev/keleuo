@@ -17,6 +17,26 @@ use crate::diff::FileDiff;
 use crate::host::Host;
 use crate::skills::Catalog;
 
+/// A known way a tool call fails for no good reason (the agent then has to try again), with
+/// fixes in the agent's own terms that keep it from happening again.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Issue {
+    /// Which known issue (the backend's name for it, for [`Backend::apply_fix`]).
+    pub kind: String,
+    pub title: String,
+    /// What happened, in a sentence or two.
+    pub detail: String,
+    pub fixes: Vec<IssueFix>,
+}
+
+/// One way to fix an [`Issue`]: what it is called and exactly what it would write where.
+#[derive(Clone, Debug, PartialEq)]
+pub struct IssueFix {
+    pub id: String,
+    pub label: String,
+    pub preview: String,
+}
+
 /// One thing that happened in a conversation.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Event {
@@ -49,6 +69,8 @@ pub enum Event {
     AgentMessage { from: String, text: String },
     /// What a running tool has printed so far (its latest part), while it runs.
     ToolOutput { id: String, text: String },
+    /// A tool call failed in a known way (see [`Issue`]).
+    ToolIssue { id: String, issue: Issue },
     /// The person stopped the turn: it is over, with no answer to come.
     Interrupted,
     /// A subagent finished.
@@ -382,6 +404,11 @@ pub trait Backend: Send + Sync {
     /// its notes) so they belong to the new name. Nothing to move by default.
     fn folder_renamed(&self, _host: &dyn Host, _old: &Path, _new: &Path) -> std::io::Result<()> {
         Ok(())
+    }
+    /// Apply fix `fix` of the known issue `kind` (see [`Issue`]) for `project`; what was done,
+    /// in a sentence.
+    fn apply_fix(&self, _host: &dyn Host, _project: &Path, _kind: &str, _fix: &str) -> std::io::Result<String> {
+        Err(std::io::Error::other("this agent has no fixes"))
     }
 }
 

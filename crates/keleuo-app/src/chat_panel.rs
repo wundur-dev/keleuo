@@ -20,6 +20,7 @@ use gpui_kit::*;
 use keleuo_core::conversation::{
     AgentStatus, Item, PermissionPrompt, SubAgent, ToolCall,
 };
+use keleuo_core::agent::Issue;
 use keleuo_core::diff::{FileDiff, LineKind};
 use keleuo_core::links::{self, FileIndex};
 use keleuo_core::conversation::{one_line, to_markdown};
@@ -62,6 +63,10 @@ pub struct ChatPanel {
     attachments: Vec<PathBuf>,
     /// An image shown full size over the chat.
     preview: Option<PathBuf>,
+    /// The known failure whose fixes are being offered.
+    fixing: Option<Issue>,
+    /// Kinds of failure fixed from this panel (their notices say so).
+    fixed: std::collections::HashSet<String>,
     /// Tool cards the user opened (or closed, for diffs which start open).
     toggled: HashSet<String>,
     pub index: Arc<FileIndex>,
@@ -180,6 +185,8 @@ impl ChatPanel {
             loading: HashSet::new(),
             attachments: Vec::new(),
             preview: None,
+            fixing: None,
+            fixed: Default::default(),
             toggled: HashSet::new(),
             index: Arc::new(FileIndex::default()),
             last_revision: 0,
@@ -213,6 +220,145 @@ impl ChatPanel {
             Some(id) => chat.agent(id)?.items.get(ix).cloned(),
             None => chat.items.get(ix).cloned(),
         }
+    }
+
+    /// The line on a tool card that failed in a known way.
+    fn render_issue_notice(&self, tool_id: &str, issue: &Issue, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let (fg, muted, border, warning, green) = (theme.foreground, theme.muted_foreground, theme.border, theme.warning, theme.green);
+        let fixed = self.fixed.contains(&issue.kind);
+        let open = issue.clone();
+        div()
+            .px_2()
+            .py_1()
+            .border_t_1()
+            .border_color(border)
+            .bg(warning.opacity(0.08))
+            .flex()
+            .items_center()
+            .gap_2()
+            .text_xs()
+            .child(Icon::new(IconName::TriangleAlert).xsmall().text_color(warning))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .gap_1()
+                    .child(div().flex_none().font_weight(FontWeight::SEMIBOLD).text_color(fg).child(issue.title.clone()))
+                    .child(div().min_w_0().truncate().text_color(muted).child(issue.detail.replace('`', ""))),
+            )
+            .child(if fixed {
+                div().flex_none().text_color(green).child("Fixed").into_any_element()
+            } else {
+                Button::new(SharedString::from(format!("fix-{tool_id}")))
+                    .xsmall()
+                    .label("Fix so it doesn't happen again")
+                    .on_click(cx.listener(move |p, _, _, cx| {
+                        cx.stop_propagation();
+                        p.fixing = Some(open.clone());
+                        cx.notify();
+                    }))
+                    .into_any_element()
+            })
+            .into_any_element()
+    }
+
+    /// The fixes for a known failure, each saying exactly what it writes where.
+    fn render_fix(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let issue = self.fixing.as_ref()?;
+        let theme = cx.theme();
+        let (fg, muted, border, bg) = (theme.foreground, theme.muted_foreground, theme.border, theme.background);
+        let mut list = div().flex().flex_col().gap_2();
+        for fix in &issue.fixes {
+            let (kind, id) = (issue.kind.clone(), fix.id.clone());
+            list = list.child(
+                div()
+                    .p_2()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(border)
+                    .flex()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).text_color(fg).child(fix.label.clone()))
+                            .child(div().text_xs().line_height(rems(1.4)).text_color(muted).child(fix.preview.clone())),
+                    )
+                    .child(
+                        div().flex_none().child(
+                            Button::new(SharedString::from(format!("apply-{id}")))
+                                .small()
+                                .primary()
+                                .label("Apply")
+                                .on_click(cx.listener(move |p, _, window, cx| {
+                                    let result = p.session.read(cx).apply_fix(&kind, &id);
+                                    match result {
+                                        Ok(done) => {
+                                            p.fixed.insert(kind.clone());
+                                            p.fixing = None;
+                                            gpui_kit::component::WindowExt::push_notification(window, done, cx);
+                                        }
+                                        Err(e) => gpui_kit::component::WindowExt::push_notification(window, format!("Not fixed: {e}"), cx),
+                                    }
+                                    p.list.remeasure();
+                                    cx.notify();
+                                })),
+                        ),
+                    ),
+            );
+        }
+        Some(
+            div()
+                .id("fix-dialog")
+                .absolute()
+                .inset_0()
+                .flex()
+                .items_start()
+                .justify_center()
+                .pt(px(60.))
+                .bg(gpui_kit::black().opacity(0.25))
+                .occlude()
+                .capture_key_down(cx.listener(|p, ev: &KeyDownEvent, _, cx| {
+                    if ev.keystroke.key == "escape" {
+                        p.fixing = None;
+                        cx.stop_propagation();
+                        cx.notify();
+                    }
+                }))
+                .child(
+                    div()
+                        .w(px(520.))
+                        .max_w(relative(0.92))
+                        .p_4()
+                        .flex()
+                        .flex_col()
+                        .gap_3()
+                        .rounded_lg()
+                        .border_1()
+                        .border_color(border)
+                        .bg(bg)
+                        .shadow_lg()
+                        .child(div().text_base().font_weight(FontWeight::SEMIBOLD).text_color(fg).child(issue.title.clone()))
+                        .child(div().text_sm().line_height(rems(1.45)).text_color(muted).child(issue.detail.replace('`', "")))
+                        .child(div().text_xs().text_color(muted).child("Choose a fix. It goes into the agent's own settings, so it works outside Keleuo too."))
+                        .child(list)
+                        .child(
+                            div().flex().justify_end().child(
+                                Button::new("fix-cancel").small().ghost().label("Not now").on_click(cx.listener(|p, _, _, cx| {
+                                    p.fixing = None;
+                                    cx.notify();
+                                })),
+                            ),
+                        ),
+                )
+                .into_any_element(),
+        )
     }
 
     /// A spinner at the panel's step: turned by the ticker, a few steps a second, rather
@@ -800,6 +946,10 @@ impl ChatPanel {
             .bg(card_bg.opacity(0.5))
             .overflow_hidden()
             .child(header);
+        // A known needless failure: what happened, and a way to stop it happening again.
+        if let Some(issue) = &tool.issue {
+            card = card.child(self.render_issue_notice(&tool.id, issue, cx));
+        }
         // While it runs, its latest output, newest line at the bottom, whether the card is
         // open or not.
         if tool.running()
@@ -1717,6 +1867,7 @@ impl Render for ChatPanel {
             .children(self.render_thinking(cx))
             .child(self.render_composer(window, cx)))
             .children(self.render_views(cx))
+            .children(self.render_fix(cx))
             .children(self.preview.clone().map(|path| {
                 div()
                     .id("image-preview")
