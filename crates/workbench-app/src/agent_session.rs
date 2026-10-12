@@ -4,7 +4,9 @@
 //! and its events build the chat. **Terminal**: the agent's own interface runs in a pseudo-
 //! terminal on the same conversation, and the window follows the session's file to keep the
 //! chat state (subagents, edits, tokens, status) current. Only one process drives a session:
-//! switching ends one before starting the other, and only between turns.
+//! switching ends one before starting the other, and only between turns. The view itself
+//! switches at once: the terminal shows the last lines of the conversation until its
+//! interface has drawn, and Chat shows while the interface exits behind it.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -15,7 +17,7 @@ use workbench_core::agent::{Agent, Backend, Follow, Message, StartOptions};
 use workbench_core::conversation::Conversation;
 use workbench_core::host::Host;
 
-use crate::terminal_view::TerminalView;
+use crate::terminal_view::{Placeholder, TerminalView};
 
 /// Something the rest of the window should react to.
 #[derive(Clone, Debug)]
@@ -68,8 +70,12 @@ pub struct AgentSession {
     terminal: Option<TerminalRun>,
     /// Back to Chat once the terminal's turn ends.
     pub chat_when_idle: bool,
-    /// Leaving the terminal: waiting for it to exit.
+    /// Leaving the terminal: Chat already shows while its interface exits.
     leaving: Option<Task<()>>,
+    /// Messages sent while the terminal was still closing; they go once it has.
+    queued: Vec<String>,
+    /// With `WORKBENCH_PERF=1`: when the last message was sent, until its first event.
+    sent_at: Option<std::time::Instant>,
 }
 
 impl EventEmitter<SessionEvent> for AgentSession {}
@@ -94,6 +100,8 @@ impl AgentSession {
             terminal: None,
             chat_when_idle: false,
             leaving: None,
+            queued: Vec::new(),
+            sent_at: None,
         }
     }
 
@@ -164,6 +172,11 @@ impl AgentSession {
     fn handle(&mut self, message: Message, cx: &mut Context<Self>) {
         match message {
             Message::Event(event) => {
+                if !matches!(event, workbench_core::agent::Event::Started { .. })
+                    && let Some(at) = self.sent_at.take()
+                {
+                    eprintln!("workbench: first event {:.0} ms after the message", at.elapsed().as_secs_f64() * 1000.0);
+                }
                 let applied = self.chat.apply(event);
                 if let Some(path) = applied.file_changed {
                     cx.emit(SessionEvent::FileChanged(path));
@@ -207,6 +220,16 @@ impl AgentSession {
             ));
             cx.notify();
             return;
+        }
+        if self.terminal.is_some() {
+            // Chat shows, but the terminal's interface is still closing: one writer only.
+            self.queued.push(text.to_string());
+            self.chat.push_notice("Sends as soon as the terminal has closed.");
+            cx.notify();
+            return;
+        }
+        if crate::perf::enabled() {
+            self.sent_at = Some(std::time::Instant::now());
         }
         if !self.agent.running()
             && let Err(e) = self.start(cx)
@@ -297,7 +320,9 @@ impl AgentSession {
         if self.view == View::Terminal || !self.backend.capabilities().terminal_view {
             return;
         }
-        let refuse = if self.chat.busy {
+        let refuse = if self.terminal.is_some() {
+            Some("The terminal is still closing. Try again in a moment.")
+        } else if self.chat.busy {
             Some("A turn is running. Wait for it to finish (or stop it), then switch to Terminal.")
         } else if self.waiting_for.is_some() {
             Some("This conversation is still open in another terminal. It can move here once that one ends.")
@@ -311,8 +336,10 @@ impl AgentSession {
             cx.notify();
             return;
         }
+        crate::perf::switch_begin("to Terminal");
         // The chat's process ends between turns: only one process drives a session.
         self.agent.stop();
+        crate::perf::switch_step("stream process ended");
         self._reader = None;
         self.chat.process_ended();
         let (id, new) = match self.chat.session_id.clone() {
@@ -330,7 +357,16 @@ impl AgentSession {
             return;
         };
         let command = self.host.program_command(&spec);
-        let view = cx.new(|cx| TerminalView::new(command, cx));
+        let placeholder = Placeholder {
+            lines: last_lines(&self.chat, 12),
+            label: format!("Starting {}...", self.backend.name()),
+        };
+        let view = cx.new(|cx| {
+            let mut v = TerminalView::new(command, cx);
+            v.placeholder = Some(placeholder);
+            v
+        });
+        crate::perf::switch_step("terminal process started");
         let (tx, rx) = async_channel::unbounded::<Message>();
         let follow = self.backend.follow_session(
             self.host.clone(),
@@ -341,8 +377,10 @@ impl AgentSession {
             }),
         );
         let exit = cx.observe(&view, |s, view, cx| {
-            if view.read(cx).exited && s.view == View::Terminal {
-                // The person left the interface (/exit): back to Chat with what it added.
+            if view.read(cx).exited {
+                // The interface ended (the person typed /exit, or Chat asked it to): back to
+                // Chat with what it added.
+                s.leaving = None;
                 s.back_to_chat(cx);
             }
         });
@@ -353,10 +391,11 @@ impl AgentSession {
         cx.notify();
     }
 
-    /// Back to the chat view: once the terminal's turn is over, leave its interface cleanly,
-    /// then reload the conversation it added to.
+    /// Back to the chat view: once the terminal's turn is over, Chat shows at once (its
+    /// transcript has followed the session file) while the terminal's interface exits behind
+    /// it; the conversation then reloads and the next stream process starts.
     pub fn show_chat(&mut self, cx: &mut Context<Self>) {
-        if self.view == View::Chat || self.leaving.is_some() {
+        if self.view == View::Chat {
             return;
         }
         let Some(run) = &self.terminal else {
@@ -376,33 +415,35 @@ impl AgentSession {
             return;
         }
         self.chat_when_idle = false;
+        crate::perf::switch_begin("to Chat");
         let pty = run.view.read(cx).pty.clone();
+        self.view = View::Chat;
+        self.remember_view(cx);
+        cx.notify();
+        crate::perf::switch_step("chat shown");
         let input = self.backend.terminal_exit_input();
+        // The exit observer (in `show_terminal`) finishes the handover the moment the
+        // interface ends; this task only types the exit and catches one that does not end.
         self.leaving = Some(cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
-            for piece in input {
+            for (i, piece) in input.into_iter().enumerate() {
+                if i > 0 {
+                    // Separate reads, so the interface sees each piece on its own.
+                    cx.background_executor().timer(std::time::Duration::from_millis(60)).await;
+                }
                 if let Some(pty) = &pty {
                     pty.write(piece.into_bytes());
                 }
-                cx.background_executor().timer(std::time::Duration::from_millis(400)).await;
             }
-            // Give it a few seconds to exit; otherwise ask the person.
-            for _ in 0..20 {
-                cx.background_executor().timer(std::time::Duration::from_millis(250)).await;
-                let exited = this
-                    .update(cx, |s, cx| s.terminal.as_ref().is_none_or(|t| t.view.read(cx).exited))
-                    .unwrap_or(true);
-                if exited {
-                    let _ = this.update(cx, |s, cx| {
-                        s.leaving = None;
-                        s.back_to_chat(cx)
-                    });
-                    return;
-                }
-            }
+            crate::perf::switch_step("exit input sent");
+            cx.background_executor().timer(std::time::Duration::from_secs(4)).await;
             let _ = this.update(cx, |s, cx| {
                 s.leaving = None;
-                s.chat.push_notice("The terminal did not exit. Finish there (type /exit), then switch to Chat.");
-                cx.notify();
+                if s.terminal.is_some() {
+                    s.view = View::Terminal;
+                    s.remember_view(cx);
+                    s.chat.push_notice("The terminal did not exit. Finish there (type /exit), then switch to Chat.");
+                    cx.notify();
+                }
             });
         }));
     }
@@ -410,6 +451,7 @@ impl AgentSession {
     /// The terminal has exited: drop it and rebuild the chat from the session file, so the
     /// next message continues the conversation in stream mode.
     fn back_to_chat(&mut self, cx: &mut Context<Self>) {
+        crate::perf::switch_step("terminal closed");
         self.terminal = None;
         self.view = View::Chat;
         self.remember_view(cx);
@@ -420,6 +462,7 @@ impl AgentSession {
             let chat = cx
                 .background_spawn(async move { backend.load_session(host.as_ref(), &cwd, &id) })
                 .await;
+            crate::perf::switch_step("conversation reloaded");
             let _ = this.update(cx, |s, cx| {
                 if let Ok(mut chat) = chat {
                     // What the window counted in Chat stays; the terminal does not report cost.
@@ -428,6 +471,16 @@ impl AgentSession {
                     s.chat = chat;
                 }
                 s.chat.push_notice("Back in Chat: the next message continues this conversation.");
+                // Start the next process now, so the next message does not wait for it.
+                if s.view == View::Chat && s.terminal.is_none() && s.waiting_for.is_none() && !s.agent.running() {
+                    match s.start(cx) {
+                        Ok(()) => crate::perf::switch_step("stream process started"),
+                        Err(e) => s.chat.push_error(e.to_string()),
+                    }
+                }
+                for text in std::mem::take(&mut s.queued) {
+                    s.send(&text, cx);
+                }
                 cx.notify();
             });
         })
@@ -440,6 +493,28 @@ impl AgentSession {
         self._reader = None;
         self.chat.process_ended();
     }
+}
+
+/// The conversation's last `n` lines of text, oldest first, `true` for the person's.
+fn last_lines(chat: &Conversation, n: usize) -> Vec<(bool, String)> {
+    use workbench_core::conversation::Item;
+    let mut out = Vec::new();
+    for item in chat.items.iter().rev() {
+        let (user, text) = match item {
+            Item::User(t) => (true, t),
+            Item::Assistant { text, .. } => (false, text),
+            _ => continue,
+        };
+        for line in text.lines().rev().filter(|l| !l.trim().is_empty()) {
+            out.push((user, line.to_string()));
+            if out.len() >= n {
+                out.reverse();
+                return out;
+            }
+        }
+    }
+    out.reverse();
+    out
 }
 
 /// A random version 4 UUID, for a session started in the terminal view.

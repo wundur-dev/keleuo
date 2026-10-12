@@ -71,6 +71,11 @@ pub struct TerminalView {
     pub exited: bool,
     /// Output arrived since the user last looked (the sidebar shows a dot).
     pub unseen: bool,
+    /// The program has drawn something (the screen is no longer blank).
+    pub drawn: bool,
+    /// Shown over the blank screen until the program draws: the conversation's last lines
+    /// and what is starting.
+    pub placeholder: Option<Placeholder>,
     error: Option<String>,
     bounds: Rc<Cell<Bounds<Pixels>>>,
     cell: Rc<Cell<Size<Pixels>>>,
@@ -84,6 +89,14 @@ pub struct TerminalView {
     pub folder: std::path::PathBuf,
     pub branch: Option<String>,
     _events: Option<Task<()>>,
+}
+
+/// What a terminal shows while its program starts.
+pub struct Placeholder {
+    /// The last lines of the conversation so far, oldest first.
+    pub lines: Vec<(bool, String)>,
+    /// "Starting Claude Code..."
+    pub label: String,
 }
 
 pub enum TerminalEvent {
@@ -117,12 +130,19 @@ impl TerminalView {
                                     PtyEvent::Wakeup => {
                                         crate::perf::pty_output();
                                         view.unseen = true;
+                                        if !view.drawn && !view.screen_text().trim().is_empty() {
+                                            view.drawn = true;
+                                            crate::perf::switch_step("terminal drew its first screen");
+                                        }
                                     }
                                     PtyEvent::Title(t) => view.title = Some(t),
                                     PtyEvent::Copy(text) => {
                                         cx.write_to_clipboard(ClipboardItem::new_string(text))
                                     }
-                                    PtyEvent::Exited => view.exited = true,
+                                    PtyEvent::Exited => {
+                                        view.exited = true;
+                                        crate::perf::switch_step("terminal process exited");
+                                    }
                                 }
                             }
                             cx.notify();
@@ -142,6 +162,8 @@ impl TerminalView {
             title: None,
             exited: false,
             unseen: false,
+            drawn: false,
+            placeholder: None,
             error,
             bounds: Rc::new(Cell::new(Bounds::default())),
             cell: Rc::new(Cell::new(size(px(8.), px(16.)))),
@@ -493,7 +515,35 @@ impl Render for TerminalView {
         if let Some(err) = &self.error {
             return base.p_2().text_color(hsla(0xcc6666)).child(err.clone());
         }
-        base.px_1().child(
+        let placeholder = self
+            .placeholder
+            .as_ref()
+            .filter(|_| !self.drawn && !self.exited)
+            .map(|p| {
+                let mut col = div()
+                    .absolute()
+                    .inset_0()
+                    .px_2()
+                    .pb_3()
+                    .bg(hsla(palette::BACKGROUND))
+                    .flex()
+                    .flex_col()
+                    .justify_end()
+                    .gap_1()
+                    .overflow_hidden()
+                    .font_family(FONT_FAMILY)
+                    .text_size(px(FONT_SIZE));
+                for (user, line) in &p.lines {
+                    col = col.child(
+                        div()
+                            .truncate()
+                            .text_color(hsla(if *user { 0x9a9a9a } else { 0x6e6e6e }))
+                            .child(if *user { format!("> {line}") } else { line.clone() }),
+                    );
+                }
+                col.child(div().pt_2().text_color(hsla(0xb0b0b0)).child(p.label.clone()))
+            });
+        base.px_1().relative().child(
             canvas(
                 move |bounds, window, _cx| {
                     bounds_cell.set(bounds);
@@ -528,6 +578,7 @@ impl Render for TerminalView {
             )
             .size_full(),
         )
+        .children(placeholder)
     }
 }
 

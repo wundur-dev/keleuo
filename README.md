@@ -65,8 +65,12 @@ Then `workbench`, `workbench ~/code/app`, `workbench --new .` or `workbench --ss
 - **Chat and Terminal views** of one session, the tabs along the bottom of the chat: Chat is
   the native view; Terminal runs the agent's own interface (`claude --resume <id>`) in a
   pseudo-terminal on the same conversation. Only one process ever drives a session: switching
-  waits for the turn to end, then ends one process before starting the other (leaving the
-  terminal sends Ctrl+C and `/exit`, then reloads the conversation). In Terminal view the
+  waits for the turn to end, then ends one process before starting the other. The view
+  switches at once: the terminal shows the last lines of the conversation and "Starting..."
+  until the interface has drawn (about 0.6 s), and Chat shows while the interface exits
+  behind it (Ctrl+C, then `/exit`); a message sent meanwhile goes once it has, and the next
+  stream process starts as soon as the terminal has closed. `WORKBENCH_PERF=1` prints each
+  step of a switch. In Terminal view the
   window follows the session's file, so subagents, edits (a strip of changed files), tokens
   and the status dot keep working. Each session remembers its view; "New sessions open in"
   on the strip sets the default. Hidden for backends without a terminal interface.

@@ -142,3 +142,28 @@ pub fn first_frame(window: &mut gpui_kit::Window) {
         }
     });
 }
+
+thread_local! {
+    /// When the current Chat or Terminal switch began.
+    static SWITCH: RefCell<Option<Instant>> = const { RefCell::new(None) };
+}
+
+/// With `WORKBENCH_PERF=1`: a Chat or Terminal switch starts now (the click).
+pub fn switch_begin(what: &str) {
+    if enabled() {
+        SWITCH.with(|s| *s.borrow_mut() = Some(Instant::now()));
+        eprintln!("workbench: switch {what}: begin");
+    }
+}
+
+/// A step of the current switch, with the time since its click.
+pub fn switch_step(what: &str) {
+    if !enabled() {
+        return;
+    }
+    SWITCH.with(|s| {
+        if let Some(start) = *s.borrow() {
+            eprintln!("workbench: switch   {what}: +{:.0} ms", start.elapsed().as_secs_f64() * 1000.0);
+        }
+    });
+}
