@@ -611,7 +611,9 @@ impl AgentSession {
             for _ in 0..(modes.len() + 2) {
                 let (pty, done) = view.update(cx, |v, _| {
                     let screen = v.screen_text();
-                    let footer: String = screen.lines().rev().take(4).collect::<Vec<_>>().join("\n");
+                    // The interface's last lines with text (a short conversation leaves the
+                    // screen's last rows blank, and its status line higher up).
+                    let footer: String = screen.lines().rev().filter(|l| !l.trim().is_empty()).take(4).collect::<Vec<_>>().join("\n");
                     let shown = if want.is_empty() { !labels.iter().any(|l| footer.contains(l.as_str())) } else { footer.contains(want.as_str()) };
                     (v.pty.clone(), shown)
                 });
