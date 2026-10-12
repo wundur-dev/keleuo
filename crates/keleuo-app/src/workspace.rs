@@ -241,6 +241,7 @@ impl Workspace {
                 ChatPanelEvent::OpenDiff(path) => ws.open_diff(path.clone(), None, window, cx),
                 ChatPanelEvent::NewSession => cx.emit(WorkspaceEvent::NewSession),
                 ChatPanelEvent::OpenAgent(id) => ws.open_agent(id.clone(), window, cx),
+                ChatPanelEvent::OpenWeb(url) => ws.open_web(url.clone(), window, cx),
                 ChatPanelEvent::Closed | ChatPanelEvent::Activated => {}
             },
         ));
@@ -669,6 +670,7 @@ impl Workspace {
                 ChatPanelEvent::OpenFile(path, line) => ws.open(path.clone(), *line, false, true, window, cx),
                 ChatPanelEvent::OpenDiff(path) => ws.open_diff(path.clone(), None, window, cx),
                 ChatPanelEvent::OpenAgent(agent) => ws.open_agent(agent.clone(), window, cx),
+                ChatPanelEvent::OpenWeb(url) => ws.open_web(url.clone(), window, cx),
                 ChatPanelEvent::NewSession => cx.emit(WorkspaceEvent::NewSession),
                 ChatPanelEvent::Activated => ws.touch_code(panel.entity_id()),
                 ChatPanelEvent::Closed => {
@@ -693,6 +695,7 @@ impl Workspace {
                 DocEvent::OpenLink(path, line) => {
                     ws.open(path.clone(), *line, false, true, window, cx)
                 }
+                DocEvent::OpenWeb(url) => ws.open_web(url.clone(), window, cx),
                 DocEvent::Changed => cx.notify(),
                 DocEvent::Activated => {
                     ws.touch_code(doc.entity_id());
@@ -778,6 +781,11 @@ impl Workspace {
             .char_indices()
             .nth(column)
             .map_or(line.len(), |(i, _)| i);
+        // A web address (a dev server's, say): the Web panel.
+        if let Some(url) = keleuo_core::web::web_link_at(line, at) {
+            self.open_web(url, window, cx);
+            return;
+        }
         let index = self.doc_ctx.index.borrow().clone();
         let Some(link) = index
             .find_links(line)

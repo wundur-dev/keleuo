@@ -40,6 +40,8 @@ enum Body {
 pub enum DocEvent {
     /// A link or a definition elsewhere: open it (through the window, for Back and Forward).
     OpenLink(PathBuf, Option<u32>),
+    /// A web page: show it in the Web panel.
+    OpenWeb(String),
     /// The title (dirty mark) changed.
     Changed,
     /// The tab was closed.
@@ -465,11 +467,15 @@ impl DocPanel {
                         div().px_4().py_2().max_w(px(860.)).child(
                             TextView::markdown(("md", id), md)
                                 .selectable(true)
-                                .on_link_click(move |url, _, _, cx| {
+                                .on_link_click(move |url, ev, _, cx| {
                                     if let Some((path, line)) = links::parse_url(url) {
                                         let _ = me.update(cx, |_, cx| {
                                             cx.emit(DocEvent::OpenLink(path, line))
                                         });
+                                    } else if keleuo_core::web::is_web_link(url) && !ev.modifiers().platform {
+                                        // In the Web panel; Cmd+click: the browser.
+                                        let url = url.to_string();
+                                        let _ = me.update(cx, |_, cx| cx.emit(DocEvent::OpenWeb(url)));
                                     } else {
                                         cx.open_url(url);
                                     }

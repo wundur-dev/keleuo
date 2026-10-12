@@ -47,6 +47,33 @@ fn is_local(text: &str) -> bool {
     })
 }
 
+/// A link that is a web page (http or https): opened in the Web panel rather than handed to
+/// the system.
+pub fn is_web_link(url: &str) -> bool {
+    let lower = url.trim().to_ascii_lowercase();
+    lower.starts_with("http://") || lower.starts_with("https://")
+}
+
+/// The web address in `line` that covers byte `at` (as in a terminal row), if any: from its
+/// scheme to the first space, quote or bracket, without a trailing full stop or comma.
+pub fn web_link_at(line: &str, at: usize) -> Option<String> {
+    let mut from = 0;
+    while let Some(i) = line[from..].find("http").map(|i| from + i) {
+        let rest = &line[i..];
+        if rest.starts_with("http://") || rest.starts_with("https://") {
+            let len = rest.find(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '<' | '>' | ')' | ']' | '`')).unwrap_or(rest.len());
+            let url = rest[..len].trim_end_matches(['.', ',', ';', ':']);
+            if i <= at && at < i + url.len() {
+                return Some(url.to_string());
+            }
+            from = i + len.max(1);
+        } else {
+            from = i + 4;
+        }
+    }
+    None
+}
+
 /// A short name for a URL, for a tab before the page has a title: its host (with the port),
 /// else the file name, else the URL.
 pub fn short_name(url: &str) -> String {
@@ -60,6 +87,15 @@ pub fn short_name(url: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn web_links_in_a_line() {
+        let line = "Serving at http://localhost:3000/app, see (https://example.com).";
+        assert_eq!(web_link_at(line, 15).as_deref(), Some("http://localhost:3000/app"));
+        assert_eq!(web_link_at(line, 50).as_deref(), Some("https://example.com"));
+        assert_eq!(web_link_at(line, 2), None);
+        assert!(is_web_link("HTTPS://x.y") && !is_web_link("file:///a") && !is_web_link("mailto:a@b"));
+    }
+
     use super::*;
 
     fn n(s: &str) -> Option<String> {

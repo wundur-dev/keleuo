@@ -38,6 +38,8 @@ pub enum ChatPanelEvent {
     Activated,
     /// Watch a subagent (by its tool call id) in its own docked panel.
     OpenAgent(String),
+    /// Show a web page in the Web panel.
+    OpenWeb(String),
 }
 
 pub struct ChatPanel {
@@ -532,9 +534,13 @@ impl ChatPanel {
                             }),
                     )
             })
-            .on_link_click(move |url, _, _, cx| {
+            .on_link_click(move |url, ev, _, cx| {
                 if let Some((path, line)) = links::parse_url(url) {
                     let _ = entity.update(cx, |p, cx| p.open(path, line, cx));
+                } else if keleuo_core::web::is_web_link(url) && !ev.modifiers().platform {
+                    // A web page opens in the Web panel; Cmd+click hands it to the browser.
+                    let url = url.to_string();
+                    let _ = entity.update(cx, |_, cx| cx.emit(ChatPanelEvent::OpenWeb(url)));
                 } else {
                     cx.open_url(url);
                 }
