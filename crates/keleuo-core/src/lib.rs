@@ -13,7 +13,8 @@
 //!   program an agent runs goes through it;
 //! - [`tabs`]: automatic and user-given tab names;
 //! - [`links`]: `path:line` references in text, resolved to project files;
-//! - [`symbols`]: a quick definition index for go to definition and outlines.
+//! - [`symbols`]: a quick definition index for go to definition and outlines;
+//! - [`web`]: what an address typed in the Web panel means.
 
 pub mod agent;
 pub mod backends;
@@ -28,6 +29,7 @@ pub mod settings;
 pub mod skills;
 pub mod symbols;
 pub mod tabs;
+pub mod web;
 
 /// An environment setting `KELEUO_<name>`, or one of the app's earlier names
 /// (`KELEION_<name>`, `WORKBENCH_<name>`; accepted too).

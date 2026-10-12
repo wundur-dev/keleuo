@@ -1,8 +1,8 @@
 //! The window: one thin title bar over a dock (gpui-component's DockArea). Everything is a
 //! panel that drags into any tab group: the Files, Skills, Terminals and Claude lists,
-//! each Claude session, each open file and each terminal. The default layout is the round 2
-//! arrangement (lists on the left, Claude, then code); "Reset layout" brings it back, and the
-//! arrangement is saved per folder.
+//! each Claude session, each open file, each terminal and each web page. The default layout
+//! is the round 2 arrangement (lists on the left, Claude, then code); "Reset layout" brings it
+//! back, and the arrangement is saved per folder.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -30,6 +30,7 @@ use crate::file_tree::{FileTree, FileTreeEvent};
 use crate::panels::{self, doc_key, start_tab_rename, term_key};
 use crate::skills_panel::{SkillsEvent, SkillsPanel};
 use crate::terminal_view::{TerminalEvent, TerminalView};
+use crate::web_panel::{WebEvent, WebPanel};
 
 /// Bumped when the saved layout format changes; older files are ignored.
 const LAYOUT_VERSION: usize = 4;
@@ -51,6 +52,7 @@ enum Made {
     Doc(Entity<DocPanel>),
     Terminal(Entity<TerminalView>),
     Agent(Entity<ChatPanel>),
+    Web(Entity<WebPanel>),
 }
 
 /// Factories by dock area, so the global panel registry can find the right window.
@@ -118,6 +120,16 @@ pub fn register_panels(cx: &mut App) {
         f.made.borrow_mut().push(Made::Agent(view.clone()));
         panel_handle(view)
     });
+    register_panel(cx, "Web", |ctx, window, cx| {
+        let f = factory(&ctx, cx).expect("a workspace for this dock");
+        let url = match ctx.info() {
+            PanelInfo::Panel(v) => v.get("url").and_then(|u| u.as_str()).unwrap_or_default().to_string(),
+            _ => String::new(),
+        };
+        let view = cx.new(|cx| WebPanel::new(url, window, cx));
+        f.made.borrow_mut().push(Made::Web(view.clone()));
+        panel_handle(view)
+    });
 }
 
 pub enum WorkspaceEvent {
@@ -148,6 +160,7 @@ pub struct Workspace {
     docs: Vec<Entity<DocPanel>>,
     /// Docked views of subagents, one per subagent watched.
     agent_views: Vec<Entity<ChatPanel>>,
+    webs: Vec<Entity<WebPanel>>,
     doc_ctx: DocContext,
     /// Docs and terminals, most recently shown first: where new ones open.
     recent_code: Vec<EntityId>,
@@ -288,6 +301,7 @@ impl Workspace {
             focus: cx.focus_handle(),
             panel_subs: HashMap::new(),
             agent_views: Vec::new(),
+            webs: Vec::new(),
             _watch: watch,
             _subs: subs,
         };
@@ -458,6 +472,7 @@ impl Workspace {
                 Made::Doc(doc) => self.adopt_doc(doc, window, cx),
                 Made::Terminal(view) => self.adopt_terminal(view, window, cx),
                 Made::Agent(view) => self.adopt_agent(view, window, cx),
+                Made::Web(view) => self.adopt_web(view, window, cx),
             }
         }
         if !self.in_dock(PanelId::from(self.claude.entity_id()), cx) {
@@ -908,6 +923,43 @@ impl Workspace {
             })
     }
 
+    // ----- web pages -----
+
+    fn adopt_web(&mut self, view: Entity<WebPanel>, window: &mut Window, cx: &mut Context<Self>) {
+        let id = view.entity_id();
+        let sub = cx.subscribe_in(&view, window, |ws, view, ev: &WebEvent, window, cx| match ev {
+            WebEvent::Activated => ws.touch_code(view.entity_id()),
+            // The address is saved with the layout.
+            WebEvent::Changed => {
+                ws.schedule_save(window, cx);
+                cx.notify();
+            }
+            WebEvent::Closed => {
+                ws.webs.retain(|w| w != view);
+                ws.panel_subs.remove(&view.entity_id());
+                cx.notify();
+            }
+        });
+        self.panel_subs.insert(id, vec![sub]);
+        self.touch_code(id);
+        self.webs.push(view);
+    }
+
+    /// A web page among the files and terminals; with no address, the address field waits for
+    /// one.
+    pub fn open_web(&mut self, url: String, window: &mut Window, cx: &mut Context<Self>) {
+        let empty = url.trim().is_empty();
+        let view = cx.new(|cx| WebPanel::new(url, window, cx));
+        self.adopt_web(view.clone(), window, cx);
+        self.place_code(panel_handle(view.clone()), window, cx);
+        if empty {
+            view.update(cx, |v, cx| v.focus_address(window, cx));
+        } else {
+            let handle = view.read(cx).focus.clone();
+            window.focus(&handle, cx);
+        }
+    }
+
     // ----- background work -----
 
     /// Outside changes (terminal, other editors): reload open files, re-list the tree.
@@ -1102,6 +1154,13 @@ impl Workspace {
             .filter(|t| t.read(cx).focus.contains_focused(window, cx))
         {
             self.dock.update(cx, |a, cx| a.remove_panel(t, window, cx));
+        } else if let Some(w) = self
+            .webs
+            .iter()
+            .find(|w| w.read(cx).focus.contains_focused(window, cx))
+            .cloned()
+        {
+            self.dock.update(cx, |a, cx| a.remove_panel(w, window, cx));
         }
     }
 
@@ -1160,6 +1219,7 @@ impl Workspace {
                 self.open(path, None, false, false, window, cx);
             }
             "term" => self.new_terminal(window, cx),
+            "web" => self.open_web(arg.to_string(), window, cx),
             "type" => {
                 let text = arg.replace("\\n", "\r");
                 if let Some(t) = self
@@ -1453,6 +1513,7 @@ impl Render for Workspace {
             .on_action(cx.listener(|ws, _: &ResetLayout, w, cx| ws.reset_layout(w, cx)))
             .on_action(cx.listener(|ws, _: &NewTerminal, w, cx| ws.new_terminal(w, cx)))
             .on_action(cx.listener(|ws, _: &AskClaude, w, cx| ws.focus_claude(w, cx)))
+            .on_action(cx.listener(|ws, _: &OpenWebPage, w, cx| ws.open_web(String::new(), w, cx)))
             .child(
                 div()
                     .flex_1()

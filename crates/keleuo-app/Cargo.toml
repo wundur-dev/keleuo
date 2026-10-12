@@ -28,6 +28,8 @@ alacritty_terminal = "0.26.0"
 async-channel = "2"
 libc = "0.2"
 lsp-types = { version = "0.97", features = ["proposed"] }
+# The system web view (WKWebView on macOS) for the Web panel.
+wry = { version = "0.57", default-features = false, features = ["devtools"] }
 
 [dev-dependencies]
 # The same gpui-kit with its headless UI test harness (drags, clicks, element queries).

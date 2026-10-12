@@ -43,6 +43,7 @@ mod shell;
 mod skills_panel;
 mod terminal_view;
 mod theme;
+mod web_panel;
 mod workspace;
 
 use actions::*;

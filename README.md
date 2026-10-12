@@ -79,6 +79,15 @@ Then `keleuo`, `keleuo ~/code/app`, `keleuo --new .` or `keleuo --ssh dev:/srv/a
 - **Session ids**: the first 8 characters next to each session in the list and the browser;
   the whole id in the tooltip, a click copies it.
 - **New terminals** (Cmd+T, "+" in Terminals) open as a tab next to the agent's tab.
+- **Web pages** (File > Open Web Page…): a tab among the files and terminals showing a page in
+  the system web view (WKWebView, the Safari engine; no bundled browser). Back, Forward,
+  Reload, the address (Enter loads; `3000` or `localhost:3000` is `http://localhost:3000`, a
+  name without a scheme gets `https://`) and Open in the browser. Cmd+L goes to the address;
+  a click on the page gives it the keys (Cmd+C, V, X, A, Z work in it). The page is a native
+  view over the window: it follows its tab and hides when the tab is not shown, but gpui's
+  menus, tooltips and notifications cannot draw over it (the folder rename dialog and the
+  peeking session list hide it meanwhile). Right-click > Inspect Element opens Web Inspector.
+  WebKit runs pages in its own processes; the About window counts them under Web pages.
 - **A session open elsewhere is never continued here as it is.** It counts as open when a
   `claude` process names it on its command line (`--resume`, `-r`, `--session-id`; found
   wherever that process runs), when a `claude` without one works in the folder (its folder

@@ -1311,6 +1311,8 @@ impl Render for Shell {
             Some(self.render_list(cx))
         };
         let folder_rename = self.render_folder_rename(cx);
+        // Web pages are native views over the window: they hide while an overlay is open.
+        crate::web_panel::set_covered(self.folder_rename.is_some() || (self.folded && self.peek && !self.tabs.is_empty()));
         // The folded list, peeking out over the content until the pointer leaves it.
         let peek = (self.folded && self.peek && !self.tabs.is_empty()).then(|| {
             div()

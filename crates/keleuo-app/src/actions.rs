@@ -33,6 +33,15 @@ actions!(
         AppearanceLight,
         AppearanceDark,
         CopyConversation,
+        OpenWebPage,
+        // In a web page (see web_panel.rs).
+        FocusAddress,
+        PageCopy,
+        PageCut,
+        PagePaste,
+        PageSelectAll,
+        PageUndo,
+        PageRedo,
     ]
 );
 
@@ -59,6 +68,14 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-shift-tab", PrevSession, None),
         KeyBinding::new("ctrl--", GoBack, None),
         KeyBinding::new("ctrl-shift--", GoForward, None),
+        // In a web panel, over the window's own (Cmd+L is Ask Claude elsewhere).
+        KeyBinding::new("cmd-l", FocusAddress, Some("WebPanel")),
+        KeyBinding::new("cmd-c", PageCopy, Some("WebPanel")),
+        KeyBinding::new("cmd-x", PageCut, Some("WebPanel")),
+        KeyBinding::new("cmd-v", PagePaste, Some("WebPanel")),
+        KeyBinding::new("cmd-a", PageSelectAll, Some("WebPanel")),
+        KeyBinding::new("cmd-z", PageUndo, Some("WebPanel")),
+        KeyBinding::new("cmd-shift-z", PageRedo, Some("WebPanel")),
     ]);
 }
 
@@ -81,6 +98,7 @@ pub fn menus() -> Vec<Menu> {
             MenuItem::action("Rename Folder…", RenameFolder),
             MenuItem::action("Copy Conversation", CopyConversation),
             MenuItem::action("New Terminal", NewTerminal),
+            MenuItem::action("Open Web Page…", OpenWebPage),
         ]),
         Menu::new("View").items([
             MenuItem::action("Session List", ToggleSessions),

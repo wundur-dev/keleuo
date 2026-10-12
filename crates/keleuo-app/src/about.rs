@@ -74,7 +74,9 @@ impl About {
                 return;
             }
             loop {
-                let usage = cx.background_spawn(async { procstats::usage() }).await;
+                // The web views name their WebKit processes on this thread.
+                let web = crate::web_panel::webkit_pids();
+                let usage = cx.background_spawn(async move { procstats::usage(&web) }).await;
                 let alive = this.update(cx, |a, cx| {
                     a.samples.push_back((Instant::now(), usage));
                     while a.samples.len() > HISTORY {
@@ -186,6 +188,7 @@ impl About {
         let theme = cx.theme();
         let (fg, muted, border, accent, agents_color) =
             (theme.foreground, theme.muted_foreground, theme.border, theme.ring, theme.magenta);
+        let web_color = theme.cyan;
         let Some(now) = self.latest() else {
             return div().text_sm().text_color(muted).child("Measuring…").into_any_element();
         };
@@ -228,6 +231,16 @@ impl About {
                         procstats::bytes(now.children_footprint),
                         format!("{} process{}, separate programs", now.children, if now.children == 1 { "" } else { "es" }),
                         agents_color,
+                    ))
+                    .child(big(
+                        "Web pages",
+                        procstats::bytes(now.web_footprint),
+                        if now.web == 0 {
+                            "None open".to_string()
+                        } else {
+                            format!("{} WebKit process{}", now.web, if now.web == 1 { "" } else { "es" })
+                        },
+                        web_color,
                     )),
             )
             .child(
@@ -247,7 +260,7 @@ impl About {
                     .text_xs()
                     .line_height(rems(1.4))
                     .text_color(muted)
-                    .child("Memory is the physical footprint, the figure Activity Monitor shows. The agents' interfaces (Claude Code is a Node.js program) and the commands they run are counted apart: they would use the same in a terminal."),
+                    .child("Memory is the physical footprint, the figure Activity Monitor shows. The agents' interfaces (Claude Code is a Node.js program) and the commands they run are counted apart: they would use the same in a terminal. Web pages run in WebKit's own processes, outside Keleuo."),
             )
             .into_any_element()
     }

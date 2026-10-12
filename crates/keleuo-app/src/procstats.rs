@@ -15,6 +15,12 @@ pub struct Usage {
     pub children: u32,
     /// Their physical footprint together, in bytes.
     pub children_footprint: u64,
+    /// The WebKit processes serving this app's web pages (the pages, their drawing and, when
+    /// it can be told, their networking). macOS starts them as system services, not as
+    /// children, so they are counted apart.
+    pub web: u32,
+    /// Their physical footprint together, in bytes.
+    pub web_footprint: u64,
 }
 
 /// Facts about the machine, read once.
@@ -89,7 +95,7 @@ mod imp {
         }
     }
 
-    pub fn usage() -> Usage {
+    pub fn usage(web: &[i32]) -> Usage {
         let me = std::process::id() as i32;
         let mut u = Usage::default();
         if let Some(r) = rusage(me) {
@@ -110,7 +116,72 @@ mod imp {
             }
             queue.extend(child_pids(pid));
         }
+        for pid in web_pids(me, web) {
+            if let Some(r) = rusage(pid) {
+                u.web += 1;
+                u.web_footprint += r.ri_phys_footprint;
+            }
+        }
         u
+    }
+
+    type Responsible = unsafe extern "C" fn(libc::pid_t) -> libc::pid_t;
+
+    /// The process macOS holds responsible for `pid` (the app an XPC service works for), from
+    /// the system library's `responsibility_get_pid_responsible_for_pid`. Not public API, so
+    /// looked up when running: without it, no figure rather than a failure to start.
+    fn responsible_for(pid: i32) -> Option<i32> {
+        static FUNC: std::sync::OnceLock<Option<Responsible>> = std::sync::OnceLock::new();
+        let f = *FUNC.get_or_init(|| {
+            // SAFETY: a lookup by a NUL-terminated name in the loaded images.
+            let p = unsafe { libc::dlsym(libc::RTLD_DEFAULT, c"responsibility_get_pid_responsible_for_pid".as_ptr()) };
+            // SAFETY: the symbol has this signature (pid in, pid out) since macOS 10.14.
+            (!p.is_null()).then(|| unsafe { std::mem::transmute::<*mut libc::c_void, Responsible>(p) })
+        });
+        // SAFETY: the function only reads the kernel's bookkeeping for `pid`.
+        f.map(|f| unsafe { f(pid) }).filter(|r| *r > 0)
+    }
+
+    fn all_pids() -> Vec<i32> {
+        let mut buf = vec![0i32; 2048];
+        loop {
+            let bytes = (buf.len() * 4) as i32;
+            // SAFETY: the buffer holds `bytes` bytes.
+            let n = unsafe { libc::proc_listallpids(buf.as_mut_ptr() as *mut libc::c_void, bytes) };
+            if n <= 0 {
+                return Vec::new();
+            }
+            let n = n as usize;
+            if n < buf.len() {
+                buf.truncate(n);
+                return buf.into_iter().filter(|p| *p > 0).collect();
+            }
+            buf.resize(buf.len() * 2, 0);
+        }
+    }
+
+    fn name(pid: i32) -> String {
+        let mut buf = [0u8; 256];
+        // SAFETY: the buffer is as long as the size given.
+        let n = unsafe { libc::proc_name(pid, buf.as_mut_ptr() as *mut libc::c_void, buf.len() as u32) };
+        if n <= 0 { String::new() } else { String::from_utf8_lossy(&buf[..n as usize]).into_owned() }
+    }
+
+    /// WebKit's processes (com.apple.WebKit.WebContent, .GPU, .Networking) working for `me`:
+    /// those the web views named (`known`), and, when macOS holds this app responsible for
+    /// itself (opened as an app; started from a terminal, the terminal is held responsible
+    /// for it and for everything WebKit runs for it), every WebKit process it holds this app
+    /// responsible for.
+    fn web_pids(me: i32, known: &[i32]) -> Vec<i32> {
+        let mut pids: Vec<i32> = known.to_vec();
+        if responsible_for(me) == Some(me) {
+            pids.extend(all_pids().into_iter().filter(|&pid| pid != me && responsible_for(pid) == Some(me)));
+        }
+        pids.sort_unstable();
+        pids.dedup();
+        // A pid that ended and was reused by something else is not counted.
+        pids.retain(|&pid| name(pid).starts_with("com.apple.WebKit."));
+        pids
     }
 
     fn sysctl_string(name: &str) -> Option<String> {
@@ -152,7 +223,7 @@ mod imp {
 #[cfg(not(target_os = "macos"))]
 mod imp {
     use super::{Machine, Usage};
-    pub fn usage() -> Usage {
+    pub fn usage(_web: &[i32]) -> Usage {
         Usage::default()
     }
     pub fn machine() -> Machine {
@@ -175,7 +246,7 @@ mod tests {
 
     #[test]
     fn reads_this_process() {
-        let u = usage();
+        let u = usage(&[]);
         if cfg!(target_os = "macos") {
             assert!(u.footprint > 0 && u.threads > 0, "{u:?}");
             let m = machine();
@@ -188,15 +259,23 @@ mod tests {
         if !cfg!(target_os = "macos") {
             return;
         }
-        let before = usage().children;
+        let before = usage(&[]).children;
         let mut kids: Vec<_> = (0..3).map(|_| std::process::Command::new("sleep").arg("5").spawn().unwrap()).collect();
-        let during = usage();
+        let during = usage(&[]);
         for k in &mut kids {
             let _ = k.kill();
             let _ = k.wait();
         }
         assert!(during.children >= before + 3, "{before} then {during:?}");
         assert!(during.children_footprint > 0);
+    }
+
+    #[test]
+    fn no_web_pages_without_web_views() {
+        // This test process shows no web page, so WebKit works for none of it; a pid that is
+        // not WebKit's (this one) is not counted as one.
+        let u = usage(&[std::process::id() as i32]);
+        assert_eq!((u.web, u.web_footprint), (0, 0), "{u:?}");
     }
 
     #[test]

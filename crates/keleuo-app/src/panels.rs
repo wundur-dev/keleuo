@@ -1,7 +1,7 @@
 //! Everything in the window is a dock panel: the Files, Skills, Terminals and Agent (subagents)
-//! lists, the session's chat, every open file and every terminal. This module gives each the
-//! two dock traits (behavior from gpui-base, presentation from gpui-component), the names
-//! shown on their tabs, and in-place renaming of a tab.
+//! lists, the session's chat, every open file, every terminal and every web page. This module
+//! gives each the two dock traits (behavior from gpui-base, presentation from gpui-component),
+//! the names shown on their tabs, and in-place renaming of a tab.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -21,6 +21,7 @@ use crate::doc_panel::{DocEvent, DocPanel};
 use crate::file_tree::FileTree;
 use crate::skills_panel::SkillsPanel;
 use crate::terminal_view::{TerminalEvent, TerminalView};
+use crate::web_panel::{WebEvent, WebPanel};
 
 /// The tab names people gave, shared by every window.
 pub struct Names(pub Rc<RefCell<NameStore>>);
@@ -438,6 +439,42 @@ impl Panel for TerminalView {
         cx: &mut Context<Self>,
     ) -> PopupMenu {
         rename_menu(menu, term_key(self), self.auto_name(), cx)
+    }
+    fn inner_padding(&self, _: &App) -> bool {
+        false
+    }
+}
+
+impl EventEmitter<PanelEvent> for WebPanel {}
+
+impl BasePanel for WebPanel {
+    fn panel_name(&self) -> &'static str {
+        "Web"
+    }
+    fn on_removed(&mut self, _: &mut Window, cx: &mut Context<Self>) {
+        self.closed();
+        cx.emit(WebEvent::Closed);
+    }
+    fn set_active(&mut self, active: bool, _: &mut Window, cx: &mut Context<Self>) {
+        if active {
+            cx.emit(WebEvent::Activated);
+        }
+    }
+    fn dump(&self, _: &App) -> PanelState {
+        let mut s = PanelState::new(self.panel_name());
+        s.info = PanelInfo::panel(serde_json::json!({ "url": self.url }));
+        s
+    }
+}
+
+impl Panel for WebPanel {
+    fn title(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .flex()
+            .items_center()
+            .gap_1()
+            .child(Icon::new(IconName::Globe).xsmall())
+            .child(div().max_w(px(180.)).truncate().child(self.auto_name()))
     }
     fn inner_padding(&self, _: &App) -> bool {
         false
