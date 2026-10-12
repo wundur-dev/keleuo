@@ -4,6 +4,9 @@
 //! for an edit, `type: "create"` plus `content` for a new file). Before the result arrives, or
 //! when it carries no patch, the diff is computed from the tool input (`old_string` and
 //! `new_string`).
+//!
+//! The code viewer shows what a session changed in a file as a whole-file diff: the file before
+//! the session ([`undo`] of its changes) against the file now ([`file_rows`]).
 
 use std::path::PathBuf;
 
@@ -69,6 +72,11 @@ pub fn from_tool(name: &str, input: &Value, result: Option<&Value>) -> Option<Fi
     }
     if let Some(diff) = result.and_then(from_result) {
         return Some(diff);
+    }
+    // A Write over an existing file that changed nothing: no diff (its input alone would read
+    // as a new file).
+    if result.and_then(|r| r.get("type")).and_then(Value::as_str) == Some("update") {
+        return None;
     }
     from_input(name, input)
 }
@@ -200,6 +208,112 @@ pub fn text_hunk(old: &str, new: &str) -> Hunk {
     }
 }
 
+/// One row of a whole-file diff: a line of the file now, or a removed line where it was.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DiffRow {
+    pub kind: LineKind,
+    /// Line number in the old file (1-based), for context and removed lines.
+    pub old: Option<usize>,
+    /// Line number in the file now (1-based), for context and added lines.
+    pub new: Option<usize>,
+    pub text: String,
+}
+
+/// The whole of `new` against `old`, line by line, unchanged lines included. A very large
+/// diff gives up on finding the smallest one after a second rather than stalling.
+pub fn file_rows(old: &str, new: &str) -> Vec<DiffRow> {
+    let diff = similar::TextDiff::configure()
+        .timeout(std::time::Duration::from_secs(1))
+        .diff_lines(old, new);
+    diff.iter_all_changes()
+        .map(|c| DiffRow {
+            kind: match c.tag() {
+                similar::ChangeTag::Equal => LineKind::Context,
+                similar::ChangeTag::Insert => LineKind::Added,
+                similar::ChangeTag::Delete => LineKind::Removed,
+            },
+            old: c.old_index().map(|i| i + 1),
+            new: c.new_index().map(|i| i + 1),
+            text: c.value().trim_end_matches(['\n', '\r']).to_string(),
+        })
+        .collect()
+}
+
+/// What `changes` (oldest first) did to a file, given its content now: the whole file as rows.
+/// Line endings are compared as `\n`.
+pub fn session_rows(current: &str, changes: &[FileDiff]) -> Vec<DiffRow> {
+    let current = current.replace("\r\n", "\n");
+    file_rows(&undo(&current, changes), &current)
+}
+
+/// Where each run of changed rows starts, to step from change to change.
+pub fn change_starts(rows: &[DiffRow]) -> Vec<usize> {
+    (0..rows.len())
+        .filter(|&i| {
+            rows[i].kind != LineKind::Context && (i == 0 || rows[i - 1].kind == LineKind::Context)
+        })
+        .collect()
+}
+
+/// The file as it was before `changes` (oldest first), given its content now: each change is
+/// undone, newest first, by finding its new lines (near where the change says they are) and
+/// putting its old lines back. A change that cannot be found (the file was changed some other
+/// way since) is left as it is. Before a change that created the file there was nothing.
+pub fn undo(current: &str, changes: &[FileDiff]) -> String {
+    let mut lines: Vec<&str> = current.lines().collect();
+    for change in changes.iter().rev() {
+        if change.created {
+            return String::new();
+        }
+        for hunk in change.hunks.iter().rev() {
+            let new: Vec<&str> = hunk
+                .lines
+                .iter()
+                .filter(|l| l.kind != LineKind::Removed)
+                .map(|l| l.text.as_str())
+                .collect();
+            let old: Vec<&str> = hunk
+                .lines
+                .iter()
+                .filter(|l| l.kind != LineKind::Added)
+                .map(|l| l.text.as_str())
+                .collect();
+            if new == old {
+                continue;
+            }
+            if let Some(at) = find_block(&lines, &new, hunk.new_start.checked_sub(1)) {
+                lines.splice(at..at + new.len(), old);
+            }
+        }
+    }
+    let mut text = lines.join("\n");
+    if !text.is_empty() && current.ends_with('\n') {
+        text.push('\n');
+    }
+    text
+}
+
+/// Where `block` occurs in `lines`, the occurrence nearest `hint` (0-based). An empty block (a
+/// deletion with no context around it) can only be placed at the hint.
+fn find_block(lines: &[&str], block: &[&str], hint: Option<usize>) -> Option<usize> {
+    if block.is_empty() {
+        return hint.filter(|&h| h <= lines.len());
+    }
+    let hint = hint.unwrap_or(0);
+    if block.len() > lines.len() {
+        return None;
+    }
+    let matches = |at: usize| {
+        lines[at..at + block.len()]
+            .iter()
+            .map(|l| l.trim_end_matches('\r'))
+            .eq(block.iter().copied())
+    };
+    (0..=lines.len() - block.len())
+        .filter(|&at| matches(at))
+        .min_by_key(|&at| at.abs_diff(hint))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -265,5 +379,112 @@ mod tests {
     #[test]
     fn other_tools_have_no_diff() {
         assert_eq!(from_tool("Read", &json!({"file_path": "/x"}), None), None);
+    }
+
+    fn edit(path: &str, old: &str, new: &str) -> FileDiff {
+        from_input(
+            "Edit",
+            &json!({"file_path": path, "old_string": old, "new_string": new}),
+        )
+        .unwrap()
+    }
+
+    fn kinds(rows: &[DiffRow]) -> Vec<(LineKind, Option<usize>, Option<usize>, &str)> {
+        rows.iter()
+            .map(|r| (r.kind, r.old, r.new, r.text.as_str()))
+            .collect()
+    }
+
+    #[test]
+    fn whole_file_rows_number_both_sides() {
+        let rows = file_rows("a\nb\nc\n", "a\nB\nc\nd\n");
+        assert_eq!(
+            kinds(&rows),
+            [
+                (LineKind::Context, Some(1), Some(1), "a"),
+                (LineKind::Removed, Some(2), None, "b"),
+                (LineKind::Added, None, Some(2), "B"),
+                (LineKind::Context, Some(3), Some(3), "c"),
+                (LineKind::Added, None, Some(4), "d"),
+            ]
+        );
+        assert_eq!(change_starts(&rows), [1, 4]);
+    }
+
+    #[test]
+    fn undo_structured_patches_newest_first() {
+        // Two edits as Claude Code reports them: line numbers in the file after each one.
+        let first = from_result(
+            &json!({"filePath": "/p/a", "structuredPatch": [{"oldStart": 1, "newStart": 1,
+            "lines": [" one", "-two", "+TWO", " three"]}]}),
+        )
+        .unwrap();
+        let second = from_result(
+            &json!({"filePath": "/p/a", "structuredPatch": [{"oldStart": 3, "newStart": 3,
+            "lines": [" three", "+three and a half", " four"]}]}),
+        )
+        .unwrap();
+        let now = "one\nTWO\nthree\nthree and a half\nfour\n";
+        assert_eq!(
+            undo(now, &[first.clone(), second.clone()]),
+            "one\ntwo\nthree\nfour\n"
+        );
+        let rows = session_rows(now, &[first, second]);
+        assert_eq!(rows.iter().filter(|r| r.kind == LineKind::Added).count(), 2);
+        assert_eq!(
+            rows.iter().filter(|r| r.kind == LineKind::Removed).count(),
+            1
+        );
+        assert_eq!(
+            rows.iter().filter(|r| r.kind == LineKind::Context).count(),
+            3
+        );
+    }
+
+    #[test]
+    fn undo_input_edits_without_line_numbers() {
+        let changes = [
+            edit("/p/a", "let x = 1;", "let x = 2;"),
+            edit("/p/a", "fn f() {}", "fn f() {\n    g();\n}"),
+        ];
+        let now = "fn f() {\n    g();\n}\nlet x = 2;";
+        assert_eq!(undo(now, &changes), "fn f() {}\nlet x = 1;");
+    }
+
+    #[test]
+    fn undo_picks_the_occurrence_nearest_the_hint() {
+        let change = from_result(
+            &json!({"filePath": "/p/a", "structuredPatch": [{"oldStart": 3, "newStart": 3,
+            "lines": ["-x", "+y"]}]}),
+        )
+        .unwrap();
+        assert_eq!(undo("y\nz\ny\nz\n", &[change]), "y\nz\nx\nz\n");
+    }
+
+    #[test]
+    fn undo_skips_a_change_no_longer_there() {
+        let change = edit("/p/a", "old", "new");
+        assert_eq!(undo("changed since\n", &[change]), "changed since\n");
+    }
+
+    #[test]
+    fn created_file_was_nothing_before() {
+        let write = from_tool(
+            "Write",
+            &json!({}),
+            Some(&json!({"type": "create", "filePath": "/p/n", "content": "a\nb\n"})),
+        )
+        .unwrap();
+        let later = edit("/p/n", "b", "c");
+        let rows = session_rows("a\nc\n", &[write, later]);
+        assert!(rows.iter().all(|r| r.kind == LineKind::Added));
+        assert_eq!(rows.len(), 2);
+    }
+
+    #[test]
+    fn crlf_files_compare_by_line() {
+        let rows = session_rows("a\r\nB\r\n", &[edit("/p/a", "b", "B")]);
+        assert_eq!(kinds(&rows)[0], (LineKind::Context, Some(1), Some(1), "a"));
+        assert_eq!(change_starts(&rows), [1]);
     }
 }

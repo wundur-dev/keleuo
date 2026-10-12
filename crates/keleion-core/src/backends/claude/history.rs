@@ -208,6 +208,17 @@ fn line_events(v: &Value, mapper: &mut Mapper) -> Vec<Event> {
                 .is_some_and(|b| b.iter().any(|b| b.get("type").and_then(Value::as_str) == Some("tool_result")));
             if is_result {
                 mapper.map(stream::parse_value(v))
+            } else if super::messages::is_interruption(v) {
+                vec![Event::Interrupted]
+            } else if let Some((from, text)) = super::messages::agent_message(v) {
+                vec![Event::AgentMessage { from, text }]
+            } else if let Some((id, failed)) = super::messages::task_ended(v) {
+                // Background shell commands notify too: only subagents end here.
+                if mapper.started_agent(&id) {
+                    vec![Event::SubagentEnded { id, failed, summary: None, tokens: None, duration_ms: None }]
+                } else {
+                    Vec::new()
+                }
             } else if v.get("isCompactSummary").and_then(Value::as_bool) == Some(true) {
                 // Shown as the compaction divider, not as something the person wrote.
                 Vec::new()
@@ -487,10 +498,14 @@ pub fn follow(host: &dyn Host, path: &Path, cwd: &str, sink: &crate::agent::Sink
             agents.insert(e.name.clone(), (Tail::new(size(&agents_dir.join(&e.name)), cwd), None));
         }
     }
+    let mut live = super::live::LiveOutputs::new(host, path);
     let mut round = 0u64;
     while !stop.load(Ordering::Relaxed) {
         for v in main.lines(host, path) {
             for e in line_events(&v, &mut main.mapper) {
+                if let Some(l) = live.as_mut() {
+                    l.observe(&e);
+                }
                 sink(Message::Event(e));
             }
             if v.get("isSidechain").and_then(Value::as_bool) != Some(true) {
@@ -520,6 +535,9 @@ pub fn follow(host: &dyn Host, path: &Path, cwd: &str, sink: &crate::agent::Sink
                 let Some(parent) = entry.1.clone() else { continue };
                 for v in entry.0.lines(host, &agents_dir.join(&e.name)) {
                     for ev in subagent_line_events(&v, &parent, &mut entry.0.mapper) {
+                        if let Some(l) = live.as_mut() {
+                            l.observe(&ev);
+                        }
                         sink(Message::Event(ev));
                     }
                     let usd = entry.0.tally.add(&v);
@@ -527,6 +545,14 @@ pub fn follow(host: &dyn Host, path: &Path, cwd: &str, sink: &crate::agent::Sink
                         sink(Message::Event(Event::CostEstimate { usd }));
                     }
                 }
+            }
+        }
+        // Running commands' output, a few times a second.
+        if round.is_multiple_of(2)
+            && let Some(l) = live.as_mut()
+        {
+            for e in l.poll(host) {
+                sink(Message::Event(e));
             }
         }
         round += 1;
@@ -789,6 +815,40 @@ mod tests {
                 .join(name),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn a_background_subagent_runs_until_its_report_comes_back() {
+        use serde_json::json;
+        use crate::conversation::{AgentStatus, Item};
+        let lines = [
+            json!({"type": "assistant", "message": {"id": "m1", "model": "claude", "content": [
+                {"type": "tool_use", "id": "toolu_a", "name": "Agent", "input": {"description": "Assess the name", "subagent_type": "general-purpose", "prompt": "..."}}]}}),
+            json!({"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_a",
+                "content": [{"type": "text", "text": "Async agent launched successfully.\nagentId: a9 (internal ID)"}]}]}}),
+            json!({"type": "user", "isMeta": true, "origin": {"kind": "peer", "from": "a9", "handback": true,
+                "body": "[Subagent hand-back] Framing. The report follows:\n  Keep the name."},
+                "message": {"role": "user", "content": "Another Claude session sent a message:\n<agent-message from=\"a9\">..."}}),
+            json!({"type": "user", "message": {"role": "user", "content":
+                "<task-notification>\n<tool-use-id>toolu_a</tool-use-id>\n<status>completed</status>\n</task-notification>"}}),
+            json!({"type": "user", "message": {"role": "user", "content":
+                "<task-notification>\n<tool-use-id>toolu_bash</tool-use-id>\n<status>completed</status>\n</task-notification>"}}),
+        ];
+        let mut chat = Conversation::new("/tmp");
+        chat.replaying = true;
+        let mut mapper = Mapper::new("/tmp");
+        mapper.history = true;
+        chat.apply_all(line_events(&lines[0], &mut mapper));
+        chat.apply_all(line_events(&lines[1], &mut mapper));
+        assert_eq!(chat.agent("toolu_a").unwrap().status, AgentStatus::Running, "launched, not done");
+        chat.apply_all(line_events(&lines[2], &mut mapper));
+        assert_eq!(chat.agent("toolu_a").unwrap().status, AgentStatus::Done);
+        assert!(matches!(chat.items.last(), Some(Item::AgentMessage { title, text, agent: Some(a), .. })
+            if title == "Assess the name" && text == "Keep the name." && a == "toolu_a"));
+        chat.apply_all(line_events(&lines[3], &mut mapper));
+        chat.apply_all(line_events(&lines[4], &mut mapper));
+        assert_eq!(chat.agents.len(), 1, "a shell task's notice is no subagent");
+        assert!(!chat.items.iter().any(|i| matches!(i, Item::User(_))), "nothing shows as the person's");
     }
 
     #[test]

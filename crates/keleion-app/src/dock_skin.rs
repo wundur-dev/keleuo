@@ -33,7 +33,7 @@ use gpui_kit::base::TestSupportExt;
 use crate::sheet_tabs::{self, Joined, Palette, StripState};
 
 /// The panels that are tools (lists beside the work) rather than documents.
-const TOOLS: [&str; 4] = ["Files", "Skills", "Agent", "Terminals"];
+const TOOLS: [&str; 3] = ["Files", "Skills", "Agent"];
 
 /// A tool group's title bar.
 pub const HEADER_HEIGHT: f32 = 26.;

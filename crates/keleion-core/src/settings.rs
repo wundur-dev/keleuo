@@ -33,6 +33,8 @@ pub fn migrate(old: &Path, new: &Path) -> PathBuf {
 pub struct Layout {
     pub sidebar_width: f32,
     pub claude_width: f32,
+    /// The tool panels (files, skills, the agent's subagents) are hidden: the default, so
+    /// the conversation has the room; Cmd+B shows them.
     pub sidebar_folded: bool,
 }
 
@@ -41,7 +43,7 @@ impl Default for Layout {
         Self {
             sidebar_width: 240.0,
             claude_width: 640.0,
-            sidebar_folded: false,
+            sidebar_folded: true,
         }
     }
 }

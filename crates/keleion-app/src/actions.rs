@@ -30,6 +30,7 @@ actions!(
         AppearanceSystem,
         AppearanceLight,
         AppearanceDark,
+        CopyConversation,
     ]
 );
 
@@ -51,6 +52,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-\\", SplitRight, None),
         KeyBinding::new("cmd-shift-\\", SplitDown, None),
         KeyBinding::new("cmd-shift-b", ToggleSessions, None),
+        KeyBinding::new("cmd-alt-c", CopyConversation, None),
         KeyBinding::new("ctrl-tab", NextSession, None),
         KeyBinding::new("ctrl-shift-tab", PrevSession, None),
         KeyBinding::new("ctrl--", GoBack, None),
@@ -70,6 +72,7 @@ pub fn menus() -> Vec<Menu> {
             MenuItem::action("New Session", NewSession),
             MenuItem::action("Close Session", CloseSession),
             MenuItem::action("Rename Session", RenameSession),
+            MenuItem::action("Copy Conversation", CopyConversation),
             MenuItem::action("New Terminal", NewTerminal),
         ]),
         Menu::new("View").items([

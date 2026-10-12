@@ -1,6 +1,9 @@
 //! One open file as a dock panel. Code opens in gpui-component's editor (tree-sitter
 //! highlighting, line numbers, undo, find); markdown opens rendered with an instant switch to
 //! the editor. Read and saved on background threads through the Host.
+//!
+//! A file the agent changed this session can also show as a diff: the whole file now, with the
+//! lines the session added and removed marked (read-only, switched from the header).
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
@@ -13,6 +16,7 @@ use gpui_kit::component::text::TextView;
 use gpui_kit::component::{ActiveTheme, WindowExt};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
+use keleion_core::diff::{self, DiffRow, FileDiff, LineKind};
 use keleion_core::files;
 use keleion_core::host::Host;
 use keleion_core::links::{self, FileIndex};
@@ -60,7 +64,24 @@ pub struct DocPanel {
     pub focus: FocusHandle,
     /// Another session in the same folder just edited this file (its name).
     edited_by: Option<String>,
+    /// What this session changed in the file, oldest first (empty when it changed nothing).
+    changes: Vec<FileDiff>,
+    /// Showing what the session changed as a diff (else the file).
+    diff_mode: bool,
+    /// The diff once computed; `None` while it is being worked out.
+    diff: Option<DiffView>,
+    /// The line to show when the diff is ready (else the first change).
+    diff_line: Option<u32>,
     _sub: Option<Subscription>,
+}
+
+/// The whole file as diff rows, and where each change starts.
+struct DiffView {
+    rows: Rc<Vec<DiffRow>>,
+    starts: Vec<usize>,
+    scroll: UniformListScrollHandle,
+    /// The change last stepped to (an index into `starts`).
+    at: usize,
 }
 
 impl EventEmitter<DocEvent> for DocPanel {}
@@ -88,6 +109,10 @@ impl DocPanel {
             opened_at: std::time::Instant::now(),
             focus: cx.focus_handle(),
             edited_by: None,
+            changes: Vec::new(),
+            diff_mode: false,
+            diff: None,
+            diff_line: None,
             _sub: None,
         };
         this.load(window, cx);
@@ -175,6 +200,7 @@ impl DocPanel {
             });
             self.saved = text;
             self.dirty = false;
+            self.compute_diff(window, cx);
             cx.emit(DocEvent::Changed);
             cx.notify();
             return;
@@ -227,6 +253,7 @@ impl DocPanel {
         if let Some(line) = self.pending_line.take() {
             self.go_to_line(line, window, cx);
         }
+        self.compute_diff(window, cx);
         let started = self.opened_at;
         window.on_next_frame(move |_, _| {
             crate::perf::record("file open to first frame", started.elapsed())
@@ -236,6 +263,7 @@ impl DocPanel {
 
     pub fn go_to_line(&mut self, line: u32, window: &mut Window, cx: &mut Context<Self>) {
         self.preview = false;
+        self.diff_mode = false;
         match &self.body {
             Body::Text(editor) => {
                 let editor = editor.clone();
@@ -284,6 +312,103 @@ impl DocPanel {
         .detach();
     }
 
+    /// What this session changed in the file (oldest first), for the diff. Without changes the
+    /// diff switch goes away; an open diff is worked out again with the next read of the file.
+    pub fn set_changes(&mut self, changes: Vec<FileDiff>, cx: &mut Context<Self>) {
+        if changes.is_empty() {
+            self.diff_mode = false;
+        }
+        self.changes = changes;
+        cx.notify();
+    }
+
+    /// Show the file as a diff of what the session changed, at `line` of the file now (else at
+    /// the first change).
+    pub fn show_diff(&mut self, line: Option<u32>, window: &mut Window, cx: &mut Context<Self>) {
+        if self.changes.is_empty() {
+            return;
+        }
+        self.diff_mode = true;
+        self.diff_line = line;
+        self.compute_diff(window, cx);
+        window.focus(&self.focus, cx);
+        cx.notify();
+    }
+
+    /// Switch between the diff and the file.
+    pub fn toggle_diff(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.diff_mode {
+            self.diff_mode = false;
+            self.focus_content(window, cx);
+            cx.notify();
+        } else {
+            self.show_diff(None, window, cx);
+        }
+    }
+
+    /// Work out the diff on a background thread, from the text in the editor.
+    fn compute_diff(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Body::Text(editor) = &self.body else {
+            return;
+        };
+        if !self.diff_mode {
+            return;
+        }
+        let text = editor.read(cx).value().to_string();
+        let changes = self.changes.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let rows = cx
+                .background_spawn(async move { diff::session_rows(&text, &changes) })
+                .await;
+            let _ = this.update(cx, |doc, cx| doc.diff_ready(rows, cx));
+        })
+        .detach();
+    }
+
+    fn diff_ready(&mut self, rows: Vec<DiffRow>, cx: &mut Context<Self>) {
+        let starts = diff::change_starts(&rows);
+        // Where to look: the asked-for line, else where it was, else the first change.
+        let scroll = self.diff.as_ref().map(|d| d.scroll.clone());
+        let target = match self.diff_line.take() {
+            Some(line) => rows.iter().position(|r| r.new == Some(line as usize)),
+            None if scroll.is_some() => None,
+            None => starts.first().copied(),
+        };
+        let scroll = scroll.unwrap_or_default();
+        if let Some(ix) = target {
+            scroll.scroll_to_item(ix, ScrollStrategy::Center);
+        }
+        let at = target
+            .and_then(|ix| starts.iter().rposition(|&s| s <= ix))
+            .unwrap_or(0);
+        self.diff = Some(DiffView {
+            rows: Rc::new(rows),
+            starts,
+            scroll,
+            at,
+        });
+        cx.notify();
+    }
+
+    /// Step to the next change (`forward`) or the one before, wrapping around.
+    fn step_change(&mut self, forward: bool, cx: &mut Context<Self>) {
+        let Some(view) = self.diff.as_mut() else {
+            return;
+        };
+        let n = view.starts.len();
+        if n == 0 {
+            return;
+        }
+        view.at = if forward {
+            (view.at + 1) % n
+        } else {
+            (view.at + n - 1) % n
+        };
+        view.scroll
+            .scroll_to_item(view.starts[view.at], ScrollStrategy::Center);
+        cx.notify();
+    }
+
     /// Markdown: switch between rendered and editor.
     pub fn toggle_preview(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.markdown {
@@ -306,6 +431,9 @@ impl DocPanel {
 
     fn render_body(&self, cx: &mut Context<Self>) -> AnyElement {
         let muted = cx.theme().muted_foreground;
+        if self.diff_mode && matches!(self.body, Body::Text(_)) {
+            return self.render_diff(cx);
+        }
         match &self.body {
             Body::Loading => div()
                 .p_2()
@@ -358,11 +486,102 @@ impl DocPanel {
         }
     }
 
+    /// The whole file with the session's changes marked, one row per line.
+    fn render_diff(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let (fg, muted, green, red) = (
+            theme.foreground,
+            theme.muted_foreground,
+            theme.green,
+            theme.red,
+        );
+        let font = theme.mono_font_family.clone();
+        let Some(view) = &self.diff else {
+            return div()
+                .p_2()
+                .text_xs()
+                .text_color(muted)
+                .child("Comparing...")
+                .into_any_element();
+        };
+        if view.starts.is_empty() {
+            return div()
+                .p_2()
+                .text_sm()
+                .text_color(muted)
+                .child("The file is as it was before this session changed it.")
+                .into_any_element();
+        }
+        let rows = view.rows.clone();
+        let last = rows
+            .iter()
+            .filter_map(|r| r.old.max(r.new))
+            .max()
+            .unwrap_or(1);
+        // Room for the longest line number in each column.
+        let number_w = px(8. + 7. * last.to_string().len() as f32);
+        let id = cx.entity().entity_id().as_u64() as usize;
+        uniform_list(("diff", id), rows.len(), move |range, _window, _cx| {
+            range
+                .map(|ix| {
+                    let row = &rows[ix];
+                    let (sign, bg, sign_fg) = match row.kind {
+                        LineKind::Added => ("+", green.opacity(0.16), green),
+                        LineKind::Removed => ("-", red.opacity(0.16), red),
+                        LineKind::Context => (" ", transparent_black(), muted),
+                    };
+                    let number = |n: Option<usize>| {
+                        div()
+                            .w(number_w)
+                            .flex_none()
+                            .text_right()
+                            .pr_1()
+                            .text_color(muted.opacity(0.7))
+                            .child(n.map(|n| n.to_string()).unwrap_or_default())
+                    };
+                    div()
+                        .h(px(18.))
+                        .flex()
+                        .items_center()
+                        .bg(bg)
+                        .child(number(row.old))
+                        .child(number(row.new))
+                        .child(
+                            div()
+                                .w(px(16.))
+                                .flex_none()
+                                .text_center()
+                                .text_color(sign_fg)
+                                .child(sign),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .whitespace_nowrap()
+                                .overflow_hidden()
+                                .text_color(if row.kind == LineKind::Context {
+                                    fg
+                                } else {
+                                    fg.opacity(0.95)
+                                })
+                                .child(row.text.replace('\t', "    ")),
+                        )
+                })
+                .collect()
+        })
+        .track_scroll(&view.scroll)
+        .size_full()
+        .font_family(font)
+        .text_size(px(12.))
+        .into_any_element()
+    }
+
     /// The path row above the content, with the markdown switch.
     fn render_header(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
         let (muted, border, hover) = (theme.muted_foreground, theme.border, theme.secondary_hover);
-        let warn = theme.warning;
+        let (warn, green, red) = (theme.warning, theme.green, theme.red);
         let preview = self.preview;
         div()
             .h(px(20.))
@@ -393,7 +612,46 @@ impl DocPanel {
                 )
             })
             .when(self.read_only, |d| d.child("read-only"))
-            .when(self.markdown, |d| {
+            .when(self.diff_mode, |d| {
+                let changes = self.diff.as_ref().map_or(0, |v| v.starts.len());
+                let (added, removed) = self.diff.as_ref().map_or((0, 0), |v| {
+                    let count = |k| v.rows.iter().filter(|r| r.kind == k).count();
+                    (count(LineKind::Added), count(LineKind::Removed))
+                });
+                let step = |id: &'static str, label: &'static str, forward: bool| {
+                    div()
+                        .id(id)
+                        .px_1()
+                        .rounded_sm()
+                        .cursor_pointer()
+                        .hover(|d| d.bg(hover))
+                        .child(label)
+                        .on_click(cx.listener(move |doc, _, _, cx| doc.step_change(forward, cx)))
+                };
+                d.child(div().text_color(green).child(format!("+{added}")))
+                    .child(div().text_color(red).child(format!("-{removed}")))
+                    .when(changes > 1, |d| {
+                        d.child(step("diff-prev", "Previous", false)).child(step(
+                            "diff-next",
+                            "Next change",
+                            true,
+                        ))
+                    })
+            })
+            .when(!self.changes.is_empty(), |d| {
+                d.child(
+                    div()
+                        .id("diff-toggle")
+                        .px_1()
+                        .rounded_sm()
+                        .cursor_pointer()
+                        .when(self.diff_mode, |d| d.bg(hover))
+                        .hover(|d| d.bg(hover))
+                        .child(if self.diff_mode { "File" } else { "Diff" })
+                        .on_click(cx.listener(|doc, _, window, cx| doc.toggle_diff(window, cx))),
+                )
+            })
+            .when(self.markdown && !self.diff_mode, |d| {
                 d.child(
                     div()
                         .id("md-toggle")

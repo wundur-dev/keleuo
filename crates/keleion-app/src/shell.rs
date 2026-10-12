@@ -28,6 +28,8 @@ use crate::workspace::{Workspace, WorkspaceEvent};
 
 const LIST_WIDTH: f32 = 250.;
 const RAIL_WIDTH: f32 = 44.;
+/// How long the pointer rests on the rail before the whole list peeks out.
+const PEEK_DELAY_MS: u64 = 250;
 
 struct Tab {
     number: usize,
@@ -73,6 +75,10 @@ pub struct Shell {
     next: usize,
     browser: Option<Entity<Browser>>,
     folded: bool,
+    /// The folded list is shown in full over the content (the rail was hovered).
+    peek: bool,
+    /// The pointer is over the rail (the list peeks out after a moment).
+    rail_hover: bool,
     focus: FocusHandle,
     subs: HashMap<EntityId, Vec<Subscription>>,
     _browser_sub: Option<Subscription>,
@@ -92,6 +98,8 @@ impl Shell {
             next: 1,
             browser: None,
             folded,
+            peek: false,
+            rail_hover: false,
             focus: cx.focus_handle(),
             subs: HashMap::new(),
             _browser_sub: None,
@@ -348,6 +356,7 @@ impl Shell {
             return;
         }
         self.active = ix;
+        self.peek = false;
         self.browser = None;
         self._browser_sub = None;
         let ws = self.tabs[ix].ws.clone();
@@ -407,6 +416,7 @@ impl Shell {
 
     fn toggle_folded(&mut self, cx: &mut Context<Self>) {
         self.folded = !self.folded;
+        self.peek = false;
         let settings = cx.global::<AppSettings>().0.clone();
         settings.borrow_mut().sessions_folded = self.folded;
         let _ = settings.borrow().save();
@@ -790,6 +800,7 @@ impl Shell {
         let (fg, muted, border, hover, ring, bg, sel) =
             (theme.foreground, theme.muted_foreground, theme.border, theme.secondary_hover, theme.ring, theme.sidebar, theme.secondary);
         let mut col = div()
+            .id("session-rail")
             .w(px(RAIL_WIDTH))
             .flex_none()
             .h_full()
@@ -813,7 +824,23 @@ impl Shell {
                     .child(Icon::new(IconName::Plus).small().text_color(muted))
                     .tooltip(|w, cx| gpui_kit::component::tooltip::Tooltip::new("New session (Cmd+N)").build(w, cx))
                     .on_click(cx.listener(|s, _, window, cx| s.new_session(window, cx))),
-            );
+            )
+            // Resting on the rail shows the whole list over the content; leaving it hides it.
+            .on_hover(cx.listener(|s, hovered: &bool, _, cx| {
+                s.rail_hover = *hovered;
+                if *hovered {
+                    cx.spawn(async move |this, cx| {
+                        cx.background_executor().timer(std::time::Duration::from_millis(PEEK_DELAY_MS)).await;
+                        let _ = this.update(cx, |s, cx| {
+                            if s.rail_hover && s.folded && !s.peek {
+                                s.peek = true;
+                                cx.notify();
+                            }
+                        });
+                    })
+                    .detach();
+                }
+            }));
         for ix in 0..self.tabs.len() {
             let active = ix == self.active && self.browser.is_none();
             let number = self.tabs[ix].number;
@@ -952,7 +979,7 @@ impl Render for Shell {
         crate::perf::first_frame(window);
         let theme = cx.theme();
         let (bg, fg, hover, muted) = (theme.background, theme.foreground, theme.secondary_hover, theme.muted_foreground);
-        let button = |id: &'static str, icon: IconName, tip: &'static str| {
+        let button = |id: &'static str, icon: Icon, tip: &'static str| {
             div()
                 .id(id)
                 .size(px(22.))
@@ -962,7 +989,7 @@ impl Render for Shell {
                 .justify_center()
                 .rounded_sm()
                 .hover(|d| d.bg(hover))
-                .child(Icon::new(icon).small().text_color(muted))
+                .child(icon.small().text_color(muted))
                 .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tip).build(window, cx))
         };
         let to_ws = |f: fn(&mut Workspace, &mut Window, &mut Context<Workspace>)| {
@@ -978,17 +1005,59 @@ impl Render for Shell {
             self.name(self.active, cx)
         };
         let has_session = !self.tabs.is_empty() && self.browser.is_none();
+        // Appearance: System, Light and Dark side by side in the middle of the bar, the saved
+        // choice marked.
+        let choice = cx.global::<AppSettings>().0.borrow().appearance.clone();
+        let (selected_bg, border) = (theme.secondary, theme.border);
+        let mut appearance = div()
+            .flex()
+            .items_center()
+            .gap(px(2.))
+            .p(px(2.))
+            .rounded_md()
+            .border_1()
+            .border_color(border);
+        for (value, label, tip) in [
+            ("system", "System", "Follow macOS"),
+            ("light", "Light", "Always light"),
+            ("dark", "Dark", "Always dark"),
+        ] {
+            let on = choice == value || (value == "system" && !matches!(choice.as_str(), "light" | "dark"));
+            appearance = appearance.child(
+                div()
+                    .id(SharedString::from(format!("t-appearance-{value}")))
+                    .h(px(20.))
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .rounded_sm()
+                    .text_xs()
+                    .text_color(if on { fg } else { muted })
+                    .when(on, |d| d.bg(selected_bg))
+                    .when(!on, |d| d.hover(|d| d.bg(hover)))
+                    .child(crate::icons::appearance(value).xsmall().text_color(if on { fg } else { muted }))
+                    .child(label)
+                    .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tip).build(window, cx))
+                    .on_click(move |_, _, cx| crate::theme::set_appearance(value, cx)),
+            );
+        }
         let top = TitleBar::new().h(px(34.)).pl(px(76.)).child(
             div()
                 .size_full()
+                .relative()
                 .flex()
                 .items_center()
                 .gap_1()
                 .child(
-                    button("t-sessions", IconName::PanelLeft, "Session list (Cmd+Shift+B)")
+                    button("t-sessions", Icon::new(IconName::PanelLeft), "Session list (Cmd+Shift+B)")
                         .on_click(cx.listener(|s, _, _, cx| s.toggle_folded(cx))),
                 )
-                .child(div().flex_1().min_w_0().truncate().text_xs().text_color(muted).px_2().child(title))
+                .child(
+                    // Kept clear of the appearance switch in the middle.
+                    div().flex_1().min_w_0().child(div().max_w(relative(0.32)).truncate().text_xs().text_color(muted).px_2().child(title)),
+                )
+                .child(div().absolute().inset_0().flex().items_center().justify_center().child(appearance))
                 .when(has_session, |d| {
                     d.child(
                         div()
@@ -998,16 +1067,23 @@ impl Render for Shell {
                             .gap_1()
                             .pr_1()
                             .child(
-                                button("t-sidebar", IconName::PanelLeft, "Tool panels (Cmd+B)")
+                                button("t-terminal", Icon::new(IconName::SquareTerminal), "New terminal (Cmd+T)")
+                                    .on_click(to_ws(|w, win, cx| w.new_terminal(win, cx))),
+                            )
+                            .child(
+                                button("t-sidebar", Icon::new(IconName::PanelLeft), "Tool panels (Cmd+B)")
                                     .on_click(to_ws(|w, win, cx| w.toggle_sidebar_pub(win, cx))),
                             )
                             .child(
-                                button("t-split", IconName::PanelRight, "Split the shown file or terminal (Cmd+\\)")
+                                button("t-split", Icon::new(IconName::PanelRight), "Split the shown file or terminal (Cmd+\\)")
                                     .on_click(to_ws(|w, win, cx| w.split_right(win, cx))),
                             )
-                            .child(button("t-reset", IconName::RotateCw, "Reset layout").on_click(to_ws(|w, win, cx| w.reset_layout(win, cx)))),
+                            .child(
+                                button("t-reset", Icon::new(IconName::RotateCw), "Reset layout")
+                                    .on_click(to_ws(|w, win, cx| w.reset_layout(win, cx))),
+                            ),
                     )
-                }),
+                })
         );
         let main = match &self.browser {
             Some(b) => b.clone().into_any_element(),
@@ -1020,6 +1096,25 @@ impl Render for Shell {
         } else {
             Some(self.render_list(cx))
         };
+        // The folded list, peeking out over the content until the pointer leaves it.
+        let peek = (self.folded && self.peek && !self.tabs.is_empty()).then(|| {
+            div()
+                .id("session-peek")
+                .absolute()
+                .top_0()
+                .left_0()
+                .h_full()
+                .occlude()
+                .shadow_lg()
+                .on_hover(cx.listener(|s, hovered: &bool, _, cx| {
+                    if !*hovered {
+                        s.peek = false;
+                        s.rail_hover = false;
+                        cx.notify();
+                    }
+                }))
+                .child(self.render_list(cx))
+        });
         div()
             .size_full()
             .relative()
@@ -1053,7 +1148,16 @@ impl Render for Shell {
                 start_tab_rename(key, auto, current, w, cx);
             }))
             .child(top)
-            .child(div().flex_1().min_h_0().flex().children(list).child(div().flex_1().min_w_0().h_full().child(main)))
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .relative()
+                    .flex()
+                    .children(list)
+                    .child(div().flex_1().min_w_0().h_full().child(main))
+                    .children(peek),
+            )
     }
 }
 

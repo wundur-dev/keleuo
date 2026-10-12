@@ -50,7 +50,12 @@ pub fn parse(event: &str, payload: &Value, cwd: &str) -> Option<Hook> {
     let input = || payload.get("tool_input").cloned().unwrap_or(Value::Null);
     Some(match event {
         "SessionStart" => Hook::Started { session_id: s("session_id"), transcript: s("transcript_path").map(PathBuf::from) },
-        "UserPromptSubmit" => Hook::Prompt(s("prompt").unwrap_or_default()),
+        "UserPromptSubmit" => {
+            // A prompt the interface made (a report, a task notice) is not the person's: the
+            // session file has it, read as what it is.
+            let prompt = s("prompt").unwrap_or_default();
+            Hook::Prompt(if super::messages::is_harness_prompt(&prompt) { String::new() } else { prompt })
+        }
         "PreToolUse" => Hook::ToolStarting { id: s("tool_use_id"), tool: tool(), input: input() },
         "PermissionRequest" => {
             let input = input();

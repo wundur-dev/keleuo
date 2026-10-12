@@ -36,6 +36,7 @@ icon_assets!(
         ArrowUp,
         Square,
         Copy,
+        Monitor,
     ]
 );
 
@@ -67,6 +68,15 @@ fn hex(rgb: u32) -> Hsla {
 fn tone(rgb: u32, cx: &App) -> Hsla {
     let c = hex(rgb);
     if cx.theme().is_dark() { c } else { Hsla { l: (c.l * 0.62).min(0.42), s: (c.s * 1.1).min(1.0), ..c } }
+}
+
+/// The titlebar's appearance button: the monitor (follow the system), the sun or the moon.
+pub fn appearance(choice: &str) -> Icon {
+    Icon::new(match choice {
+        "light" => Lucide::Sun,
+        "dark" => Lucide::Moon,
+        _ => Lucide::Monitor,
+    })
 }
 
 /// Folders: one warm tone, distinct from every file colour.

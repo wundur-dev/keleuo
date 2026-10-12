@@ -156,12 +156,6 @@ macro_rules! list_panel {
 list_panel!(FileTree, "Files", "Files", IconName::FolderOpen);
 list_panel!(SkillsPanel, "Skills", "Skills", IconName::BookOpen);
 list_panel!(AgentSide, "Agent", "Agent", IconName::Bot);
-list_panel!(
-    TerminalsList,
-    "Terminals",
-    "Terminals",
-    IconName::SquareTerminal
-);
 
 /// A quiet section header in a sidebar list: an icon, the title, a faint count and, when the
 /// section folds, a chevron. Space above it separates groups (none for the first); the rows
@@ -281,136 +275,6 @@ impl Panel for AgentSide {
     }
 }
 
-/// The open terminals, for the sidebar. Rows: name, unseen-output dot; click to show,
-/// double-click to rename.
-pub struct TerminalsList {
-    pub terminals: Rc<RefCell<Vec<Entity<TerminalView>>>>,
-    focus: FocusHandle,
-}
-
-pub enum TerminalsListEvent {
-    Show(Entity<TerminalView>),
-    New,
-}
-
-impl EventEmitter<TerminalsListEvent> for TerminalsList {}
-
-impl TerminalsList {
-    pub fn new(terminals: Rc<RefCell<Vec<Entity<TerminalView>>>>, cx: &mut Context<Self>) -> Self {
-        Self {
-            terminals,
-            focus: cx.focus_handle(),
-        }
-    }
-}
-
-impl Focusable for TerminalsList {
-    fn focus_handle(&self, _: &App) -> FocusHandle {
-        self.focus.clone()
-    }
-}
-
-impl Panel for TerminalsList {
-    fn title(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        list_title(IconName::SquareTerminal, "Terminals")
-    }
-    fn toolbar_buttons(&mut self, _: &mut Window, cx: &mut Context<Self>) -> Option<Vec<Button>> {
-        Some(vec![
-            Button::new("new-terminal")
-                .ghost()
-                .xsmall()
-                .icon(IconName::Plus)
-                .tooltip("New terminal (Cmd+T)")
-                .on_click(cx.listener(|_, _, _, cx| cx.emit(TerminalsListEvent::New))),
-        ])
-    }
-    fn zoom_control(&self, _: &App) -> Option<gpui_kit::component::dock::PanelControl> {
-        None
-    }
-    fn inner_padding(&self, _: &App) -> bool {
-        false
-    }
-}
-
-impl Render for TerminalsList {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
-        let (fg, muted, hover, bg, green) = (
-            theme.sidebar_foreground,
-            theme.muted_foreground,
-            theme.secondary_hover,
-            theme.sidebar,
-            theme.green,
-        );
-        let terms = self.terminals.borrow().clone();
-        let mut col = div()
-            .id("terminals-list")
-            .size_full()
-            .bg(bg)
-            .flex()
-            .flex_col()
-            .overflow_y_scroll();
-        if terms.is_empty() {
-            col = col.child(
-                div()
-                    .px_2()
-                    .py_1()
-                    .text_xs()
-                    .text_color(muted)
-                    .child("None yet (Cmd+T)"),
-            );
-        }
-        for t in terms {
-            let view = t.read(cx);
-            let key = term_key(view);
-            let auto = view.auto_name();
-            let unseen = view.unseen;
-            let exited = view.exited;
-            let name = tab_label(&key, auto.clone(), cx);
-            let editing = cx
-                .global::<Renaming>()
-                .0
-                .as_ref()
-                .filter(|r| r.key == key)
-                .map(|r| r.input.clone());
-            let entity = t.clone();
-            let row = div()
-                .id(SharedString::from(format!("term-row-{}", t.entity_id())))
-                .h(px(20.))
-                .px(px(6.))
-                .flex()
-                .items_center()
-                .gap(px(6.))
-                .text_xs()
-                .text_color(fg)
-                .hover(|d| d.bg(hover))
-                .child(
-                    // Green while its program runs, grey once it has exited.
-                    Icon::new(IconName::SquareTerminal)
-                        .xsmall()
-                        .text_color(if exited { muted } else { green }),
-                );
-            let row = match editing {
-                Some(input) => row.child(div().flex_1().child(Input::new(&input).xsmall())),
-                None => row
-                    .child(div().flex_1().min_w_0().truncate().child(name.clone()))
-                    .when(unseen, |d| {
-                        d.child(div().size(px(6.)).rounded_full().bg(cx.theme().foreground))
-                    })
-                    .on_click(cx.listener(move |_, ev: &ClickEvent, window, cx| {
-                        if ev.click_count() >= 2 {
-                            start_tab_rename(key.clone(), auto.clone(), name.clone(), window, cx);
-                        } else {
-                            cx.emit(TerminalsListEvent::Show(entity.clone()));
-                        }
-                    })),
-            };
-            col = col.child(row);
-        }
-        col
-    }
-}
-
 // ----- sessions, files, terminals -----
 
 /// The name key of a session tab.
@@ -422,11 +286,12 @@ impl EventEmitter<PanelEvent> for ChatPanel {}
 
 impl BasePanel for ChatPanel {
     fn panel_name(&self) -> &'static str {
-        "Chat"
+        if self.agent.is_some() { "Subagent" } else { "Chat" }
     }
-    /// The session's conversation stays: close the session tab instead.
+    /// The session's conversation stays: close the session tab instead. A watched subagent
+    /// is a view of its work, so it closes.
     fn closable(&self, _: &App) -> bool {
-        false
+        self.agent.is_some()
     }
     fn on_removed(&mut self, _: &mut Window, cx: &mut Context<Self>) {
         cx.emit(ChatPanelEvent::Closed);
@@ -438,6 +303,10 @@ impl BasePanel for ChatPanel {
     }
     fn dump(&self, cx: &App) -> PanelState {
         let mut s = PanelState::new(self.panel_name());
+        if let Some(id) = &self.agent {
+            s.info = PanelInfo::panel(serde_json::json!({ "tool_use_id": id }));
+            return s;
+        }
         let session = self.session.read(cx);
         // The backend is saved with the session, so it reopens with the same agent.
         s.info = PanelInfo::panel(serde_json::json!({
@@ -451,6 +320,16 @@ impl BasePanel for ChatPanel {
 
 impl Panel for ChatPanel {
     fn title(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(id) = self.agent.clone() {
+            let label = self
+                .session
+                .read(cx)
+                .chat
+                .agent(&id)
+                .map(|a| a.description.clone())
+                .unwrap_or_else(|| "Subagent".into());
+            return div().flex().items_center().gap_1().child(Icon::new(IconName::Bot).xsmall()).child(label);
+        }
         let theme = cx.theme();
         let (fg, blue, amber) = (theme.foreground, theme.blue, theme.warning);
         let s = self.session.read(cx);

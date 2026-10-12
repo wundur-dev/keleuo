@@ -31,6 +31,11 @@ impl Mapper {
         Self { cwd: cwd.into(), ..Default::default() }
     }
 
+    /// Whether a tool call seen so far started a subagent.
+    pub fn started_agent(&self, tool_use_id: &str) -> bool {
+        self.tools.get(tool_use_id).is_some_and(|(name, _)| is_agent_tool(name))
+    }
+
     pub fn map(&mut self, raw: Raw) -> Vec<Event> {
         match raw {
             Raw::Init { session_id, model, permission_mode, cwd } => {
@@ -100,15 +105,22 @@ impl Mapper {
                 let (name, input) = self.tools.get(&tool_use_id).cloned().unwrap_or_default();
                 let diff = if is_error { None } else { diff::from_tool(&name, &input, structured.as_ref()) };
                 let file_changed = diff.as_ref().map(|d| d.path.clone());
-                let mut out = vec![Event::ToolResult {
+                // A subagent sent to the background: the call returns at once, the agent runs on
+                // and reports later (see [`super::history`]).
+                let background = is_agent_tool(&name) && !is_error && content.starts_with(ASYNC_LAUNCHED);
+                let mut out = Vec::new();
+                if background {
+                    out.push(Event::SubagentBackground { id: tool_use_id.clone(), agent_id: launched_agent_id(&content) });
+                }
+                out.push(Event::ToolResult {
                     id: tool_use_id.clone(),
                     output: content,
                     is_error,
                     diff,
                     file_changed,
                     parent: parent_tool_use_id,
-                }];
-                if is_agent_tool(&name) {
+                });
+                if is_agent_tool(&name) && !background {
                     out.push(Event::SubagentEnded {
                         id: tool_use_id,
                         failed: is_error,
@@ -173,6 +185,17 @@ impl Mapper {
     pub fn map_lines(&mut self, text: &str) -> Vec<Event> {
         text.lines().filter_map(super::stream::parse_line).flat_map(|e| self.map(e)).collect()
     }
+}
+
+/// How the Agent tool's result begins when the subagent runs in the background.
+const ASYNC_LAUNCHED: &str = "Async agent launched";
+
+/// The `agentId: <id>` line of an Agent tool result: the id its report comes back under.
+fn launched_agent_id(result: &str) -> Option<String> {
+    result.lines().find_map(|l| {
+        let id = l.trim().strip_prefix("agentId:")?.split_whitespace().next()?;
+        Some(id.to_string())
+    })
 }
 
 fn s(v: &Value, key: &str) -> String {

@@ -1,6 +1,6 @@
 //! The chat as Keleion shows it, built by applying neutral agent events in order.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
@@ -34,11 +34,38 @@ pub struct ToolCall {
     pub diff: Option<FileDiff>,
     /// Set when the call was made by a subagent (the Task tool call it belongs to).
     pub parent: Option<String>,
+    /// When it started (for the live elapsed time); `None` in replays.
+    pub started: Option<std::time::Instant>,
+    /// How long it took, once it ended (or its turn did).
+    pub duration_ms: Option<u64>,
+    /// What it has printed so far while it runs (the latest part); dropped when it ends.
+    pub live: Option<String>,
 }
 
 impl ToolCall {
     pub fn done(&self) -> bool {
         self.result.is_some()
+    }
+
+    /// Running now, with a clock: started live, and neither finished nor stopped with its turn.
+    pub fn running(&self) -> bool {
+        !self.done() && self.duration_ms.is_none() && self.started.is_some()
+    }
+
+    /// Elapsed time: live while running, else how long it took (when known).
+    pub fn elapsed(&self) -> Option<std::time::Duration> {
+        match self.duration_ms {
+            Some(ms) => Some(std::time::Duration::from_millis(ms)),
+            None if !self.done() => self.started.map(|t| t.elapsed()),
+            None => None,
+        }
+    }
+
+    /// Stop its clock: it ended (or will not end any more).
+    fn stop_clock(&mut self) {
+        if self.duration_ms.is_none() {
+            self.duration_ms = self.started.map(|t| t.elapsed().as_millis() as u64);
+        }
     }
 }
 
@@ -72,6 +99,9 @@ pub enum Item {
     Earlier { from: u64, to: u64, messages: usize },
     /// The context was compacted here: what came before was replaced by `summary`.
     Compacted { summary: String, trigger: Option<String>, tokens: Option<u64> },
+    /// A message from another agent: `from` its id, `agent` the subagent's tool call when it
+    /// is one of this session's, `title` what it was asked to do (or its id).
+    AgentMessage { from: String, agent: Option<String>, title: String, text: String },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -90,6 +120,8 @@ pub struct SubAgent {
     pub description: String,
     pub kind: String,
     pub status: AgentStatus,
+    /// It runs in the background: its tool call returned at once, and it ends later.
+    pub background: bool,
     /// When it started (for the live elapsed time); `None` in replays.
     pub started: Option<std::time::Instant>,
     /// Reported duration so far, in milliseconds.
@@ -205,6 +237,7 @@ impl Conversation {
     /// The process ended: the next one reports its cost from zero again.
     pub fn process_ended(&mut self) {
         self.cost_base = self.total_cost_usd;
+        self.stop_clocks();
         self.busy = false;
         self.status = None;
         self.finish_streaming();
@@ -284,6 +317,7 @@ impl Conversation {
             description,
             kind,
             status: AgentStatus::Running,
+            background: false,
             started: (!self.replaying).then(std::time::Instant::now),
             duration_ms: None,
             current_tool: None,
@@ -295,6 +329,30 @@ impl Conversation {
         self.agents.last_mut().unwrap()
     }
 
+    /// Tool calls still running with a clock, the subagents' included.
+    pub fn running_tools(&self) -> impl Iterator<Item = &ToolCall> {
+        self.items
+            .iter()
+            .chain(self.agents.iter().flat_map(|a| a.items.iter()))
+            .filter_map(|i| match i {
+                Item::Tool(t) if t.running() => Some(t),
+                _ => None,
+            })
+    }
+
+    /// The turn ended: its unfinished tool calls stop their clocks (they were interrupted), and
+    /// so do those of subagents no longer running. Background subagents keep theirs.
+    fn stop_clocks(&mut self) {
+        let finished_agents = self.agents.iter_mut().filter(|a| !a.running());
+        for item in self.items.iter_mut().chain(finished_agents.flat_map(|a| a.items.iter_mut())) {
+            if let Item::Tool(t) = item
+                && !t.done()
+            {
+                t.stop_clock();
+            }
+        }
+    }
+
     /// Subagents still running.
     pub fn running_agents(&self) -> impl Iterator<Item = &SubAgent> {
         self.agents.iter().filter(|a| a.running())
@@ -303,6 +361,35 @@ impl Conversation {
     /// Subagents of the current (or last) turn.
     pub fn turn_agents(&self) -> &[SubAgent] {
         &self.agents[self.turn_agents_from.min(self.agents.len())..]
+    }
+
+    /// Every change this session made to `path` that went through, oldest first. A subagent's
+    /// changes count from where its tool call is in the chat.
+    pub fn file_changes(&self, path: &Path) -> Vec<FileDiff> {
+        let mut out = Vec::new();
+        self.collect_changes(&self.items, path, &mut out);
+        out
+    }
+
+    /// Whether this session changed `path`.
+    pub fn edited(&self, path: &Path) -> bool {
+        !self.file_changes(path).is_empty()
+    }
+
+    fn collect_changes(&self, items: &[Item], path: &Path, out: &mut Vec<FileDiff>) {
+        for item in items {
+            let Item::Tool(t) = item else { continue };
+            if let Some(agent) = self.agent(&t.id) {
+                self.collect_changes(&agent.items, path, out);
+            }
+            if let Some(d) = &t.diff
+                && t.done()
+                && !t.is_error
+                && d.path == path
+            {
+                out.push(d.clone());
+            }
+        }
     }
 
     fn finish_streaming(&mut self) {
@@ -391,6 +478,9 @@ impl Conversation {
                     is_error: false,
                     diff,
                     parent: parent.clone(),
+                    started: (!self.replaying).then(std::time::Instant::now),
+                    duration_ms: None,
+                    live: None,
                 });
                 match parent {
                     Some(p) => {
@@ -407,9 +497,11 @@ impl Conversation {
                 {
                     agent.current_tool = None;
                 }
-                // The result of the call that started a subagent: it is done.
+                // The result of the call that started a subagent: it is done (unless it runs in
+                // the background, when it only started).
                 if let Some(agent) = self.agents.iter_mut().find(|a| a.tool_use_id == id)
                     && agent.running()
+                    && !(agent.background && !is_error)
                 {
                     agent.status = if is_error { AgentStatus::Failed } else { AgentStatus::Done };
                     agent.current_tool = None;
@@ -428,6 +520,8 @@ impl Conversation {
                     }
                     tool.result = Some(output);
                     tool.is_error = is_error;
+                    tool.live = None;
+                    tool.stop_clock();
                 }
             }
             Event::Permission { request_id, tool, summary, description, input } => {
@@ -460,6 +554,45 @@ impl Conversation {
                 agent.tool_uses = tool_uses.or(agent.tool_uses);
                 agent.duration_ms = duration_ms.or(agent.duration_ms);
             }
+            Event::ToolOutput { id, text } => {
+                if let Some(tool) = self.tool_mut(&id)
+                    && !tool.done()
+                {
+                    tool.live = Some(text);
+                }
+            }
+            Event::Interrupted => {
+                self.finish_streaming();
+                self.busy = false;
+                self.status = None;
+                self.items.push(Item::Notice("Interrupted".into()));
+                applied.turn_ended = true;
+            }
+            Event::SubagentBackground { id, agent_id } => {
+                let agent = self.agent_entry(&id);
+                agent.background = true;
+                agent.task_id = agent_id.or(agent.task_id.take());
+            }
+            Event::AgentMessage { from, text } => {
+                self.finish_streaming();
+                let agent = self.agents.iter_mut().find(|a| a.task_id.as_deref() == Some(from.as_str()));
+                let (tool_use_id, title) = match agent {
+                    Some(a) => {
+                        // Its report is its last word.
+                        if a.running() {
+                            a.status = AgentStatus::Done;
+                            a.current_tool = None;
+                            if a.duration_ms.is_none() {
+                                a.duration_ms = a.started.map(|t| t.elapsed().as_millis() as u64);
+                            }
+                        }
+                        let title = if a.description.is_empty() { a.kind.clone() } else { a.description.clone() };
+                        (Some(a.tool_use_id.clone()), title)
+                    }
+                    None => (None, from.clone()),
+                };
+                self.items.push(Item::AgentMessage { from, agent: tool_use_id, title, text });
+            }
             Event::SubagentEnded { id, failed, summary, tokens, duration_ms } => {
                 let agent = self.agent_entry(&id);
                 agent.status = if failed { AgentStatus::Failed } else { AgentStatus::Done };
@@ -471,6 +604,7 @@ impl Conversation {
             }
             Event::TurnEnded { error, cost_total_usd, input_tokens, output_tokens, duration_ms, session_id } => {
                 self.finish_streaming();
+                self.stop_clocks();
                 self.busy = false;
                 self.status = None;
                 applied.turn_ended = true;
@@ -539,5 +673,193 @@ impl Conversation {
             Item::Error(e) => Some(one_line(e, max)),
             _ => None,
         })
+    }
+}
+
+/// The conversation as Markdown, for the clipboard: messages in full, tool calls one line each
+/// (with a short excerpt of the result), reports, compactions and notes. `agent` names the
+/// agent's replies.
+pub fn to_markdown(items: &[Item], agent: &str) -> String {
+    let mut out = String::new();
+    let mut last_tool = false;
+    for item in items {
+        let block = match item {
+            Item::User(text) => format!("### You\n\n{}", text.trim()),
+            Item::Assistant { text, .. } if text.trim().is_empty() => continue,
+            Item::Assistant { text, .. } => format!("### {agent}\n\n{}", text.trim()),
+            Item::Tool(t) => tool_line(t),
+            Item::Permission(p) => {
+                let answer = match p.answer {
+                    Some(true) => "allowed",
+                    Some(false) => "denied",
+                    None => "waiting",
+                };
+                format!("- Permission for **{}** {}: {answer}", p.tool_name, one_line(&p.summary, 120))
+            }
+            Item::Notice(text) => format!("*{}*", text.trim()),
+            Item::Error(text) => format!("**Error:** {}", text.trim()),
+            Item::Images(paths) => {
+                let names: Vec<String> = paths
+                    .iter()
+                    .map(|p| p.file_name().map_or_else(|| p.display().to_string(), |n| n.to_string_lossy().into_owned()))
+                    .collect();
+                format!("*[{} attached: {}]*", plural(paths.len(), "image"), names.join(", "))
+            }
+            Item::Earlier { messages, .. } => format!("*[{} earlier not loaded]*", plural(*messages, "message")),
+            Item::Compacted { trigger, tokens, .. } => {
+                let mut facts: Vec<String> = trigger.iter().cloned().collect();
+                if let Some(t) = tokens {
+                    facts.push(format!("{}k tokens", t / 1000));
+                }
+                let facts = if facts.is_empty() { String::new() } else { format!(" ({})", facts.join(", ")) };
+                format!("---\n\n*Context compacted{facts}*\n\n---")
+            }
+            Item::AgentMessage { title, text, .. } => {
+                let quoted: Vec<String> =
+                    text.trim().lines().map(|l| if l.is_empty() { ">".to_string() } else { format!("> {l}") }).collect();
+                format!("> **Report from {}**\n>\n{}", title.trim(), quoted.join("\n"))
+            }
+        };
+        let tool = matches!(item, Item::Tool(_) | Item::Permission(_));
+        if !out.is_empty() {
+            // Tool calls in a row make one list.
+            out.push_str(if tool && last_tool { "\n" } else { "\n\n" });
+        }
+        out.push_str(&block);
+        last_tool = tool;
+    }
+    out.push('\n');
+    out
+}
+
+/// A tool call as one list line: name, summary, change counts, how it ended.
+fn tool_line(t: &ToolCall) -> String {
+    let mut line = format!("- **{}**", t.name);
+    let summary = one_line(&t.summary, 120);
+    if !summary.is_empty() {
+        line.push(' ');
+        line.push_str(&summary);
+    }
+    if let Some(d) = &t.diff {
+        line.push_str(&format!(" (+{} -{})", d.added(), d.removed()));
+    }
+    match &t.result {
+        None if t.running() => line.push_str(" (running)"),
+        None => line.push_str(" (did not finish)"),
+        Some(r) if t.is_error => line.push_str(&format!(" -> error: {}", one_line(r, 100))),
+        // Diffs say it all already.
+        Some(_) if t.diff.is_some() => {}
+        Some(r) if r.trim().is_empty() => {}
+        Some(r) => line.push_str(&format!(" -> {}", one_line(r.trim(), 80))),
+    }
+    line
+}
+
+fn plural(n: usize, word: &str) -> String {
+    if n == 1 { format!("1 {word}") } else { format!("{n} {word}s") }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::diff::{self, FileDiff};
+    use serde_json::json;
+
+    fn edit(id: &str, path: &str, old: &str, new: &str, parent: Option<&str>) -> [Event; 2] {
+        let input = json!({"file_path": path, "old_string": old, "new_string": new});
+        let d: Option<FileDiff> = diff::from_input("Edit", &input);
+        let parent = parent.map(str::to_string);
+        [
+            Event::ToolCall { id: id.into(), name: "Edit".into(), summary: String::new(), input, diff: d.clone(), parent: parent.clone() },
+            Event::ToolResult { id: id.into(), output: "ok".into(), is_error: false, diff: d, file_changed: Some(path.into()), parent },
+        ]
+    }
+
+    #[test]
+    fn file_changes_in_order_with_subagents() {
+        let mut chat = Conversation::new("/p");
+        chat.apply_all(edit("t1", "/p/a", "1", "2", None));
+        chat.apply_all(edit("t2", "/p/b", "x", "y", None));
+        chat.apply_all([
+            Event::ToolCall { id: "ag".into(), name: "Agent".into(), summary: String::new(), input: json!({}), diff: None, parent: None },
+            Event::SubagentStarted { id: "ag".into(), description: "help".into(), kind: "general".into() },
+        ]);
+        chat.apply_all(edit("t3", "/p/a", "2", "3", Some("ag")));
+        // A call still running, and one that failed, changed nothing yet.
+        chat.apply(edit("t4", "/p/a", "3", "4", None)[0].clone());
+        let [call, _] = edit("t5", "/p/a", "3", "5", None);
+        chat.apply_all([call, Event::ToolResult { id: "t5".into(), output: "no".into(), is_error: true, diff: None, file_changed: None, parent: None }]);
+
+        let changes = chat.file_changes(Path::new("/p/a"));
+        assert_eq!(changes.len(), 2);
+        assert_eq!(diff::undo("3", &changes), "1");
+        assert!(chat.edited(Path::new("/p/b")));
+        assert!(!chat.edited(Path::new("/p/c")));
+    }
+
+    fn call(id: &str, name: &str, summary: &str) -> Event {
+        Event::ToolCall { id: id.into(), name: name.into(), summary: summary.into(), input: json!({}), diff: None, parent: None }
+    }
+
+    fn result(id: &str, output: &str, is_error: bool) -> Event {
+        Event::ToolResult { id: id.into(), output: output.into(), is_error, diff: None, file_changed: None, parent: None }
+    }
+
+    #[test]
+    fn tool_clocks_run_live_and_stop() {
+        let mut chat = Conversation::new("/p");
+        chat.apply_all([call("t1", "Bash", "ls"), call("t2", "Bash", "sleep 9")]);
+        assert_eq!(chat.running_tools().count(), 2);
+        assert!(chat.tool("t1").unwrap().elapsed().is_some());
+        chat.apply(result("t1", "a\nb", false));
+        let t1 = chat.tool("t1").unwrap();
+        assert!(!t1.running() && t1.duration_ms.is_some());
+        assert_eq!(chat.running_tools().map(|t| t.id.as_str()).collect::<Vec<_>>(), ["t2"]);
+        // The turn ended without its result: interrupted, its clock stops.
+        chat.apply(Event::TurnEnded {
+            error: None,
+            cost_total_usd: None,
+            input_tokens: 0,
+            output_tokens: 0,
+            duration_ms: None,
+            session_id: None,
+        });
+        assert_eq!(chat.running_tools().count(), 0);
+        assert!(chat.tool("t2").unwrap().elapsed().is_some());
+
+        // Replayed history has no clocks.
+        let mut replay = Conversation::new("/p");
+        replay.replaying = true;
+        replay.apply(call("t1", "Bash", "ls"));
+        assert_eq!(replay.running_tools().count(), 0);
+        assert_eq!(replay.tool("t1").unwrap().elapsed(), None);
+    }
+
+    #[test]
+    fn markdown_of_a_conversation() {
+        let mut chat = Conversation::new("/p");
+        chat.items.push(Item::Earlier { from: 0, to: 10, messages: 3 });
+        chat.push_user("Fix the build");
+        chat.apply(Event::Text { text: "Looking.".into(), parent: None });
+        chat.apply_all([call("t1", "Bash", "cargo build"), result("t1", "error[E0425]: oops\nmore", true)]);
+        chat.apply_all(edit("t2", "/p/a.rs", "x", "y", None));
+        chat.apply(call("t3", "Read", "b.rs"));
+        chat.items.push(Item::Compacted { summary: "long".into(), trigger: Some("auto".into()), tokens: Some(120_000) });
+        chat.items.push(Item::AgentMessage { from: "a1".into(), agent: None, title: "Survey".into(), text: "Found it.\n\nDone.".into() });
+        chat.push_notice("Turn took 3s");
+
+        let md = to_markdown(&chat.items, "Agent");
+        assert_eq!(
+            md,
+            "*[3 messages earlier not loaded]*\n\n\
+             ### You\n\nFix the build\n\n\
+             ### Agent\n\nLooking.\n\n\
+             - **Bash** cargo build -> error: error[E0425]: oops ...\n\
+             - **Edit** (+1 -1)\n\
+             - **Read** b.rs (running)\n\n\
+             ---\n\n*Context compacted (auto, 120k tokens)*\n\n---\n\n\
+             > **Report from Survey**\n>\n> Found it.\n>\n> Done.\n\n\
+             *Turn took 3s*\n"
+        );
     }
 }

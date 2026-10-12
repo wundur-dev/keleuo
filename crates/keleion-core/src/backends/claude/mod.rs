@@ -5,7 +5,9 @@
 
 pub mod history;
 pub mod hooks;
+pub mod live;
 pub mod map;
+pub mod messages;
 pub mod pricing;
 pub mod process;
 pub mod skills;

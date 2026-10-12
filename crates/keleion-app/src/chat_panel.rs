@@ -13,6 +13,8 @@ use crate::agent_session::{Asking, Spend, View};
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::menu::DropdownMenu;
 use crate::sheet_tabs::{self, Joined, Palette, StripState};
+use gpui_kit::component::shimmer::ShimmerText;
+use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::text::TextView;
 use gpui_kit::component::{ActiveTheme, Icon, IconName, Sizable};
 use gpui_kit::prelude::*;
@@ -22,23 +24,31 @@ use keleion_core::conversation::{
 };
 use keleion_core::diff::{FileDiff, LineKind};
 use keleion_core::links::{self, FileIndex};
-use keleion_core::conversation::one_line;
+use keleion_core::conversation::{one_line, to_markdown};
 
+use crate::actions::CopyConversation;
 use crate::agent_session::AgentSession;
 
 pub enum ChatPanelEvent {
     OpenFile(PathBuf, Option<u32>),
+    /// Open the file as a diff of what the session changed in it.
+    OpenDiff(PathBuf),
     NewSession,
     /// The session's tab was closed.
     Closed,
     /// Its tab became the shown one.
     Activated,
+    /// Watch a subagent (by its tool call id) in its own docked panel.
+    OpenAgent(String),
 }
 
 pub struct ChatPanel {
     pub session: Entity<AgentSession>,
     /// The session's number (saved with the layout).
     pub number: usize,
+    /// Set when this panel watches one subagent (its tool call id): it shows that subagent's
+    /// items instead of the conversation, with no message box.
+    pub agent: Option<String>,
     focus: FocusHandle,
     input: Entity<TextareaState>,
     /// The conversation as a virtual list: only the items on screen (and a margin) are built
@@ -56,7 +66,7 @@ pub struct ChatPanel {
     toggled: HashSet<String>,
     pub index: Arc<FileIndex>,
     last_revision: u64,
-    /// Redraws once a second while subagents run (their elapsed time).
+    /// Redraws once a second while subagents or tool calls run (their elapsed time).
     ticker: Option<Task<()>>,
     /// The Chat and Terminal view tabs.
     views: Rc<StripState>,
@@ -71,6 +81,10 @@ const TAIL: usize = 4;
 impl EventEmitter<ChatPanelEvent> for ChatPanel {}
 
 const MONO: &str = "Menlo";
+/// How many of a running command's latest output lines its card shows.
+const LIVE_LINES: usize = 10;
+/// Space below the Chat / Terminal tabs, before the window's bottom edge.
+const VIEW_STRIP_GAP_BELOW: f32 = 6.;
 
 impl ChatPanel {
     pub fn new(
@@ -109,8 +123,9 @@ impl ChatPanel {
             let rev = session.read(cx).chat.revision;
             if rev != panel.last_revision {
                 panel.last_revision = rev;
-                panel.sync_list(session.read(cx).chat.items.len());
-                let running = session.read(cx).chat.running_agents().next().is_some();
+                let len = panel.item_count(cx);
+                panel.sync_list(len);
+                let running = clocks_running(&session.read(cx).chat);
                 if running && panel.ticker.is_none() {
                     panel.ticker = Some(cx.spawn(
                         async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
@@ -119,8 +134,7 @@ impl ChatPanel {
                                     .timer(std::time::Duration::from_secs(1))
                                     .await;
                                 let alive = this.update(cx, |p, cx| {
-                                    let still =
-                                        p.session.read(cx).chat.running_agents().next().is_some();
+                                    let still = clocks_running(&p.session.read(cx).chat);
                                     cx.notify();
                                     if !still {
                                         p.ticker = None;
@@ -141,6 +155,7 @@ impl ChatPanel {
         Self {
             session,
             number: 0,
+            agent: None,
             focus: cx.focus_handle(),
             input,
             list: {
@@ -158,6 +173,30 @@ impl ChatPanel {
             ticker: None,
             views: Rc::new(StripState::default()),
             _subs: vec![s1, s2],
+        }
+    }
+
+    /// A panel that watches one subagent of the session.
+    pub fn new_for_agent(session: Entity<AgentSession>, tool_use_id: String, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let mut panel = Self::new(session, window, cx);
+        panel.agent = Some(tool_use_id);
+        panel
+    }
+
+    /// The items shown: the conversation, or the watched subagent's.
+    fn item_count(&self, cx: &App) -> usize {
+        let chat = &self.session.read(cx).chat;
+        match &self.agent {
+            Some(id) => chat.agent(id).map_or(0, |a| a.items.len()),
+            None => chat.items.len(),
+        }
+    }
+
+    fn item_at(&self, ix: usize, cx: &App) -> Option<Item> {
+        let chat = &self.session.read(cx).chat;
+        match &self.agent {
+            Some(id) => chat.agent(id)?.items.get(ix).cloned(),
+            None => chat.items.get(ix).cloned(),
         }
     }
 
@@ -235,6 +274,46 @@ impl ChatPanel {
         .detach();
     }
 
+    /// The whole conversation (or the watched subagent's) on the clipboard as Markdown. Parts
+    /// not read yet are read first, off the UI thread, for the copy only: the chat stays as it is.
+    pub fn copy_conversation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let session = self.session.read(cx);
+        let name = session.backend.name();
+        let items = match &self.agent {
+            Some(id) => session.chat.agent(id).map(|a| a.items.clone()).unwrap_or_default(),
+            None => session.chat.items.clone(),
+        };
+        let parts: Vec<_> = items
+            .iter()
+            .enumerate()
+            .filter_map(|(ix, i)| match i {
+                Item::Earlier { from, to, .. } => session.earlier_loader().map(|load| (ix, *from, *to, load)),
+                _ => None,
+            })
+            .collect();
+        cx.spawn_in(window, async move |_, cx| {
+            let read = cx
+                .background_spawn(async move {
+                    parts.into_iter().map(|(ix, from, to, load)| (ix, load(from, to))).collect::<Vec<_>>()
+                })
+                .await;
+            let mut items = items;
+            // From the end, so the places before stay put. A part that could not be read stays a
+            // placeholder line.
+            for (ix, part) in read.into_iter().rev() {
+                if let Ok(part) = part {
+                    items.splice(ix..ix + 1, part);
+                }
+            }
+            let text = to_markdown(&items, name);
+            let _ = cx.update(|window, cx| {
+                cx.write_to_clipboard(ClipboardItem::new_string(text));
+                gpui_kit::component::WindowExt::push_notification(window, "Conversation copied as Markdown", cx);
+            });
+        })
+        .detach();
+    }
+
     /// The divider where the context was compacted, its summary on request.
     fn render_compacted(&self, summary: &str, trigger: Option<&str>, tokens: Option<u64>, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
@@ -289,9 +368,65 @@ impl ChatPanel {
             .into_any_element()
     }
 
+    /// Another agent's message (a subagent's report): one row with its first line, the whole
+    /// report on request.
+    fn render_agent_message(&self, from: &str, title: &str, text: &str, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let (fg, muted, border, hover, violet) =
+            (theme.foreground, theme.muted_foreground, theme.border, theme.secondary_hover, theme.magenta);
+        let key = format!("report:{from}:{}", text.len());
+        let open = self.toggled.contains(&key);
+        let first = text.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or_default();
+        let k = key.clone();
+        let header = div()
+            .id(SharedString::from(key.clone()))
+            .h(px(22.))
+            .px_1()
+            .flex()
+            .items_center()
+            .gap_1()
+            .text_xs()
+            .cursor_pointer()
+            .hover(|d| d.bg(hover))
+            .child(Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight }).xsmall().text_color(muted))
+            .child(div().flex_none().font_weight(FontWeight::SEMIBOLD).text_color(violet).child("report"))
+            .child(div().flex_none().max_w(relative(0.4)).truncate().text_color(fg).child(title.to_string()))
+            .when(!open, |d| {
+                d.child(div().flex_1().min_w_0().truncate().text_color(muted).child(one_line(&first.replace("**", ""), 200)))
+            })
+            .on_click(cx.listener(move |p, _, _, cx| {
+                if !p.toggled.remove(&k) {
+                    p.toggled.insert(k.clone());
+                }
+                p.list.remeasure();
+                cx.notify();
+            }));
+        div()
+            .flex()
+            .flex_col()
+            .border_1()
+            .border_color(border)
+            .rounded_md()
+            .bg(violet.opacity(0.05))
+            .overflow_hidden()
+            .child(header)
+            .when(open, |d| {
+                d.child(
+                    div()
+                        .px_2()
+                        .py_1()
+                        .border_t_1()
+                        .border_color(border)
+                        .text_color(fg)
+                        .child(self.markdown(SharedString::from(format!("{key}-body")), text, cx)),
+                )
+            })
+            .into_any_element()
+    }
+
     /// One item of the conversation, for the list.
     fn render_entry(&mut self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
-        let item = self.session.read(cx).chat.items.get(ix).cloned();
+        let item = self.item_at(ix, cx);
         let Some(item) = item else { return div().into_any_element() };
         if let Item::Earlier { from, to, .. } = item {
             // In view (or about to be): read it.
@@ -532,25 +667,50 @@ impl ChatPanel {
             theme.secondary,
             theme.secondary_hover,
         );
-        let (green, red) = (theme.green, theme.red);
+        let (green, red, page_bg) = (theme.green, theme.red, theme.background);
         // Diffs start open; other cards start closed.
         let default_open = tool.diff.is_some();
         let open = default_open != self.toggled.contains(&tool.id);
         let id = tool.id.clone();
-        let status = if !tool.done() {
-            Icon::new(IconName::LoaderCircle).xsmall().text_color(muted)
+        let status = if tool.running() {
+            Spinner::new().icon(IconName::LoaderCircle).xsmall().color(muted).into_any_element()
+        } else if !tool.done() {
+            // Interrupted, or replayed without its result.
+            Icon::new(IconName::Minus).xsmall().text_color(muted).into_any_element()
         } else if tool.is_error {
-            Icon::new(IconName::CircleX).xsmall().text_color(red)
+            Icon::new(IconName::CircleX).xsmall().text_color(red).into_any_element()
         } else {
-            Icon::new(IconName::Check).xsmall().text_color(green)
+            Icon::new(IconName::Check).xsmall().text_color(green).into_any_element()
         };
+        // Live while it runs; afterwards how long it took, when that is worth saying.
+        let elapsed = tool
+            .elapsed()
+            .filter(|d| tool.running() || d.as_secs() >= 1)
+            .map(format_elapsed);
         let stats = tool.diff.as_ref().map(|d| {
+            let path = d.path.clone();
             div()
                 .flex()
                 .gap_1()
                 .flex_none()
                 .child(div().text_color(green).child(format!("+{}", d.added())))
                 .child(div().text_color(red).child(format!("-{}", d.removed())))
+                // The file as a diff of everything the session changed in it.
+                .when(tool.done() && !tool.is_error, |d| {
+                    d.child(
+                        div()
+                            .id(SharedString::from(format!("open-diff-{}", tool.id)))
+                            .px_1()
+                            .rounded_sm()
+                            .text_color(muted)
+                            .hover(|d| d.bg(hover.opacity(0.6)).text_color(fg))
+                            .child("Open diff")
+                            .on_click(cx.listener(move |_, _, _, cx| {
+                                cx.stop_propagation();
+                                cx.emit(ChatPanelEvent::OpenDiff(path.clone()));
+                            })),
+                    )
+                })
         });
         let summary_el = self.linked_text(
             SharedString::from(format!("sum-{}", tool.id)),
@@ -597,6 +757,7 @@ impl ChatPanel {
                     .child(summary_el),
             )
             .children(stats)
+            .when_some(elapsed, |d, e| d.child(div().flex_none().text_color(muted).child(e)))
             .on_click(cx.listener(move |p, _, _, cx| {
                 if !p.toggled.remove(&id) {
                     p.toggled.insert(id.clone());
@@ -613,6 +774,32 @@ impl ChatPanel {
             .bg(card_bg.opacity(0.5))
             .overflow_hidden()
             .child(header);
+        // While it runs, its latest output, newest line at the bottom, whether the card is
+        // open or not.
+        if tool.running()
+            && let Some(live) = tool.live.as_deref().filter(|l| !l.trim().is_empty())
+        {
+            let lines: Vec<&str> = live.trim_end_matches('\n').lines().collect();
+            let tail = lines[lines.len().saturating_sub(LIVE_LINES)..].join("\n");
+            card = card.child(
+                div()
+                    .px_2()
+                    .py_1()
+                    .border_t_1()
+                    .border_color(border)
+                    .bg(page_bg.opacity(0.6))
+                    .font_family(MONO)
+                    .text_size(px(11.))
+                    .line_height(px(15.))
+                    .text_color(muted)
+                    .max_h(px(15. * LIVE_LINES as f32 + 8.))
+                    .overflow_hidden()
+                    .flex()
+                    .flex_col()
+                    .justify_end()
+                    .child(tail),
+            );
+        }
         if open {
             let mut body = div().flex().flex_col().border_t_1().border_color(border);
             if let Some(diff) = &tool.diff {
@@ -862,6 +1049,7 @@ impl ChatPanel {
                     .text_color(red)
                     .child(t.clone())
                     .into_any_element(),
+                Item::AgentMessage { from, title, text, .. } => self.render_agent_message(from, title, text, cx),
             };
             out.push(el);
         }
@@ -884,11 +1072,13 @@ impl ChatPanel {
         let open = self.agent_open(&agent.tool_use_id);
         let id = agent.tool_use_id.clone();
         let status = match agent.status {
-            AgentStatus::Running => Icon::new(IconName::LoaderCircle)
+            AgentStatus::Running => Spinner::new()
+                .icon(IconName::LoaderCircle)
                 .xsmall()
-                .text_color(violet),
-            AgentStatus::Done => Icon::new(IconName::Check).xsmall().text_color(green),
-            AgentStatus::Failed => Icon::new(IconName::CircleX).xsmall().text_color(red),
+                .color(violet)
+                .into_any_element(),
+            AgentStatus::Done => Icon::new(IconName::Check).xsmall().text_color(green).into_any_element(),
+            AgentStatus::Failed => Icon::new(IconName::CircleX).xsmall().text_color(red).into_any_element(),
         };
         let mut facts = Vec::new();
         if let Some(e) = agent.elapsed() {
@@ -1025,6 +1215,67 @@ impl ChatPanel {
         Some(strip.into_any_element())
     }
 
+    /// A watched subagent: its description and state, then its items as they arrive. No
+    /// message box: it is the subagent's work, not a conversation to write into.
+    fn render_agent_view(&mut self, id: &str, cx: &mut Context<Self>) -> Div {
+        let theme = cx.theme();
+        let (muted, border, bg) = (theme.muted_foreground, theme.border, theme.background);
+        let (title, state) = match self.session.read(cx).chat.agent(id) {
+            Some(a) => {
+                let status = match a.status {
+                    AgentStatus::Running => "running",
+                    AgentStatus::Done => "done",
+                    AgentStatus::Failed => "failed",
+                };
+                let mut parts = vec![a.kind.clone(), status.to_string()];
+                if let Some(tool) = &a.current_tool {
+                    parts.push(format!("using {tool}"));
+                }
+                if let Some(tokens) = a.total_tokens {
+                    parts.push(format!("{tokens} tokens"));
+                }
+                (a.description.clone(), parts.join(" · "))
+            }
+            None => ("Subagent".to_string(), "no longer in this conversation".to_string()),
+        };
+        let len = self.item_count(cx);
+        if self.list_len != len {
+            self.sync_list(len);
+        }
+        let empty = self.list_len == 0;
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .bg(bg)
+            .track_focus(&self.focus)
+            .on_action(cx.listener(|p, _: &CopyConversation, window, cx| p.copy_conversation(window, cx)))
+            .child(
+                div()
+                    .flex_none()
+                    .flex()
+                    .flex_col()
+                    .px_3()
+                    .py_2()
+                    .border_b_1()
+                    .border_color(border)
+                    .child(div().text_sm().truncate().child(title))
+                    .child(div().text_xs().text_color(muted).truncate().child(state)),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .when(empty, |d| d.p_3().text_xs().text_color(muted).child("Nothing from it yet."))
+                    .when(!empty, |d| {
+                        d.child(
+                            list(self.list.clone(), cx.processor(|this, ix, _window, cx| this.render_entry(ix, cx)))
+                                .size_full(),
+                        )
+                    }),
+            )
+    }
+
     fn render_header(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
         let (muted, hover, border) = (theme.muted_foreground, theme.secondary_hover, theme.border);
@@ -1067,6 +1318,7 @@ impl ChatPanel {
             }
         );
         let backend_name = session.backend.name();
+        let weak = cx.entity().downgrade();
         div()
             .h(px(22.))
             .flex_none()
@@ -1129,6 +1381,23 @@ impl ChatPanel {
                     })
                     .on_click(cx.listener(|_, _, _, cx| cx.emit(ChatPanelEvent::NewSession))),
             )
+            .child(
+                Button::new("chat-options")
+                    .icon(IconName::Ellipsis)
+                    .xsmall()
+                    .ghost()
+                    .tab_stop(false)
+                    .dropdown_menu(move |menu, _, _| {
+                        let weak = weak.clone();
+                        menu.item(
+                            gpui_kit::component::menu::PopupMenuItem::new("Copy conversation (Cmd+Alt+C)").on_click(
+                                move |_, window, cx| {
+                                    let _ = weak.update(cx, |p, cx| p.copy_conversation(window, cx));
+                                },
+                            ),
+                        )
+                    }),
+            )
             .into_any_element()
     }
 }
@@ -1174,7 +1443,9 @@ impl ChatPanel {
                 }
             }),
         );
+        // Some room below the tabs, so they don't sit on the window's bottom edge.
         Some(
+            div().flex_none().bg(ground).pb(px(VIEW_STRIP_GAP_BELOW)).child(
             strip
                 .child(
                     div()
@@ -1195,13 +1466,51 @@ impl ChatPanel {
                             let _ = settings.borrow().save();
                             window.refresh();
                         }),
-                )
-                .into_any_element(),
+                ),
+            )
+            .into_any_element(),
         )
     }
 
     /// The interface waits on a question before it is up: Trust / Don't trust for the folder
     /// question, else a pointer to the terminal.
+    /// While the agent thinks, before its first text or tool call: a shimmering line above the
+    /// composer, so a quiet stretch reads as work in progress rather than a stall.
+    fn render_thinking(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let session = self.session.read(cx);
+        // A streaming text item means the answer has started (its first delta sets the status
+        // to "writing"; the item appears a moment earlier).
+        let answering = matches!(session.chat.items.last(), Some(Item::Assistant { streaming: true, .. }));
+        // Shown for the whole turn while no answer is streaming: a session run through its
+        // terminal reports "working" or the tool it runs, never "thinking".
+        if !session.chat.busy || answering || session.chat.needs_input() || session.view == View::Terminal {
+            return None;
+        }
+        let name = session.backend.name();
+        let label = match session.chat.status.as_deref() {
+            None | Some("thinking" | "working" | "sending" | "requesting") => format!("{name} is thinking…"),
+            Some(_) => format!("{name} is working…"),
+        };
+        let theme = cx.theme();
+        let (ring, border, accent) = (theme.ring, theme.border, theme.accent);
+        Some(
+            div()
+                .flex_none()
+                .px_2()
+                .py_1()
+                .flex()
+                .items_center()
+                .gap_2()
+                .border_t_1()
+                .border_color(border)
+                .bg(accent)
+                .text_sm()
+                .child(Spinner::new().color(ring))
+                .child(ShimmerText::new(label).id("thinking"))
+                .into_any_element(),
+        )
+    }
+
     fn render_asking(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let session = self.session.read(cx);
         let asking = session.asking?;
@@ -1256,7 +1565,7 @@ impl ChatPanel {
         Some(row.into_any_element())
     }
 
-    /// In the terminal view, the files the agent changed this session, as links.
+    /// In the terminal view, the files the agent changed this session, as links to their diffs.
     fn render_edits(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let chat = &self.session.read(cx).chat;
         let mut seen: Vec<(PathBuf, usize, usize)> = Vec::new();
@@ -1302,7 +1611,7 @@ impl ChatPanel {
                     .child(div().text_color(link).child(name))
                     .child(div().text_color(green).child(format!("+{added}")))
                     .child(div().text_color(red).child(format!("-{removed}")))
-                    .on_click(cx.listener(move |_, _, _, cx| cx.emit(ChatPanelEvent::OpenFile(path.clone(), None)))),
+                    .on_click(cx.listener(move |_, _, _, cx| cx.emit(ChatPanelEvent::OpenDiff(path.clone())))),
             );
         }
         Some(row.into_any_element())
@@ -1317,6 +1626,9 @@ impl Focusable for ChatPanel {
 
 impl Render for ChatPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(id) = self.agent.clone() {
+            return self.render_agent_view(&id, cx);
+        }
         let started = std::time::Instant::now();
         if crate::perf::enabled() {
             // Build, layout and paint: from here to the frame being on screen.
@@ -1333,8 +1645,9 @@ impl Render for ChatPanel {
             theme.border,
         );
         let backend_name = self.session.read(cx).backend.name();
-        if self.list_len != self.session.read(cx).chat.items.len() {
-            self.sync_list(self.session.read(cx).chat.items.len());
+        let len = self.item_count(cx);
+        if self.list_len != len {
+            self.sync_list(len);
         }
         let empty = self.list_len == 0;
         let _ = (fg, red, user_bg);
@@ -1350,6 +1663,7 @@ impl Render for ChatPanel {
             .flex_col()
             .bg(cx.theme().background)
             .track_focus(&self.focus)
+            .on_action(cx.listener(|p, _: &CopyConversation, window, cx| p.copy_conversation(window, cx)))
             .border_t_2()
             .border_color(if focused { ring } else { transparent_black() })
             .child(self.render_header(cx))
@@ -1374,6 +1688,7 @@ impl Render for ChatPanel {
                     )),
             )
             .children(self.render_asking(cx))
+            .children(self.render_thinking(cx))
             .child(self.render_composer(window, cx)))
             .children(self.render_views(cx))
             .children(self.preview.clone().map(|path| {
@@ -1704,6 +2019,11 @@ fn hover_actions(group: SharedString, key: String, text: String, muted: Hsla) ->
                     gpui_kit::component::WindowExt::push_notification(window, "Copied", cx);
                 }),
         )
+}
+
+/// Something with a live clock runs: a subagent or a tool call.
+fn clocks_running(chat: &keleion_core::conversation::Conversation) -> bool {
+    chat.running_agents().next().is_some() || chat.running_tools().next().is_some()
 }
 
 /// `42s`, `3m 05s`.

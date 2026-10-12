@@ -42,6 +42,15 @@ pub enum Event {
     SubagentStarted { id: String, description: String, kind: String },
     /// A subagent's progress.
     SubagentProgress { id: String, current_tool: Option<String>, tokens: Option<u64>, tool_uses: Option<u64>, duration_ms: Option<u64> },
+    /// A subagent runs in the background: its tool call returns at once (`agent_id`: the id its
+    /// report will come back under), and it ends with [`Event::SubagentEnded`] later.
+    SubagentBackground { id: String, agent_id: Option<String> },
+    /// A message from another agent: a background subagent's report, or a teammate's.
+    AgentMessage { from: String, text: String },
+    /// What a running tool has printed so far (its latest part), while it runs.
+    ToolOutput { id: String, text: String },
+    /// The person stopped the turn: it is over, with no answer to come.
+    Interrupted,
     /// A subagent finished.
     SubagentEnded { id: String, failed: bool, summary: Option<String>, tokens: Option<u64>, duration_ms: Option<u64> },
     /// A turn ended, with what it used. `cost_total_usd` is the process total so far.
@@ -94,7 +103,9 @@ impl Launch {
 pub enum Hook {
     /// The interface is up on this session (its id and file).
     Started { session_id: Option<String>, transcript: Option<PathBuf> },
-    /// The person's message went in (typed in the window or in the terminal).
+    /// The person's message went in (typed in the window or in the terminal). Empty for a
+    /// prompt the interface made itself (a subagent's report, a task notice): the session file
+    /// has those.
     Prompt(String),
     /// A tool is about to run.
     ToolStarting { id: Option<String>, tool: String, input: Value },

@@ -22,7 +22,7 @@ use keleion_core::conversation::Conversation;
 use keleion_core::host::Host;
 
 use crate::hooks::{self, Registration, Reply};
-use crate::terminal_view::{ImageSupport, Placeholder, TerminalView};
+use crate::terminal_view::{ImageSupport, Placeholder, TerminalEvent, TerminalView};
 use std::rc::Rc;
 
 /// What a session has used, as the window shows it.
@@ -65,6 +65,8 @@ pub enum SessionEvent {
     /// The agent wrote or edited this file.
     FileChanged(PathBuf),
     TurnEnded,
+    /// Cmd+click in the agent's terminal interface: the row's text and the column clicked.
+    TerminalLink { line: String, column: usize },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -86,6 +88,7 @@ impl View {
 struct TerminalRun {
     view: Entity<TerminalView>,
     _exit: Subscription,
+    _links: Subscription,
 }
 
 /// The session file being followed into the chat.
@@ -427,7 +430,12 @@ impl AgentSession {
         })
         .detach();
         self.ready = false;
-        self.terminal = Some(TerminalRun { view, _exit: exit });
+        let links = cx.subscribe(&view, |_, _, ev: &TerminalEvent, cx| {
+            if let TerminalEvent::OpenLink { line, column } = ev {
+                cx.emit(SessionEvent::TerminalLink { line: line.clone(), column: *column });
+            }
+        });
+        self.terminal = Some(TerminalRun { view, _exit: exit, _links: links });
         if fork {
             // The copy's id comes with the interface's start (`Hook::Started`).
             self.following = None;
@@ -637,13 +645,17 @@ impl AgentSession {
             }
             Hook::Prompt(text) => {
                 let t = plain(&text);
-                if !self.echo.iter().any(|e| *e == t) && !t.is_empty() {
-                    // Typed in the terminal: show it now; the file's copy is skipped.
-                    self.chat.push_user(&t);
-                    self.push_echo(t);
+                // Empty: a prompt the interface made itself (a report, a task notice), which
+                // may not start a turn; the work it starts marks the session busy.
+                if !t.is_empty() {
+                    if !self.echo.iter().any(|e| *e == t) {
+                        // Typed in the terminal: show it now; the file's copy is skipped.
+                        self.chat.push_user(&t);
+                        self.push_echo(t);
+                    }
+                    self.chat.busy = true;
+                    self.chat.status = Some("working".into());
                 }
-                self.chat.busy = true;
-                self.chat.status = Some("working".into());
             }
             Hook::ToolStarting { id, tool, input } => {
                 self.chat.busy = true;

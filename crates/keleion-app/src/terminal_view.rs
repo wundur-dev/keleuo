@@ -138,6 +138,9 @@ pub struct Placeholder {
 pub enum TerminalEvent {
     Closed,
     Activated,
+    /// Cmd+click: the text of the row clicked and the column (in characters), for whoever
+    /// knows the project's files to open the file named there.
+    OpenLink { line: String, column: usize },
 }
 
 impl EventEmitter<TerminalEvent> for TerminalView {}
@@ -369,9 +372,27 @@ impl TerminalView {
         (GridPoint::new(Line(row as i32 - offset), Column(col)), side)
     }
 
+    /// The text of a row of the grid (scrollback included), one character per cell.
+    fn row_text(&self, line: Line) -> String {
+        let Some(pty) = &self.pty else { return String::new() };
+        let term = pty.term.lock();
+        let grid = term.grid();
+        if line.0 >= -(grid.history_size() as i32) && line.0 < grid.screen_lines() as i32 {
+            let row = &grid[line];
+            (0..grid.columns()).map(|c| row[Column(c)].c).collect()
+        } else {
+            String::new()
+        }
+    }
+
     fn mouse_down(&mut self, e: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.focus, cx);
         let (point, side) = self.grid_point(e.position);
+        if e.modifiers.platform && e.click_count == 1 {
+            let line = self.row_text(point.line);
+            cx.emit(TerminalEvent::OpenLink { line, column: point.column.0 });
+            return;
+        }
         if let Some(pty) = &self.pty {
             let ty = match e.click_count {
                 2 => SelectionType::Semantic,
@@ -390,20 +411,11 @@ impl TerminalView {
 
     fn mouse_move(&mut self, e: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
         if let Some(images) = self.images.clone()
-            && let Some(pty) = &self.pty
+            && self.pty.is_some()
         {
             // An `[Image #N]` under the pointer: show that image.
             let (point, _) = self.grid_point(e.position);
-            let line = {
-                let term = pty.term.lock();
-                let grid = term.grid();
-                if point.line.0 >= -(grid.history_size() as i32) && point.line.0 < grid.screen_lines() as i32 {
-                    let row = &grid[point.line];
-                    (0..grid.columns()).map(|c| row[Column(c)].c).collect::<String>()
-                } else {
-                    String::new()
-                }
-            };
+            let line = self.row_text(point.line);
             let found = image_marker_at(&line, point.column.0).and_then(|n| (images.image)(n, cx)).map(|p| (p, e.position));
             if found.as_ref().map(|f| &f.0) != self.hover_image.as_ref().map(|h| &h.0) {
                 self.hover_image = found;

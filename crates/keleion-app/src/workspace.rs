@@ -27,12 +27,12 @@ use crate::agent_session::{AgentSession, SessionEvent, View};
 use crate::agent_side::AgentSide;
 use crate::doc_panel::{DocContext, DocEvent, DocPanel};
 use crate::file_tree::{FileTree, FileTreeEvent};
-use crate::panels::{self, TerminalsList, TerminalsListEvent, doc_key, start_tab_rename, term_key};
+use crate::panels::{self, doc_key, start_tab_rename, term_key};
 use crate::skills_panel::{SkillsEvent, SkillsPanel};
 use crate::terminal_view::{TerminalEvent, TerminalView};
 
 /// Bumped when the saved layout format changes; older files are ignored.
-const LAYOUT_VERSION: usize = 3;
+const LAYOUT_VERSION: usize = 4;
 
 /// What the panel registry needs to rebuild a saved layout for one window.
 struct Factory {
@@ -40,9 +40,9 @@ struct Factory {
     skills: Entity<SkillsPanel>,
     claude: Entity<ChatPanel>,
     agent_side: Entity<AgentSide>,
-    terms_list: Entity<TerminalsList>,
     doc_ctx: DocContext,
     shell: keleion_core::host::CommandSpec,
+    session: Entity<AgentSession>,
     /// Panels made while loading, for the workspace to wire up afterwards.
     made: RefCell<Vec<Made>>,
 }
@@ -50,6 +50,7 @@ struct Factory {
 enum Made {
     Doc(Entity<DocPanel>),
     Terminal(Entity<TerminalView>),
+    Agent(Entity<ChatPanel>),
 }
 
 /// Factories by dock area, so the global panel registry can find the right window.
@@ -69,15 +70,14 @@ fn factory(ctx: &PanelBuildContext, cx: &App) -> Option<Rc<Factory>> {
 /// Register the panel kinds once, so saved layouts can be rebuilt.
 pub fn register_panels(cx: &mut App) {
     cx.set_global(Factories::default());
-    for name in ["Files", "Skills", "Agent", "Terminals", "Chat"] {
+    for name in ["Files", "Skills", "Agent", "Chat"] {
         register_panel(cx, name, move |ctx, _window, cx| {
             let f = factory(&ctx, cx).expect("a workspace for this dock");
             match name {
                 "Files" => panel_handle(f.files.clone()),
                 "Skills" => panel_handle(f.skills.clone()),
                 "Agent" => panel_handle(f.agent_side.clone()),
-                "Chat" => panel_handle(f.claude.clone()),
-                _ => panel_handle(f.terms_list.clone()),
+                _ => panel_handle(f.claude.clone()),
             }
         });
     }
@@ -107,6 +107,17 @@ pub fn register_panels(cx: &mut App) {
         f.made.borrow_mut().push(Made::Terminal(view.clone()));
         panel_handle(view)
     });
+    register_panel(cx, "Subagent", |ctx, window, cx| {
+        let f = factory(&ctx, cx).expect("a workspace for this dock");
+        let id = match ctx.info() {
+            PanelInfo::Panel(v) => v.get("tool_use_id").and_then(|p| p.as_str()).unwrap_or_default().to_string(),
+            _ => String::new(),
+        };
+        let session = f.session.clone();
+        let view = cx.new(|cx| ChatPanel::new_for_agent(session, id, window, cx));
+        f.made.borrow_mut().push(Made::Agent(view.clone()));
+        panel_handle(view)
+    });
 }
 
 pub enum WorkspaceEvent {
@@ -132,10 +143,11 @@ pub struct Workspace {
     agent_side: Entity<AgentSide>,
     /// Shown on the session tab: a git worktree made for this session.
     pub worktree: Option<String>,
-    terms_list: Entity<TerminalsList>,
     terminals: Rc<RefCell<Vec<Entity<TerminalView>>>>,
     next_term: usize,
     docs: Vec<Entity<DocPanel>>,
+    /// Docked views of subagents, one per subagent watched.
+    agent_views: Vec<Entity<ChatPanel>>,
     doc_ctx: DocContext,
     /// Docs and terminals, most recently shown first: where new ones open.
     recent_code: Vec<EntityId>,
@@ -170,7 +182,6 @@ impl Workspace {
         let claude = cx.new(|cx| ChatPanel::new(session.clone(), window, cx));
         let agent_side = cx.new(|cx| AgentSide::new(session.clone(), claude.clone(), cx));
         let terminals = Rc::new(RefCell::new(Vec::new()));
-        let terms_list = cx.new(|cx| TerminalsList::new(terminals.clone(), cx));
         let doc_ctx = DocContext {
             host: host.clone(),
             root: root.clone(),
@@ -214,7 +225,9 @@ impl Workspace {
                 ChatPanelEvent::OpenFile(path, line) => {
                     ws.open(path.clone(), *line, false, true, window, cx)
                 }
+                ChatPanelEvent::OpenDiff(path) => ws.open_diff(path.clone(), None, window, cx),
                 ChatPanelEvent::NewSession => cx.emit(WorkspaceEvent::NewSession),
+                ChatPanelEvent::OpenAgent(id) => ws.open_agent(id.clone(), window, cx),
                 ChatPanelEvent::Closed | ChatPanelEvent::Activated => {}
             },
         ));
@@ -232,22 +245,13 @@ impl Workspace {
                     cx.emit(WorkspaceEvent::AgentEdited(path.clone()));
                 }
                 SessionEvent::TurnEnded => ws.files.update(cx, |t, cx| t.refresh(cx)),
+                SessionEvent::TerminalLink { line, column } => {
+                    ws.open_terminal_link(line, *column, window, cx)
+                }
             },
         ));
         // The session tab's dot and name follow the conversation.
         subs.push(cx.observe(&session, |_, _, cx| cx.notify()));
-        subs.push(cx.subscribe_in(
-            &terms_list,
-            window,
-            |ws, _, ev: &TerminalsListEvent, window, cx| match ev {
-                TerminalsListEvent::New => ws.new_terminal(window, cx),
-                TerminalsListEvent::Show(t) => {
-                    ws.show_panel(PanelId::from(t.entity_id()), window, cx);
-                    let handle = t.read(cx).focus.clone();
-                    window.focus(&handle, cx);
-                }
-            },
-        ));
         subs.push(
             cx.subscribe_in(&dock, window, |ws, _, ev: &DockEvent, window, cx| {
                 if let DockEvent::LayoutChanged = ev {
@@ -270,7 +274,6 @@ impl Workspace {
             claude,
             agent_side,
             worktree: None,
-            terms_list,
             terminals,
             next_term: 1,
             docs: Vec::new(),
@@ -284,6 +287,7 @@ impl Workspace {
             made,
             focus: cx.focus_handle(),
             panel_subs: HashMap::new(),
+            agent_views: Vec::new(),
             _watch: watch,
             _subs: subs,
         };
@@ -380,20 +384,20 @@ impl Workspace {
         let center = DockLayout::h_split()
             .child(claude, Some(px(settings.claude_width)))
             .child(code, None);
-        // Two groups of tool panels, their tabs along the bottom: what you look things up in
-        // (files, skills), and what is running (the agent's subagents,
-        // terminals). Panels the backend has no use for are left out.
+        // Two groups of tool panels: what you look things up in (files, skills), and what is
+        // running (the agent's subagents; terminals are tabs among the documents). Panels the
+        // backend has no use for are left out.
         let caps = self.session.read(cx).backend.capabilities();
         let mut look = DockLayout::tabs().panel_view(panel_handle(self.files.clone()), cx);
         if caps.skills {
             look = look.panel_view(panel_handle(self.skills.clone()), cx);
         }
-        let mut running = DockLayout::tabs();
-        if caps.subagents {
-            running = running.panel_view(panel_handle(self.agent_side.clone()), cx);
-        }
-        running = running.panel_view(panel_handle(self.terms_list.clone()), cx);
-        let left = DockLayout::v_split().child(look, None).child(running, Some(px(300.)));
+        let left = if caps.subagents {
+            let running = DockLayout::tabs().panel_view(panel_handle(self.agent_side.clone()), cx);
+            DockLayout::v_split().child(look, None).child(running, Some(px(300.)))
+        } else {
+            DockLayout::v_split().child(look, None)
+        };
         self.dock.update(cx, |a, cx| {
             a.set_center(center, window, cx);
             a.set_dock(DockPlacement::Left, left, window, cx);
@@ -431,9 +435,9 @@ impl Workspace {
             skills: self.skills.clone(),
             claude: self.claude.clone(),
             agent_side: self.agent_side.clone(),
-            terms_list: self.terms_list.clone(),
             doc_ctx: self.doc_ctx.clone(),
             shell: self.host.shell_command(&self.root),
+            session: self.session.clone(),
             made: RefCell::new(Vec::new()),
         });
         cx.global_mut::<Factories>()
@@ -453,6 +457,7 @@ impl Workspace {
             match m {
                 Made::Doc(doc) => self.adopt_doc(doc, window, cx),
                 Made::Terminal(view) => self.adopt_terminal(view, window, cx),
+                Made::Agent(view) => self.adopt_agent(view, window, cx),
             }
         }
         if !self.in_dock(PanelId::from(self.claude.entity_id()), cx) {
@@ -617,6 +622,51 @@ impl Workspace {
         self.recent_code.insert(0, id);
     }
 
+    // ----- subagents -----
+
+    /// Watch a subagent in its own docked panel, or show it if it is already open.
+    pub fn open_agent(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
+        let existing = self
+            .agent_views
+            .iter()
+            .find(|v| v.read(cx).agent.as_deref() == Some(id.as_str()))
+            .cloned();
+        if let Some(view) = existing {
+            if self.in_dock(PanelId::from(view.entity_id()), cx) {
+                self.show_panel(PanelId::from(view.entity_id()), window, cx);
+            } else {
+                self.place_code(panel_handle(view), window, cx);
+            }
+            return;
+        }
+        let session = self.session.clone();
+        let view = cx.new(|cx| ChatPanel::new_for_agent(session, id, window, cx));
+        self.adopt_agent(view.clone(), window, cx);
+        self.place_code(panel_handle(view), window, cx);
+    }
+
+    fn adopt_agent(&mut self, view: Entity<ChatPanel>, window: &mut Window, cx: &mut Context<Self>) {
+        let id = view.entity_id();
+        let sub = cx.subscribe_in(
+            &view,
+            window,
+            move |ws, panel, ev: &ChatPanelEvent, window, cx| match ev {
+                ChatPanelEvent::OpenFile(path, line) => ws.open(path.clone(), *line, false, true, window, cx),
+                ChatPanelEvent::OpenDiff(path) => ws.open_diff(path.clone(), None, window, cx),
+                ChatPanelEvent::OpenAgent(agent) => ws.open_agent(agent.clone(), window, cx),
+                ChatPanelEvent::NewSession => cx.emit(WorkspaceEvent::NewSession),
+                ChatPanelEvent::Activated => ws.touch_code(panel.entity_id()),
+                ChatPanelEvent::Closed => {
+                    ws.agent_views.retain(|v| v.entity_id() != panel.entity_id());
+                    ws.panel_subs.remove(&panel.entity_id());
+                }
+            },
+        );
+        self.panel_subs.insert(id, vec![sub]);
+        self.touch_code(id);
+        self.agent_views.push(view);
+    }
+
     // ----- files -----
 
     fn adopt_doc(&mut self, doc: Entity<DocPanel>, window: &mut Window, cx: &mut Context<Self>) {
@@ -661,7 +711,9 @@ impl Workspace {
             self.back.push(here);
             self.forward.clear();
         }
+        let changes = self.session.read(cx).chat.file_changes(&path);
         if let Some(doc) = self.docs.iter().find(|d| d.read(cx).path == path).cloned() {
+            doc.update(cx, |d, cx| d.set_changes(changes, cx));
             if let Some(line) = line {
                 doc.update(cx, |d, cx| d.go_to_line(line, window, cx));
             }
@@ -671,16 +723,69 @@ impl Workspace {
         }
         let ctx = self.doc_ctx.clone();
         let doc = cx.new(|cx| DocPanel::new(ctx, path, line, read_only, window, cx));
+        doc.update(cx, |d, cx| d.set_changes(changes, cx));
         self.adopt_doc(doc.clone(), window, cx);
         self.place_code(panel_handle(doc.clone()), window, cx);
         let handle = doc.read(cx).focus.clone();
         window.focus(&handle, cx);
     }
 
+    /// Open a file as a diff of what the session changed in it, at `line` of the file now. A
+    /// file the session did not change opens as usual.
+    pub fn open_diff(
+        &mut self,
+        path: PathBuf,
+        line: Option<u32>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.session.read(cx).chat.edited(&path) {
+            self.open(path, line, false, true, window, cx);
+            return;
+        }
+        // Without a line, so the doc does not leave the diff for the editor once it is read.
+        self.open(path.clone(), None, false, true, window, cx);
+        if let Some(doc) = self.docs.iter().find(|d| d.read(cx).path == path).cloned() {
+            doc.update(cx, |d, cx| d.show_diff(line, window, cx));
+        }
+    }
+
+    /// Cmd+click in a terminal on `line` at `column` (characters): open the file named there,
+    /// as a diff when the session changed it.
+    fn open_terminal_link(
+        &mut self,
+        line: &str,
+        column: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let at = line
+            .char_indices()
+            .nth(column)
+            .map_or(line.len(), |(i, _)| i);
+        let index = self.doc_ctx.index.borrow().clone();
+        let Some(link) = index
+            .find_links(line)
+            .into_iter()
+            .find(|l| l.start <= at && at < l.end)
+        else {
+            return;
+        };
+        if self.session.read(cx).chat.edited(&link.path) {
+            self.open_diff(link.path, link.line, window, cx);
+        } else {
+            self.open(link.path, link.line, false, true, window, cx);
+        }
+    }
+
     fn file_changed(&mut self, path: &Path, window: &mut Window, cx: &mut Context<Self>) {
         for doc in self.docs.clone() {
             if doc.read(cx).path == path {
-                doc.update(cx, |d, cx| d.file_changed(window, cx));
+                let changes = self.session.read(cx).chat.file_changes(path);
+                doc.update(cx, |d, cx| {
+                    d.set_changes(changes, cx);
+                    d.file_changed(window, cx)
+                });
             }
         }
     }
@@ -758,24 +863,25 @@ impl Workspace {
             cx.subscribe_in(
                 &view,
                 window,
-                move |ws, view, ev: &TerminalEvent, _, cx| match ev {
+                move |ws, view, ev: &TerminalEvent, window, cx| match ev {
                     TerminalEvent::Activated => ws.touch_code(view.entity_id()),
+                    TerminalEvent::OpenLink { line, column } => {
+                        ws.open_terminal_link(line, *column, window, cx)
+                    }
                     TerminalEvent::Closed => {
                         ws.terminals.borrow_mut().retain(|t| t != view);
                         ws.panel_subs.remove(&view.entity_id());
-                        ws.terms_list.update(cx, |_, cx| cx.notify());
+                        cx.notify();
                     }
                 },
             ),
-            // The list and the tab title follow the program and unseen output.
-            cx.observe(&view, |ws, _, cx| {
-                ws.terms_list.update(cx, |_, cx| cx.notify())
-            }),
+            // The tab title follows the program and unseen output.
+            cx.observe(&view, |_, _, cx| cx.notify()),
         ];
         self.panel_subs.insert(id, subs);
         self.touch_code(id);
         self.terminals.borrow_mut().push(view);
-        self.terms_list.update(cx, |_, cx| cx.notify());
+        cx.notify();
     }
 
     /// A new terminal tab next to the agent's tab (in its tab group), wherever that group is;
@@ -1124,11 +1230,10 @@ impl Workspace {
                 });
             }
             "panel" => {
-                // Show a tool panel in its group: files, skills, agent or terminals (tests).
+                // Show a tool panel in its group: files, skills or agent (tests).
                 let id = match arg {
                     "skills" => PanelId::from(self.skills.entity_id()),
                     "agent" => PanelId::from(self.agent_side.entity_id()),
-                    "terminals" => PanelId::from(self.terms_list.entity_id()),
                     "chat" => PanelId::from(self.claude.entity_id()),
                     _ => PanelId::from(self.files.entity_id()),
                 };
@@ -1233,7 +1338,7 @@ impl Workspace {
             theme.muted_foreground,
             theme.secondary_hover,
         );
-        let items: [(IconName, &'static str, PanelId); 4] = [
+        let items: [(IconName, &'static str, PanelId); 3] = [
             (
                 IconName::FolderOpen,
                 "Files",
@@ -1243,11 +1348,6 @@ impl Workspace {
                 IconName::BookOpen,
                 "Skills",
                 PanelId::from(self.skills.entity_id()),
-            ),
-            (
-                IconName::SquareTerminal,
-                "Terminals",
-                PanelId::from(self.terms_list.entity_id()),
             ),
             (
                 IconName::Bot,
