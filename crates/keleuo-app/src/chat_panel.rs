@@ -41,6 +41,8 @@ pub enum ChatPanelEvent {
     OpenAgent(String),
     /// Show a web page in the Web panel.
     OpenWeb(String),
+    /// Run a shell command in a terminal tab of the session's folder.
+    RunCommand(String),
 }
 
 pub struct ChatPanel {
@@ -694,8 +696,8 @@ impl ChatPanel {
         TextView::markdown(id, md)
             .selectable(true)
             .text_sm()
-            // Code blocks: the language and a copy button; a one-line `!` command (one for the
-            // agent's own shell) also gets Run, which sends it as if typed in the message box.
+            // Code blocks: the language and a copy button; a one-line `!` command also gets Run,
+            // which runs it (without the `!`) in a terminal tab of the session's folder.
             .code_block_actions({
                 let panel = entity.clone();
                 move |block, _, cx| {
@@ -717,11 +719,10 @@ impl ChatPanel {
                                 .xsmall()
                                 .label("Run")
                                 .icon(gpui_kit::assets::IconName::Play)
-                                .tooltip("Run it in this session, as if typed in the message box")
-                                .on_click(move |_, window, cx| {
+                                .tooltip("Run it in a terminal in this folder")
+                                .on_click(move |_, _, cx| {
                                     let text = command.clone();
-                                    let _ = panel.update(cx, |p, cx| p.session.update(cx, |s, cx| s.send_with(&text, Vec::new(), cx)));
-                                    gpui_kit::component::WindowExt::push_notification(window, "Sent to the session", cx);
+                                    let _ = panel.update(cx, |_, cx| cx.emit(ChatPanelEvent::RunCommand(text)));
                                 }),
                         )
                     })
@@ -2288,11 +2289,13 @@ mod elapsed_tests {
     }
 }
 
-/// A code block that is one command for the agent's own shell (`! git push`): that line.
+/// A code block that is one shell command written as for the agent's shell (`! git push`): the
+/// command, without the `!`.
 fn shell_command(code: &str) -> Option<String> {
     let mut lines = code.lines().map(str::trim).filter(|l| !l.is_empty());
     let first = lines.next()?;
-    (lines.next().is_none() && first.starts_with('!') && first.len() > 1).then(|| first.to_string())
+    let command = first.strip_prefix('!')?.trim();
+    (lines.next().is_none() && !command.is_empty()).then(|| command.to_string())
 }
 
 #[cfg(test)]
@@ -2301,7 +2304,8 @@ mod shell_command_tests {
 
     #[test]
     fn one_bang_line_is_a_command() {
-        assert_eq!(shell_command("! git push -u origin main\n").as_deref(), Some("! git push -u origin main"));
+        assert_eq!(shell_command("! git push -u origin main\n").as_deref(), Some("git push -u origin main"));
+        assert_eq!(shell_command("!ls").as_deref(), Some("ls"));
         assert_eq!(shell_command("ls -la"), None);
         assert_eq!(shell_command("! a\n! b"), None, "several commands: copy them instead");
         assert_eq!(shell_command("!"), None);

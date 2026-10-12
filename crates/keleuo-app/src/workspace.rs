@@ -242,6 +242,7 @@ impl Workspace {
                 ChatPanelEvent::NewSession => cx.emit(WorkspaceEvent::NewSession),
                 ChatPanelEvent::OpenAgent(id) => ws.open_agent(id.clone(), window, cx),
                 ChatPanelEvent::OpenWeb(url) => ws.open_web(url.clone(), window, cx),
+                ChatPanelEvent::RunCommand(command) => ws.run_in_terminal(command.clone(), window, cx),
                 ChatPanelEvent::Closed | ChatPanelEvent::Activated => {}
             },
         ));
@@ -671,6 +672,7 @@ impl Workspace {
                 ChatPanelEvent::OpenDiff(path) => ws.open_diff(path.clone(), None, window, cx),
                 ChatPanelEvent::OpenAgent(agent) => ws.open_agent(agent.clone(), window, cx),
                 ChatPanelEvent::OpenWeb(url) => ws.open_web(url.clone(), window, cx),
+                ChatPanelEvent::RunCommand(command) => ws.run_in_terminal(command.clone(), window, cx),
                 ChatPanelEvent::NewSession => cx.emit(WorkspaceEvent::NewSession),
                 ChatPanelEvent::Activated => ws.touch_code(panel.entity_id()),
                 ChatPanelEvent::Closed => {
@@ -916,6 +918,35 @@ impl Workspace {
         self.place(panel_handle(view.clone()), anchor, beside, window, cx);
         let handle = view.read(cx).focus.clone();
         window.focus(&handle, cx);
+    }
+
+    /// Run `command` in a terminal of this folder: one at its prompt (the latest), shown, or a
+    /// new one, given a moment for its shell to start. Typed with Enter, as a person would.
+    pub fn run_in_terminal(&mut self, command: String, window: &mut Window, cx: &mut Context<Self>) {
+        let line = format!("{command}\r").into_bytes();
+        let idle = self.terminals.borrow().iter().rev().find(|t| {
+            t.read(cx).pty.as_ref().is_some_and(|p| p.foreground_program().is_none_or(|n| is_shell(&n)))
+        }).cloned();
+        if let Some(view) = idle {
+            self.show_panel(PanelId::from(view.entity_id()), window, cx);
+            let handle = view.read(cx).focus.clone();
+            window.focus(&handle, cx);
+            if let Some(pty) = view.read(cx).pty.clone() {
+                pty.write(line);
+            }
+            return;
+        }
+        self.new_terminal(window, cx);
+        let Some(view) = self.terminals.borrow().last().cloned() else { return };
+        cx.spawn(async move |_, cx| {
+            cx.background_executor().timer(std::time::Duration::from_millis(SHELL_START_MS)).await;
+            cx.update(|cx| {
+                if let Some(pty) = view.read(cx).pty.clone() {
+                    pty.write(line);
+                }
+            });
+        })
+        .detach();
     }
 
     fn current_terminal(&self, window: &Window, cx: &App) -> Option<Entity<TerminalView>> {
@@ -1229,6 +1260,7 @@ impl Workspace {
             "term" => self.new_terminal(window, cx),
             "web" => self.open_web(arg.to_string(), window, cx),
             "diff" => self.open_diff(PathBuf::from(arg), None, window, cx),
+            "run" => self.run_in_terminal(arg.to_string(), window, cx),
             "type" => {
                 let text = arg.replace("\\n", "\r");
                 if let Some(t) = self
@@ -1557,4 +1589,12 @@ impl Render for Workspace {
                     .child(div().flex_1().min_w_0().h_full().child(self.dock.clone())),
             )
     }
+}
+
+/// How long a new terminal's shell gets to start before a command is typed into it.
+const SHELL_START_MS: u64 = 600;
+
+/// A program name that is a shell (a terminal at its prompt): `zsh`, `-zsh`, `bash`, `fish`…
+fn is_shell(name: &str) -> bool {
+    matches!(name.trim_start_matches('-'), "zsh" | "bash" | "sh" | "fish" | "dash" | "ksh" | "tcsh" | "csh" | "nu")
 }
