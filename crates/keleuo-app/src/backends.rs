@@ -44,7 +44,9 @@ mod tests {
         let mut bad = Vec::new();
         for entry in std::fs::read_dir(&dir).unwrap() {
             let path = entry.unwrap().path();
-            if path.file_name().is_some_and(|n| n == "backends.rs") || path.extension().is_none_or(|e| e != "rs") {
+            // `._*` are macOS metadata files some drives keep beside the real ones, not source.
+            let skip = path.file_name().is_some_and(|n| n == "backends.rs" || n.to_string_lossy().starts_with("._"));
+            if skip || path.extension().is_none_or(|e| e != "rs") {
                 continue;
             }
             let text = std::fs::read_to_string(&path).unwrap();
