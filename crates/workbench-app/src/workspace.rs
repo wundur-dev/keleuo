@@ -24,7 +24,7 @@ use crate::AppSettings;
 use crate::actions::*;
 use crate::chat_panel::{ChatPanel, ChatPanelEvent};
 use crate::agent_session::{AgentSession, SessionEvent, View};
-use crate::agent_side::{AgentSide, AgentSideEvent};
+use crate::agent_side::AgentSide;
 use crate::doc_panel::{DocContext, DocEvent, DocPanel};
 use crate::file_tree::{FileTree, FileTreeEvent};
 use crate::panels::{self, TerminalsList, TerminalsListEvent, doc_key, start_tab_rename, term_key};
@@ -112,12 +112,6 @@ pub fn register_panels(cx: &mut App) {
 pub enum WorkspaceEvent {
     /// Start a new session (pick a folder).
     NewSession,
-    /// Open an earlier conversation of this folder as a new session tab.
-    Resume {
-        chat: Box<workbench_core::conversation::Conversation>,
-        fork: bool,
-        wait_for: Option<u32>,
-    },
     /// This session's Claude wrote or edited a file.
     AgentEdited(PathBuf),
 }
@@ -174,15 +168,7 @@ impl Workspace {
         // The view this session was last shown in, else the default for new sessions.
         session.update(cx, |s, cx| s.apply_remembered_view(cx));
         let claude = cx.new(|cx| ChatPanel::new(session.clone(), window, cx));
-        let agent_side = cx.new(|cx| {
-            AgentSide::new(
-                host.clone(),
-                root.clone(),
-                session.clone(),
-                claude.clone(),
-                cx,
-            )
-        });
+        let agent_side = cx.new(|cx| AgentSide::new(session.clone(), claude.clone(), cx));
         let terminals = Rc::new(RefCell::new(Vec::new()));
         let terms_list = cx.new(|cx| TerminalsList::new(terminals.clone(), cx));
         let doc_ctx = DocContext {
@@ -250,19 +236,6 @@ impl Workspace {
         ));
         // The session tab's dot and name follow the conversation.
         subs.push(cx.observe(&session, |_, _, cx| cx.notify()));
-        subs.push(
-            cx.subscribe(&agent_side, |_, _, ev: &AgentSideEvent, cx| match ev {
-                AgentSideEvent::Resume {
-                    chat,
-                    fork,
-                    wait_for,
-                } => cx.emit(WorkspaceEvent::Resume {
-                    chat: chat.clone(),
-                    fork: *fork,
-                    wait_for: *wait_for,
-                }),
-            }),
-        );
         subs.push(cx.subscribe_in(
             &terms_list,
             window,
@@ -408,7 +381,7 @@ impl Workspace {
             .child(claude, Some(px(settings.claude_width)))
             .child(code, None);
         // Two groups of tool panels, their tabs along the bottom: what you look things up in
-        // (files, skills), and what is running (the agent's subagents and earlier sessions,
+        // (files, skills), and what is running (the agent's subagents,
         // terminals). Panels the backend has no use for are left out.
         let caps = self.session.read(cx).backend.capabilities();
         let mut look = DockLayout::tabs().panel_view(panel_handle(self.files.clone()), cx);
@@ -416,7 +389,7 @@ impl Workspace {
             look = look.panel_view(panel_handle(self.skills.clone()), cx);
         }
         let mut running = DockLayout::tabs();
-        if caps.subagents || caps.earlier_sessions {
+        if caps.subagents {
             running = running.panel_view(panel_handle(self.agent_side.clone()), cx);
         }
         running = running.panel_view(panel_handle(self.terms_list.clone()), cx);
@@ -1105,38 +1078,6 @@ impl Workspace {
                     c => s.answer_first(c == "allow", cx),
                 });
             }
-            "earlier" => {
-                let s = self.agent_side.read(cx);
-                return s
-                    .earlier
-                    .iter()
-                    .enumerate()
-                    .map(|(i, e)| {
-                        let state = if e.running_pid.is_some() {
-                            "running"
-                        } else {
-                            "idle"
-                        };
-                        format!("{}:{}:{}:{}", i + 1, e.info.messages, state, e.info.title)
-                    })
-                    .collect::<Vec<_>>()
-                    .join(" | ");
-            }
-            "scan" => self.agent_side.update(cx, |s, cx| s.scan(cx)),
-            "resume" | "fork" | "takeover" => {
-                let n = arg.parse::<usize>().unwrap_or(1).saturating_sub(1);
-                let found = self.agent_side.read(cx).earlier.get(n).cloned();
-                let Some(e) = found else {
-                    return "no such earlier session".into();
-                };
-                let (fork, wait) = match cmd {
-                    "fork" => (true, None),
-                    "takeover" => (false, e.running_pid),
-                    _ => (false, None),
-                };
-                self.agent_side
-                    .update(cx, |s, cx| s.resume(&e.info.id, fork, wait, window, cx));
-            }
             "view" => {
                 let view = if arg == "terminal" { View::Terminal } else { View::Chat };
                 self.session.update(cx, |s, cx| s.set_view(view, cx));
@@ -1269,7 +1210,7 @@ impl Workspace {
             ),
             (
                 IconName::Bot,
-                "Claude: subagents and earlier sessions",
+                "Agent: subagents",
                 PanelId::from(self.agent_side.entity_id()),
             ),
         ];

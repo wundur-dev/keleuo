@@ -44,7 +44,7 @@ Then `workbench`, `workbench ~/code/app`, `workbench --new .` or `workbench --ss
     |   folder  |                            |                                     |
     | ○ session | [Files][Skills]            |                                     |
     |   ...     | [grip] Agent               |                                     |
-    |           | (subagents, earlier)       |                                     |
+    |           | (subagents)                |                                     |
     |           | [Agent][Terminals]         | [Chat][Terminal]                    |
     +-----------+----------------------------+-------------------------------------+
 
@@ -78,7 +78,8 @@ Then `workbench`, `workbench ~/code/app`, `workbench --new .` or `workbench --ss
   split (gpui-component's DockArea under a custom renderer, `dock_skin.rs`); "Reset layout"
   restores the default, and the arrangement is saved per folder.
 - **Subagents** run live: a strip on top of the chat while they run, a list in the Agent
-  panel, and a card per subagent in the chat.
+  panel, and a card per subagent in the chat. A session is one conversation: earlier and
+  running sessions of a folder are found in the session browser (Cmd+N), not inside a session.
 - When the agent in one session edits a file another session in the same folder has open,
   that file shows "also edited by session ...".
 

@@ -1,5 +1,5 @@
-//! Everything in the window is a dock panel: the Files, Skills, Terminals and agent (subagents
-//! and earlier sessions) lists, the session's chat, every open file and every terminal. This module gives each the
+//! Everything in the window is a dock panel: the Files, Skills, Terminals and Agent (subagents)
+//! lists, the session's chat, every open file and every terminal. This module gives each the
 //! two dock traits (behavior from gpui-base, presentation from gpui-component), the names
 //! shown on their tabs, and in-place renaming of a tab.
 

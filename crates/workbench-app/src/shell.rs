@@ -75,6 +75,8 @@ pub struct Shell {
     focus: FocusHandle,
     subs: HashMap<EntityId, Vec<Subscription>>,
     _browser_sub: Option<Subscription>,
+    /// The last `earlier` listing (control channel).
+    earlier: Vec<(workbench_core::agent::SessionInfo, Option<u32>)>,
 }
 
 impl Shell {
@@ -89,6 +91,7 @@ impl Shell {
             focus: cx.focus_handle(),
             subs: HashMap::new(),
             _browser_sub: None,
+            earlier: Vec::new(),
         };
         match start {
             Start::Session(host, root) => {
@@ -251,20 +254,6 @@ impl Shell {
         let subs = vec![
             cx.subscribe_in(&ws, window, |shell, ws, ev: &WorkspaceEvent, window, cx| match ev {
                 WorkspaceEvent::NewSession => shell.new_session(window, cx),
-                WorkspaceEvent::Resume { chat, fork, wait_for } => {
-                    let (host, root, backend) = {
-                        let w = ws.read(cx);
-                        (w.host(), w.root().to_path_buf(), w.session.read(cx).backend.clone())
-                    };
-                    let mut session = AgentSession::resumed(host.clone(), backend, root.clone(), (**chat).clone(), *fork);
-                    if let Some(pid) = wait_for {
-                        session.waiting_for = Some(*pid);
-                        session.chat.push_notice(format!(
-                            "Waiting for the other terminal (process {pid}) to finish. Quit it there (type /exit or press Ctrl+D twice); this session resumes here by itself."
-                        ));
-                    }
-                    shell.add_session(host, root, session, None, *wait_for, window, cx);
-                }
                 WorkspaceEvent::AgentEdited(path) => shell.edited(ws.clone(), path.clone(), window, cx),
             }),
             // The row's name, dot, activity and cost follow the session.
@@ -435,6 +424,46 @@ impl Shell {
             }
             "close-browser" => {
                 self.close_browser(window, cx);
+                "ok".into()
+            }
+            "earlier" => {
+                // The shown session's folder's earlier sessions, as the browser lists them (tests).
+                let Some(w) = self.active_workspace() else { return Some("no session".into()) };
+                let (host, root, backend) = {
+                    let w = w.read(cx);
+                    (w.host(), w.root().to_path_buf(), w.session.read(cx).backend.clone())
+                };
+                let sessions = backend.earlier_sessions(host.as_ref(), &root, 20);
+                let running = backend.running_elsewhere(host.as_ref(), &root, &sessions, std::process::id());
+                self.earlier = sessions
+                    .into_iter()
+                    .map(|s| {
+                        let pid = running.iter().find(|(_, id)| *id == s.id).map(|(p, _)| *p);
+                        (s, pid)
+                    })
+                    .collect();
+                self.earlier
+                    .iter()
+                    .enumerate()
+                    .map(|(i, (s, pid))| format!("{}:{}:{}:{}", i + 1, s.messages, if pid.is_some() { "running" } else { "idle" }, s.title))
+                    .collect::<Vec<_>>()
+                    .join(" | ")
+            }
+            "resume" | "fork" | "takeover" => {
+                let n = arg.parse::<usize>().unwrap_or(1).saturating_sub(1);
+                let (Some((s, pid)), Some(w)) = (self.earlier.get(n).cloned(), self.active_workspace()) else {
+                    return Some("no such earlier session (run earlier first)".into());
+                };
+                let (host, root, backend) = {
+                    let w = w.read(cx);
+                    (w.host(), w.root().to_path_buf(), w.session.read(cx).backend.clone())
+                };
+                let (fork, wait) = match cmd {
+                    "fork" => (true, None),
+                    "takeover" => (false, pid),
+                    _ => (false, None),
+                };
+                self.resume(host, root, backend, s.id, fork, wait, window, cx);
                 "ok".into()
             }
             "fold-sessions" => {
