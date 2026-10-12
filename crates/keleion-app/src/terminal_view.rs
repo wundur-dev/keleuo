@@ -76,6 +76,10 @@ pub struct TerminalView {
     /// Shown over the blank screen until the program draws: the conversation's last lines
     /// and what is starting.
     pub placeholder: Option<Placeholder>,
+    /// For an agent's interface: what Cmd+V with an image does (see [`ImageSupport`]).
+    pub images: Option<ImageSupport>,
+    /// The image whose `[Image #N]` marker is under the pointer, and where.
+    hover_image: Option<(std::path::PathBuf, Point<Pixels>)>,
     error: Option<String>,
     bounds: Rc<Cell<Bounds<Pixels>>>,
     cell: Rc<Cell<Size<Pixels>>>,
@@ -89,6 +93,38 @@ pub struct TerminalView {
     pub folder: std::path::PathBuf,
     pub branch: Option<String>,
     _events: Option<Task<()>>,
+}
+
+/// Keeps a pasted image (its bytes and file extension).
+pub type PastedFn = dyn Fn(Vec<u8>, &'static str, &mut App);
+/// The image behind `[Image #N]`.
+pub type ImageFn = dyn Fn(usize, &App) -> Option<std::path::PathBuf>;
+
+/// Images in an agent's interface: Cmd+V with an image on the clipboard sends `paste_key` (the
+/// interface reads the clipboard itself) after `pasted` keeps a copy; `image` gives the image
+/// behind an `[Image #N]` marker on screen, for a preview while the pointer is over it.
+#[derive(Clone)]
+pub struct ImageSupport {
+    pub paste_key: Vec<u8>,
+    pub pasted: Rc<PastedFn>,
+    pub image: Rc<ImageFn>,
+}
+
+/// The `N` of an `[Image #N]` marker in `line` covering column `col`.
+pub fn image_marker_at(line: &str, col: usize) -> Option<usize> {
+    let chars: Vec<char> = line.chars().collect();
+    let text: String = chars.iter().collect();
+    let mut from = 0;
+    while let Some(i) = text[from..].find("[Image #") {
+        let start = from + i;
+        let end = start + text[start..].find(']')?;
+        let (s, e) = (text[..start].chars().count(), text[..end].chars().count());
+        if (s..=e).contains(&col) {
+            return text[start + 8..end].parse().ok();
+        }
+        from = end;
+    }
+    None
 }
 
 /// What a terminal shows while its program starts.
@@ -165,6 +201,8 @@ impl TerminalView {
             unseen: false,
             drawn: false,
             placeholder: None,
+            images: None,
+            hover_image: None,
             error,
             bounds: Rc::new(Cell::new(Bounds::default())),
             cell: Rc::new(Cell::new(size(px(8.), px(16.)))),
@@ -228,8 +266,34 @@ impl TerminalView {
         }
     }
 
+    /// Tests: Cmd+V.
+    pub fn test_paste(&mut self, cx: &mut Context<Self>) {
+        self.paste(cx);
+    }
+
     fn paste(&self, cx: &mut Context<Self>) {
-        let Some(text) = cx.read_from_clipboard().and_then(|c| c.text()) else {
+        let item = cx.read_from_clipboard();
+        if let (Some(images), Some(item)) = (self.images.clone(), item.as_ref()) {
+            let image = item.entries().iter().find_map(|e| match e {
+                ClipboardEntry::Image(i) => Some(i.clone()),
+                _ => None,
+            });
+            if let Some(image) = image {
+                // The interface pastes it itself (its own `[Image #N]`); keep a copy to show.
+                let ext = match image.format {
+                    ImageFormat::Jpeg => "jpg",
+                    ImageFormat::Gif => "gif",
+                    ImageFormat::Webp => "webp",
+                    _ => "png",
+                };
+                (images.pasted)(image.bytes.clone(), ext, cx);
+                if let Some(pty) = &self.pty {
+                    pty.write(images.paste_key.clone());
+                }
+                return;
+            }
+        }
+        let Some(text) = item.and_then(|c| c.text()) else {
             return;
         };
         let text = text.replace("\r\n", "\r").replace('\n', "\r");
@@ -325,6 +389,27 @@ impl TerminalView {
     }
 
     fn mouse_move(&mut self, e: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(images) = self.images.clone()
+            && let Some(pty) = &self.pty
+        {
+            // An `[Image #N]` under the pointer: show that image.
+            let (point, _) = self.grid_point(e.position);
+            let line = {
+                let term = pty.term.lock();
+                let grid = term.grid();
+                if point.line.0 >= -(grid.history_size() as i32) && point.line.0 < grid.screen_lines() as i32 {
+                    let row = &grid[point.line];
+                    (0..grid.columns()).map(|c| row[Column(c)].c).collect::<String>()
+                } else {
+                    String::new()
+                }
+            };
+            let found = image_marker_at(&line, point.column.0).and_then(|n| (images.image)(n, cx)).map(|p| (p, e.position));
+            if found.as_ref().map(|f| &f.0) != self.hover_image.as_ref().map(|h| &h.0) {
+                self.hover_image = found;
+                cx.notify();
+            }
+        }
         if !self.selecting || e.pressed_button != Some(MouseButton::Left) {
             return;
         }
@@ -585,6 +670,21 @@ impl Render for TerminalView {
             .size_full(),
         )
         .children(placeholder)
+        .children(self.hover_image.clone().map(|(path, at)| {
+            let b = self.bounds.get();
+            let (x, y) = (at.x - b.origin.x + px(12.), at.y - b.origin.y + px(16.));
+            div()
+                .absolute()
+                .left(x)
+                .top(y)
+                .p_1()
+                .rounded_md()
+                .bg(hsla(0x2a2b2e))
+                .border_1()
+                .border_color(hsla(0x44464b))
+                .shadow_lg()
+                .child(img(path).max_w(px(320.)).max_h(px(240.)).object_fit(ObjectFit::Contain))
+        }))
     }
 }
 
@@ -783,6 +883,14 @@ fn paint_grid(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[::core::prelude::v1::test]
+    fn finds_the_image_marker_under_the_pointer() {
+        let line = "❯ [Image #1] [Image #12] what is this";
+        assert_eq!(image_marker_at(line, 4), Some(1));
+        assert_eq!(image_marker_at(line, 15), Some(12));
+        assert_eq!(image_marker_at(line, 30), None);
+    }
 
     #[::core::prelude::v1::test]
     fn the_wheel_scrolls_the_normal_screen() {

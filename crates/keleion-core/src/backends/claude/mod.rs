@@ -156,6 +156,31 @@ impl Backend for ClaudeBackend {
         hooks::reply(allow)
     }
 
+    fn terminal_attach(&self, path: &Path, bracketed: bool) -> Option<Vec<u8>> {
+        // A pasted image path becomes `[Image #N]`, the image itself attached.
+        let p = path.to_string_lossy();
+        Some(if bracketed { format!("\x1b[200~{p}\x1b[201~") } else { p.to_string() }.into_bytes())
+    }
+
+    fn terminal_paste_image(&self) -> Option<Vec<u8>> {
+        // Claude Code reads an image from the clipboard on Ctrl+V.
+        Some(vec![0x16])
+    }
+
+    fn model_command(&self, model: &str) -> Option<String> {
+        Some(format!("/model {model}"))
+    }
+
+    fn mode_cycle(&self) -> Option<crate::agent::ModeCycle> {
+        let modes = [("default", ""), ("acceptEdits", "accept edits on"), ("plan", "plan mode on"), ("auto", "auto mode on")];
+        // Shift+Tab cycles the modes.
+        Some((modes.iter().map(|(m, l)| (m.to_string(), l.to_string())).collect(), b"\x1b[Z".to_vec()))
+    }
+
+    fn hook_mode(&self, payload: &Value) -> Option<String> {
+        payload.get("permission_mode").and_then(Value::as_str).map(str::to_string)
+    }
+
     fn billed_per_use(&self, host: &dyn Host, project: &Path) -> Option<bool> {
         let env = |k: &str| std::env::var_os(k).is_some_and(|v| !v.is_empty());
         let settings = [

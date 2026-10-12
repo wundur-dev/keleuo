@@ -502,6 +502,16 @@ impl Shell {
                 }
                 "ok".into()
             }
+            "worktree-ask" => {
+                // Tests: show the worktree form for the selected folder.
+                match self.browser.clone() {
+                    Some(b) => {
+                        b.update(cx, |b, cx| b.ask_worktree(window, cx));
+                        "ok".into()
+                    }
+                    None => "no browser".into(),
+                }
+            }
             "close-browser" => {
                 self.close_browser(window, cx);
                 "ok".into()

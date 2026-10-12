@@ -180,6 +180,12 @@ fn main() {
             theme::apply(cx);
             control::start(cx);
             hooks::init(cx);
+            // Cached images older than 30 days go (off the UI thread).
+            std::thread::spawn(|| {
+                if let Some(root) = keleion_core::images::root() {
+                    keleion_core::images::clean_old(&root, std::time::SystemTime::now());
+                }
+            });
             bind_keys(cx);
             cx.set_menus(menus());
             cx.on_action(|_: &Quit, cx| {

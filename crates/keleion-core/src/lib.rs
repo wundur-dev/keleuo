@@ -21,6 +21,7 @@ pub mod conversation;
 pub mod diff;
 pub mod files;
 pub mod frontmatter;
+pub mod images;
 pub mod host;
 pub mod links;
 pub mod settings;

@@ -1148,6 +1148,25 @@ impl Workspace {
                 let c = if cmd == "chat-top" { "top" } else { "scroll" };
                 self.claude.update(cx, |p, cx| p.test_command(c, dy, cx));
             }
+            "attach" => self.claude.update(cx, |p, cx| p.test_attach(PathBuf::from(arg), cx)),
+            "send-attached" => {
+                // Tests: send with what is attached.
+                let text = arg.to_string();
+                self.claude.update(cx, |p, cx| p.test_send(&text, cx));
+            }
+            "model" => {
+                let m = arg.to_string();
+                self.session.update(cx, |s, cx| s.set_model(&m, cx));
+            }
+            "mode" => {
+                let m = (arg != "default").then(|| arg.to_string());
+                self.session.update(cx, |s, cx| s.set_mode(m, cx));
+            }
+            "live-mode" => return format!("{:?}", self.session.read(cx).live_mode),
+            "term-paste" => match self.session.read(cx).terminal_view() {
+                Some(t) => t.update(cx, |t, cx| t.test_paste(cx)),
+                None => return "no terminal view".into(),
+            },
             "trust" | "distrust" => {
                 self.session.update(cx, |s, cx| s.answer_trust(cmd == "trust", cx));
             }

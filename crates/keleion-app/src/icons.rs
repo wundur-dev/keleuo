@@ -32,6 +32,10 @@ icon_assets!(
         ScrollText,
         FolderCode,
         Workflow,
+        Paperclip,
+        ArrowUp,
+        Square,
+        Copy,
     ]
 );
 

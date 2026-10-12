@@ -95,6 +95,24 @@ Then `keleion`, `keleion ~/code/app`, `keleion --new .` or `keleion --ssh dev:/s
   anything else it asks before it is up (no SessionStart hook within 6 seconds, or a list to
   choose from) shows "is asking something in the terminal" with Show terminal, and the
   session's dot turns amber.
+- **Chat** reads like the chat apps people know: a centred column (760 px at most), the
+  person's messages as rounded bubbles on the right, Claude's replies as plain text across
+  the column, code blocks with their language and a copy button, Copy under each message on
+  hover. The composer floats at the bottom of the column: the text, images to send as
+  thumbnails (paste, drop, or the paperclip; click one to see it full size, x to remove), the
+  model, the permission mode and a send button that turns into stop while Claude works.
+- **Model and permission mode** from the composer. A new model restarts Claude Code on the
+  same conversation with `--model` between turns (Claude Code's own `/model` would also save
+  it as the default for every new session in the person's settings). The permission mode is
+  switched as a person would, with Shift+Tab until the status line shows it; the hooks
+  report the mode it is in. A message starting with `/` is typed, not pasted, so Claude Code
+  takes it as a command.
+- **Images**: images sent from Chat are pasted into Claude Code as file paths, which it turns
+  into its own `[Image #N]` attachments; in the Terminal view Cmd+V with an image on the
+  clipboard sends Ctrl+V, Claude Code's own image paste, and a copy is kept. Pointing at an
+  `[Image #N]` on the terminal screen shows that image. Images in history show as
+  thumbnails. They are kept in `~/Library/Caches/keleion/images/<session>` and removed after
+  30 days; nothing is uploaded anywhere else.
 - **Worktrees** are explicit: the browser's right side is titled with the folder's repository
   and branch, and "New session in a git worktree..." first shows what it will make ("Copy of
   proj (main) into ../proj-2, branch keleion/proj-2") with the name editable.

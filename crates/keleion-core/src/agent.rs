@@ -57,7 +57,13 @@ pub enum Event {
     Notice(String),
     /// Spend worked out from token counts and published prices (the agent reported none).
     CostEstimate { usd: f64 },
+    /// Images the person sent with their last message (stored files).
+    UserImages(Vec<PathBuf>),
 }
+
+/// The permission modes as `(mode, what the status line says)`, in the order the mode key
+/// cycles them, and that key.
+pub type ModeCycle = (Vec<(String, String)>, Vec<u8>);
 
 /// What the agent's own interface reports through the window's hooks, in neutral terms (see
 /// [`Backend::hook_settings`] and [`Backend::parse_hook`]).
@@ -257,8 +263,33 @@ pub trait Backend: Send + Sync {
     /// What to type into the terminal interface to send `text` as the person's message, in
     /// pieces written a moment apart. `bracketed`: the interface asked for bracketed paste.
     fn terminal_message(&self, text: &str, bracketed: bool) -> Vec<Vec<u8>> {
-        let body = if bracketed { format!("\x1b[200~{text}\x1b[201~") } else { text.replace('\n', " ") };
+        // A command (`/model opus`) is typed, so the interface takes it as a command; a paste
+        // of it would be plain text.
+        let command = text.starts_with('/') && !text.contains('\n');
+        let body = if bracketed && !command { format!("\x1b[200~{text}\x1b[201~") } else { text.replace('\n', " ") };
         vec![body.into_bytes(), b"\r".to_vec()]
+    }
+    /// What to type to attach an image file to the message being written (before its text),
+    /// or `None` when the interface cannot take images that way.
+    fn terminal_attach(&self, _path: &Path, _bracketed: bool) -> Option<Vec<u8>> {
+        None
+    }
+    /// The key that makes the interface paste an image from the clipboard itself.
+    fn terminal_paste_image(&self) -> Option<Vec<u8>> {
+        None
+    }
+    /// The command that switches the model (`/model <name>`), when there is one.
+    fn model_command(&self, _model: &str) -> Option<String> {
+        None
+    }
+    /// The permission modes, in the order the interface's mode key cycles through them, as
+    /// `(mode name, what its status line says)`; and that key.
+    fn mode_cycle(&self) -> Option<ModeCycle> {
+        None
+    }
+    /// The permission mode a hook call reports the interface is in.
+    fn hook_mode(&self, _payload: &Value) -> Option<String> {
+        None
     }
     /// What to type to stop the current turn.
     fn terminal_interrupt(&self) -> Vec<u8> {

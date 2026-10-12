@@ -11,6 +11,7 @@ use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
 
 use crate::agent_session::{Asking, Spend, View};
 use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::menu::DropdownMenu;
 use crate::sheet_tabs::{self, Joined, Palette, StripState};
 use gpui_kit::component::text::TextView;
 use gpui_kit::component::{ActiveTheme, Icon, IconName, Sizable};
@@ -47,6 +48,10 @@ pub struct ChatPanel {
     list_len: usize,
     /// Earlier parts being read (by their start in the session file).
     loading: HashSet<u64>,
+    /// Images to send with the next message.
+    attachments: Vec<PathBuf>,
+    /// An image shown full size over the chat.
+    preview: Option<PathBuf>,
     /// Tool cards the user opened (or closed, for diffs which start open).
     toggled: HashSet<String>,
     pub index: Arc<FileIndex>,
@@ -89,13 +94,14 @@ impl ChatPanel {
             |panel, input, ev: &InputEvent, window, cx| {
                 if let InputEvent::PressEnter { shift: false, .. } = ev {
                     let text = input.read(cx).value().to_string();
-                    if text.trim().is_empty() {
+                    if text.trim().is_empty() && panel.attachments.is_empty() {
                         return;
                     }
                     input.update(cx, |s, cx| s.set_value("", window, cx));
                     // Sending goes back to the end and follows it.
                     panel.list.set_follow_mode(FollowMode::Tail);
-                    panel.session.update(cx, |s, cx| s.send(&text, cx));
+                    let images = std::mem::take(&mut panel.attachments);
+                    panel.session.update(cx, |s, cx| s.send_with(&text, images, cx));
                 }
             },
         );
@@ -144,6 +150,8 @@ impl ChatPanel {
             },
             list_len: 0,
             loading: HashSet::new(),
+            attachments: Vec::new(),
+            preview: None,
             toggled: HashSet::new(),
             index: Arc::new(FileIndex::default()),
             last_revision: 0,
@@ -290,11 +298,23 @@ impl ChatPanel {
             self.load_earlier(from, to, cx);
         }
         let last = ix + 1 == self.list_len;
+        // A centred column of comfortable width, the page behind it.
         div()
-            .px_2()
-            .pt_2()
-            .when(last, |d| d.pb_2())
-            .children(self.render_items(std::slice::from_ref(&item), &format!("main{ix}"), cx))
+            .w_full()
+            .flex()
+            .justify_center()
+            .px_4()
+            .pt_3()
+            .when(last, |d| d.pb_4())
+            .child(
+                div()
+                    .w_full()
+                    .max_w(px(COLUMN))
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .children(self.render_items(std::slice::from_ref(&item), &format!("main{ix}"), cx)),
+            )
             .into_any_element()
     }
 
@@ -333,6 +353,30 @@ impl ChatPanel {
         TextView::markdown(id, md)
             .selectable(true)
             .text_sm()
+            // Code blocks: the language and a copy button.
+            .code_block_actions(|block, _, cx| {
+                let code = block.code();
+                let lang = block.lang().unwrap_or_else(|| "code".into());
+                let muted = cx.theme().muted_foreground;
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .text_size(px(11.))
+                    .text_color(muted)
+                    .child(lang)
+                    .child(
+                        Button::new("copy-code")
+                            .xsmall()
+                            .ghost()
+                            .icon(gpui_kit::assets::IconName::Copy)
+                            .tooltip("Copy")
+                            .on_click(move |_, window, cx| {
+                                cx.write_to_clipboard(ClipboardItem::new_string(code.to_string()));
+                                gpui_kit::component::WindowExt::push_notification(window, "Copied", cx);
+                            }),
+                    )
+            })
             .on_link_click(move |url, _, _, cx| {
                 if let Some((path, line)) = links::parse_url(url) {
                     let _ = entity.update(cx, |p, cx| p.open(path, line, cx));
@@ -724,7 +768,7 @@ impl ChatPanel {
     /// Elements for a list of items; `key` keeps element ids unique per list.
     fn render_items(&self, items: &[Item], key: &str, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let theme = cx.theme();
-        let (fg, muted, red, user_bg, accent) = (
+        let (fg, muted, red, user_bg, _accent) = (
             theme.foreground,
             theme.muted_foreground,
             theme.red,
@@ -734,22 +778,70 @@ impl ChatPanel {
         let mut out = Vec::new();
         for (ix, item) in items.iter().enumerate() {
             let el = match item {
-                Item::User(text) => div()
-                    .pl_2()
-                    .pr_2()
-                    .py_1()
-                    .rounded_md()
-                    .border_l_2()
-                    .border_color(accent)
-                    .bg(user_bg)
-                    .text_sm()
-                    .text_color(fg)
-                    .child(text.clone())
-                    .into_any_element(),
-                Item::Assistant { text, .. } => div()
-                    .text_color(fg)
-                    .child(self.markdown(SharedString::from(format!("msg-{key}-{ix}")), text, cx))
-                    .into_any_element(),
+                // The person's message: a rounded bubble on the right.
+                Item::User(text) => {
+                    let copy = text.clone();
+                    let group = SharedString::from(format!("user-{key}-{ix}"));
+                    div()
+                        .group(group.clone())
+                        .w_full()
+                        .flex()
+                        .flex_col()
+                        .items_end()
+                        .gap_1()
+                        .child(
+                            div()
+                                .max_w(relative(0.8))
+                                .px_3()
+                                .py_2()
+                                .rounded(px(18.))
+                                .bg(user_bg)
+                                .text_sm()
+                                .line_height(rems(1.45))
+                                .text_color(fg)
+                                .child(text.clone()),
+                        )
+                        .child(hover_actions(group, format!("{key}-{ix}"), copy, muted))
+                        .into_any_element()
+                }
+                // Claude's reply: plain text across the column, no bubble.
+                Item::Assistant { text, streaming } => {
+                    let copy = text.clone();
+                    let group = SharedString::from(format!("reply-{key}-{ix}"));
+                    div()
+                        .group(group.clone())
+                        .w_full()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .text_color(fg)
+                        .line_height(rems(1.5))
+                        .child(self.markdown(SharedString::from(format!("msg-{key}-{ix}")), text, cx))
+                        .when(!streaming, |d| d.child(hover_actions(group, format!("{key}-{ix}"), copy, muted)))
+                        .into_any_element()
+                }
+                Item::Images(paths) => {
+                    let mut row = div().w_full().flex().justify_end().gap_2().flex_wrap();
+                    for (n, path) in paths.iter().enumerate() {
+                        let p = path.clone();
+                        row = row.child(
+                            div()
+                                .id(SharedString::from(format!("img-{key}-{ix}-{n}")))
+                                .size(px(96.))
+                                .rounded(px(12.))
+                                .overflow_hidden()
+                                .border_1()
+                                .border_color(cx.theme().border)
+                                .cursor_pointer()
+                                .child(img(path.clone()).size_full().object_fit(ObjectFit::Cover))
+                                .on_click(cx.listener(move |panel, _, _, cx| {
+                                    panel.preview = Some(p.clone());
+                                    cx.notify();
+                                })),
+                        );
+                    }
+                    row.into_any_element()
+                }
                 Item::Tool(tool) => self.render_tool(ix, tool, cx),
                 Item::Permission(p) => self.render_permission(p, cx),
                 Item::Notice(t) => div()
@@ -935,12 +1027,7 @@ impl ChatPanel {
 
     fn render_header(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
-        let (muted, hover, border, warning) = (
-            theme.muted_foreground,
-            theme.secondary_hover,
-            theme.border,
-            theme.warning,
-        );
+        let (muted, hover, border) = (theme.muted_foreground, theme.secondary_hover, theme.border);
         let session = self.session.read(cx);
         let chat = &session.chat;
         let model = chat
@@ -948,9 +1035,6 @@ impl ChatPanel {
             .clone()
             .or_else(|| session.model.clone())
             .unwrap_or_else(|| "default model".into());
-        let caps = session.backend.capabilities();
-        let mode = session.permission_mode.clone();
-        let busy = chat.busy;
         let mut status = vec![model];
         if let Some(s) = &chat.status {
             status.push(s.clone());
@@ -982,8 +1066,6 @@ impl ChatPanel {
                 _ => "auto (only when billed per use)",
             }
         );
-        let accept_mode = caps.accept_edits_mode.clone();
-        let accept = mode.is_some() && mode == accept_mode;
         let backend_name = session.backend.name();
         div()
             .h(px(22.))
@@ -1027,37 +1109,6 @@ impl ChatPanel {
                             let _ = settings.borrow().save();
                             window.refresh();
                         }),
-                )
-            })
-            .when_some(accept_mode, |d, accept_mode| d.child(
-                div()
-                    .id("perm-mode")
-                    .px_1()
-                    .rounded_sm()
-                    .cursor_pointer()
-                    .when(accept, |d| d.text_color(warning))
-                    .hover(|d| d.bg(hover))
-                    .child(if accept { "accept edits" } else { "ask first" })
-                    .on_click(cx.listener(move |p, _, _, cx| {
-                        let next = if accept { None } else { Some(accept_mode.clone()) };
-                        p.session
-                            .update(cx, |s, cx| s.set_permission_mode(next, cx));
-                    })),
-            ))
-            .when(busy, |d| {
-                d.child(
-                    div()
-                        .id("stop")
-                        .px_1()
-                        .rounded_sm()
-                        .cursor_pointer()
-                        .hover(|d| d.bg(hover))
-                        .child("stop")
-                        .on_click(
-                            cx.listener(|p, _, _, cx| {
-                                p.session.update(cx, |s, cx| s.interrupt(cx))
-                            }),
-                        ),
                 )
             })
             .child(
@@ -1274,7 +1325,7 @@ impl Render for ChatPanel {
         let focused = self.contains_focus(window, cx);
         let ring = cx.theme().ring;
         let theme = cx.theme();
-        let (fg, muted, red, user_bg, border) = (
+        let (fg, muted, red, user_bg, _border) = (
             theme.foreground,
             theme.muted_foreground,
             theme.red,
@@ -1323,16 +1374,317 @@ impl Render for ChatPanel {
                     )),
             )
             .children(self.render_asking(cx))
+            .child(self.render_composer(window, cx)))
+            .children(self.render_views(cx))
+            .children(self.preview.clone().map(|path| {
+                div()
+                    .id("image-preview")
+                    .absolute()
+                    .inset_0()
+                    .bg(gpui_kit::black().opacity(0.8))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .p_6()
+                    .cursor_pointer()
+                    .child(img(path).max_w_full().max_h_full().object_fit(ObjectFit::Contain))
+                    .on_click(cx.listener(|p, _, _, cx| {
+                        p.preview = None;
+                        cx.notify();
+                    }))
+            }))
+            .relative()
+    }
+}
+
+impl ChatPanel {
+    /// Tests: send `text` with what is attached.
+    pub fn test_send(&mut self, text: &str, cx: &mut Context<Self>) {
+        let images = std::mem::take(&mut self.attachments);
+        self.session.update(cx, |s, cx| s.send_with(text, images, cx));
+    }
+
+    /// Tests: attach an image file.
+    pub fn test_attach(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        self.attach([path], cx);
+    }
+
+    /// Add image files to the next message.
+    fn attach(&mut self, paths: impl IntoIterator<Item = PathBuf>, cx: &mut Context<Self>) {
+        for p in paths {
+            let image = matches!(
+                p.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase()).as_deref(),
+                Some("png" | "jpg" | "jpeg" | "gif" | "webp")
+            );
+            if image && !self.attachments.contains(&p) {
+                self.attachments.push(p);
+            }
+        }
+        cx.notify();
+    }
+
+    /// A pasted image (bytes from the clipboard): kept in the session's image folder.
+    fn attach_bytes(&mut self, bytes: &[u8], ext: &str, cx: &mut Context<Self>) {
+        let id = self.session.read(cx).chat.session_id.clone();
+        if let Some(dir) = keleion_core::images::session_dir(id.as_deref())
+            && let Ok(path) = keleion_core::images::store(&dir, bytes, ext)
+        {
+            self.attach([path], cx);
+        }
+    }
+
+    /// The composer: a rounded box floating at the bottom of the column, with the images to
+    /// send, the text, and the session's controls (attach, model, permission mode, send/stop).
+    fn render_composer(&self, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let (border, muted, fg, field, accent) = (theme.border, theme.muted_foreground, theme.foreground, theme.secondary, theme.ring);
+        let session = self.session.read(cx);
+        let busy = session.chat.busy;
+        let caps = session.backend.capabilities();
+        let model = session.chat.model.clone().or_else(|| session.model.clone()).unwrap_or_else(|| "default model".into());
+        let mode = session.live_mode.clone().or_else(|| session.permission_mode.clone()).unwrap_or_else(|| "default".into());
+        let has_text = !self.input.read(cx).value().trim().is_empty() || !self.attachments.is_empty();
+        let weak = self.session.downgrade();
+        let entity = cx.entity().downgrade();
+
+        let mut chips = div().flex().flex_wrap().gap_2();
+        for (n, path) in self.attachments.iter().enumerate() {
+            let (p1, p2) = (path.clone(), path.clone());
+            chips = chips.child(
+                div()
+                    .id(("chip", n))
+                    .relative()
+                    .size(px(56.))
+                    .rounded(px(10.))
+                    .overflow_hidden()
+                    .border_1()
+                    .border_color(border)
+                    .cursor_pointer()
+                    .child(img(path.clone()).size_full().object_fit(ObjectFit::Cover))
+                    .on_click(cx.listener(move |p, _, _, cx| {
+                        p.preview = Some(p1.clone());
+                        cx.notify();
+                    }))
+                    .child(
+                        div()
+                            .id(("chip-x", n))
+                            .absolute()
+                            .top(px(2.))
+                            .right(px(2.))
+                            .size(px(16.))
+                            .rounded_full()
+                            .bg(gpui_kit::black().opacity(0.7))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(Icon::new(IconName::Close).xsmall().text_color(gpui_kit::white()))
+                            .on_click(cx.listener(move |p, _, _, cx| {
+                                cx.stop_propagation();
+                                p.attachments.retain(|a| *a != p2);
+                                cx.notify();
+                            })),
+                    ),
+            );
+        }
+
+        let models: Vec<String> = caps.models.clone();
+        let (w_model, w_mode) = (weak.clone(), weak.clone());
+        let model_button = Button::new("model")
+            .xsmall()
+            .ghost()
+            .label(short_model(&model))
+            .tooltip("Model")
+            .dropdown_menu(move |menu, _, _| {
+                let mut menu = menu;
+                for m in &models {
+                    let (w, m2) = (w_model.clone(), m.clone());
+                    menu = menu.item(gpui_kit::component::menu::PopupMenuItem::new(capitalize(m)).on_click(move |_, _, cx| {
+                        let _ = w.update(cx, |s, cx| s.set_model(&m2, cx));
+                    }));
+                }
+                menu
+            });
+        let modes: Vec<(Option<String>, &'static str)> = vec![
+            (None, "Ask before acting"),
+            (caps.accept_edits_mode.clone(), "Accept edits"),
+            (Some("plan".to_string()), "Plan"),
+        ];
+        let mode_label = match mode.as_str() {
+            "acceptEdits" => "Accept edits",
+            "plan" => "Plan",
+            "auto" => "Auto",
+            "bypassPermissions" => "Bypass permissions",
+            _ => "Ask before acting",
+        };
+        let mode_button = Button::new("mode")
+            .xsmall()
+            .ghost()
+            .label(mode_label)
+            .tooltip("Permission mode")
+            .dropdown_menu(move |menu, _, _| {
+                let mut menu = menu;
+                for (m, label) in &modes {
+                    let (w, m2) = (w_mode.clone(), m.clone());
+                    menu = menu.item(gpui_kit::component::menu::PopupMenuItem::new(*label).on_click(move |_, _, cx| {
+                        let _ = w.update(cx, |s, cx| s.set_mode(m2.clone(), cx));
+                    }));
+                }
+                menu
+            });
+        let input = self.input.clone();
+        let send = div()
+            .id("send")
+            .size(px(28.))
+            .rounded_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_pointer()
+            .when(busy, |d| d.bg(fg))
+            .when(!busy && has_text, |d| d.bg(fg))
+            .when(!busy && !has_text, |d| d.bg(muted.opacity(0.35)))
+            .child(
+                Icon::new(if busy { gpui_kit::assets::IconName::Square } else { gpui_kit::assets::IconName::ArrowUp })
+                    .small()
+                    .text_color(theme.background),
+            )
+            .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(if busy { "Stop (Esc in the terminal)" } else { "Send (Enter)" }).build(w, cx))
+            .on_click(cx.listener(move |p, _, window, cx| {
+                if busy {
+                    p.session.update(cx, |s, cx| s.interrupt(cx));
+                    return;
+                }
+                let text = input.read(cx).value().to_string();
+                if text.trim().is_empty() && p.attachments.is_empty() {
+                    return;
+                }
+                input.update(cx, |s, cx| s.set_value("", window, cx));
+                p.list.set_follow_mode(FollowMode::Tail);
+                let images = std::mem::take(&mut p.attachments);
+                p.session.update(cx, |s, cx| s.send_with(&text, images, cx));
+            }));
+        let attach = Button::new("attach")
+            .xsmall()
+            .ghost()
+            .icon(gpui_kit::assets::IconName::Paperclip)
+            .tooltip("Attach images")
+            .on_click(cx.listener(|_, _, _, cx| {
+                let paths = cx.prompt_for_paths(PathPromptOptions { files: true, directories: false, multiple: true, prompt: None });
+                cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+                    if let Ok(Ok(Some(paths))) = paths.await {
+                        let _ = this.update(cx, |p, cx| p.attach(paths, cx));
+                    }
+                })
+                .detach();
+            }));
+        let paste_target = entity.clone();
+        div()
+            .flex_none()
+            .w_full()
+            .flex()
+            .justify_center()
+            .px_4()
+            .pb_3()
+            .pt_1()
             .child(
                 div()
-                    .flex_none()
-                    .p_1()
-                    .border_t_1()
+                    .id("composer")
+                    .w_full()
+                    .max_w(px(COLUMN))
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .px_3()
+                    .pt_2()
+                    .pb_1()
+                    .rounded(px(20.))
+                    .border_1()
                     .border_color(border)
-                    .child(Textarea::new(&self.input).text_sm()),
-            ))
-            .children(self.render_views(cx))
+                    .bg(field)
+                    .shadow_md()
+                    .drag_over::<ExternalPaths>(move |d, _, _, _| d.border_color(accent))
+                    .on_drop(cx.listener(|p, paths: &ExternalPaths, _, cx| p.attach(paths.paths().to_vec(), cx)))
+                    .when(!self.attachments.is_empty(), |d| d.child(chips))
+                    .child(
+                        Textarea::new(&self.input)
+                            .appearance(false)
+                            .text_sm()
+                            .on_paste(move |item, _, cx| {
+                                // An image (or image files) on the clipboard: attach it.
+                                let mut took = false;
+                                for entry in item.entries() {
+                                    match entry {
+                                        ClipboardEntry::Image(image) => {
+                                            let ext = match image.format {
+                                                ImageFormat::Jpeg => "jpg",
+                                                ImageFormat::Gif => "gif",
+                                                ImageFormat::Webp => "webp",
+                                                _ => "png",
+                                            };
+                                            let bytes = image.bytes.clone();
+                                            let _ = paste_target.update(cx, |p, cx| p.attach_bytes(&bytes, ext, cx));
+                                            took = true;
+                                        }
+                                        ClipboardEntry::ExternalPaths(paths) => {
+                                            let paths = paths.paths().to_vec();
+                                            let _ = paste_target.update(cx, |p, cx| p.attach(paths, cx));
+                                            took = true;
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                                took
+                            }),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .text_color(muted)
+                            .child(attach)
+                            .child(model_button)
+                            .when(caps.permission_prompts, |d| d.child(mode_button))
+                            .child(div().flex_1())
+                            .child(send),
+                    ),
+            )
+            .into_any_element()
     }
+}
+
+/// The column's widest.
+const COLUMN: f32 = 760.;
+
+/// `claude-opus-5-5` as `opus-5-5`; a short name stays.
+fn short_model(model: &str) -> String {
+    model.strip_prefix("claude-").unwrap_or(model).to_string()
+}
+
+fn capitalize(s: &str) -> String {
+    let mut c = s.chars();
+    c.next().map(|f| f.to_uppercase().collect::<String>() + c.as_str()).unwrap_or_default()
+}
+
+/// Copy, under a message, shown while the pointer is over it.
+fn hover_actions(group: SharedString, key: String, text: String, muted: Hsla) -> impl IntoElement {
+    div()
+        .flex()
+        .gap_1()
+        .invisible()
+        .group_hover(group, |d| d.visible())
+        .child(
+            Button::new(SharedString::from(format!("copy-{key}")))
+                .xsmall()
+                .ghost()
+                .icon(gpui_kit::assets::IconName::Copy)
+                .text_color(muted)
+                .tooltip("Copy")
+                .on_click(move |_, window, cx| {
+                    cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
+                    gpui_kit::component::WindowExt::push_notification(window, "Copied", cx);
+                }),
+        )
 }
 
 /// `42s`, `3m 05s`.

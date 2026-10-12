@@ -322,7 +322,7 @@ impl Browser {
     }
 
     /// Show the worktree form for the selected folder's repository, its name suggested.
-    fn ask_worktree(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn ask_worktree(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(top) = self.detail.as_ref().and_then(|d| d.repo.as_ref()).map(|(t, _)| t.clone()) else { return };
         let suggested = crate::shell::suggest_worktree_name(&top);
         let input = cx.new(|cx| InputState::new(window, cx).default_value(suggested));

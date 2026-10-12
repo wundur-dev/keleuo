@@ -22,7 +22,8 @@ use keleion_core::conversation::Conversation;
 use keleion_core::host::Host;
 
 use crate::hooks::{self, Registration, Reply};
-use crate::terminal_view::{Placeholder, TerminalView};
+use crate::terminal_view::{ImageSupport, Placeholder, TerminalView};
+use std::rc::Rc;
 
 /// What a session has used, as the window shows it.
 #[derive(Clone, Debug, PartialEq)]
@@ -116,7 +117,7 @@ pub struct AgentSession {
     hooks: Option<Registration>,
     /// The interface said it is up; messages typed before wait in `queued`.
     ready: bool,
-    queued: Vec<String>,
+    queued: Vec<(String, Vec<PathBuf>)>,
     /// Messages shown here already whose copy in the session file is still to come.
     echo: VecDeque<String>,
     /// Permission hooks waiting for an answer, by request id.
@@ -132,6 +133,14 @@ pub struct AgentSession {
     pub asking: Option<Asking>,
     /// The agent's own record of whether this folder is trusted, when known.
     trusted: Option<bool>,
+    /// The permission mode the interface reports it is in (from its hooks).
+    pub live_mode: Option<String>,
+    /// The file's copy of a message shown when it was sent carries its images too: skip them.
+    skip_images: usize,
+    /// Images pasted into this run of the interface, in order: its `[Image #N]` is the Nth.
+    pasted_images: Vec<PathBuf>,
+    /// Restart the interface when the turn ends (a new model).
+    restart_after_turn: bool,
 }
 
 impl EventEmitter<SessionEvent> for AgentSession {}
@@ -164,6 +173,10 @@ impl AgentSession {
             per_use: None,
             asking: None,
             trusted: None,
+            live_mode: None,
+            skip_images: 0,
+            pasted_images: Vec::new(),
+            restart_after_turn: false,
         }
     }
 
@@ -339,11 +352,29 @@ impl AgentSession {
             lines: last_lines(&self.chat, 12),
             label: format!("Starting {}...", self.backend.name()),
         };
+        let weak = cx.entity().downgrade();
+        let images = self.backend.terminal_paste_image().map(|paste_key| {
+            let (w1, w2) = (weak.clone(), weak.clone());
+            ImageSupport {
+                paste_key,
+                pasted: Rc::new(move |bytes, ext, cx| {
+                    let _ = w1.update(cx, |s, _| {
+                        let dir = keleion_core::images::session_dir(s.chat.session_id.as_deref());
+                        if let Some(path) = dir.and_then(|d| keleion_core::images::store(&d, &bytes, ext).ok()) {
+                            s.pasted_images.push(path);
+                        }
+                    });
+                }),
+                image: Rc::new(move |n, cx| w2.upgrade().and_then(|s| s.read(cx).image_n(n))),
+            }
+        });
         let view = cx.new(|cx| {
             let mut v = TerminalView::new(command, cx);
             v.placeholder = Some(placeholder);
+            v.images = images;
             v
         });
+        self.pasted_images.clear();
         let exit = cx.observe(&view, |s, view, cx| {
             if view.read(cx).exited && s.ready {
                 s.ready = false;
@@ -407,9 +438,125 @@ impl AgentSession {
             return;
         }
         self.ready = true;
-        for text in std::mem::take(&mut self.queued) {
-            self.type_message(&text, cx);
+        for (text, images) in std::mem::take(&mut self.queued) {
+            self.type_with_images(text, images, cx);
         }
+    }
+
+    /// Attach `images` (each pasted as a path, which the interface turns into `[Image #N]`),
+    /// wait until it has taken them, then type `text`.
+    fn type_with_images(&mut self, text: String, images: Vec<PathBuf>, cx: &mut Context<Self>) {
+        if images.is_empty() {
+            self.type_message(&text, cx);
+            return;
+        }
+        let Some(view) = self.terminal_view() else { return };
+        let Some(pty) = view.read(cx).pty.clone() else { return };
+        let bracketed = view.read(cx).bracketed_paste();
+        let pieces: Vec<Vec<u8>> = images.iter().filter_map(|p| self.backend.terminal_attach(p, bracketed)).collect();
+        self.pasted_images.extend(images.iter().cloned());
+        cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            for piece in pieces {
+                pty.write(piece);
+                // It reads the file ("Pasting..."): wait for that before the next.
+                for _ in 0..40 {
+                    cx.background_executor().timer(std::time::Duration::from_millis(75)).await;
+                    if !view.update(cx, |v, _| v.screen_text().contains("Pasting")) {
+                        break;
+                    }
+                }
+            }
+            let _ = this.update(cx, |s, cx| {
+                if text.is_empty() {
+                    if let Some(pty) = s.terminal_view().and_then(|v| v.read(cx).pty.clone()) {
+                        pty.write(b"\r".to_vec());
+                    }
+                } else {
+                    // A space after the image markers, then the text.
+                    let text = format!(" {text}");
+                    s.type_message(&text, cx);
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// The image behind the interface's `[Image #N]`: the Nth pasted into this run, else the
+    /// Nth in the conversation.
+    pub fn image_n(&self, n: usize) -> Option<PathBuf> {
+        let i = n.checked_sub(1)?;
+        self.pasted_images.get(i).cloned().or_else(|| {
+            self.chat
+                .items
+                .iter()
+                .filter_map(|it| match it {
+                    keleion_core::conversation::Item::Images(p) => Some(p),
+                    _ => None,
+                })
+                .flatten()
+                .nth(i)
+                .cloned()
+        })
+    }
+
+    /// Switch the model. The interface restarts on the same conversation with it (between
+    /// turns), rather than typing its `/model` command: Claude Code's `/model` also saves the
+    /// choice as the person's default for every new session, in their own settings.
+    pub fn set_model(&mut self, model: &str, cx: &mut Context<Self>) {
+        self.model = Some(model.to_string());
+        if self.interactive() && self.running(cx) {
+            if self.chat.busy {
+                self.restart_after_turn = true;
+                self.chat.push_notice(format!("Model: {model}. Applies when this turn ends."));
+            } else {
+                self.stop();
+                self.start_terminal(cx);
+                self.chat.push_notice(format!("Model: {model}."));
+            }
+        } else {
+            self.stop();
+            self.chat.push_notice(format!("Model: {model}. Applies from the next message."));
+        }
+        cx.notify();
+    }
+
+    /// Switch the permission mode. With the interface running, press its mode key until its
+    /// status line shows the mode (as a person would); otherwise restart with it.
+    pub fn set_mode(&mut self, mode: Option<String>, cx: &mut Context<Self>) {
+        let cycle = self.backend.mode_cycle();
+        let (Some((modes, key)), true, Some(view)) = (cycle, self.interactive() && self.ready, self.terminal_view()) else {
+            self.set_permission_mode(mode, cx);
+            return;
+        };
+        let target = mode.clone().unwrap_or_else(|| "default".into());
+        let labels: Vec<String> = modes.iter().map(|(_, l)| l.clone()).filter(|l| !l.is_empty()).collect();
+        let want = modes.iter().find(|(m, _)| *m == target).map(|(_, l)| l.clone()).unwrap_or_default();
+        self.permission_mode = mode;
+        cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            for _ in 0..(modes.len() + 2) {
+                let (pty, done) = view.update(cx, |v, _| {
+                    let screen = v.screen_text();
+                    let footer: String = screen.lines().rev().take(4).collect::<Vec<_>>().join("\n");
+                    let shown = if want.is_empty() { !labels.iter().any(|l| footer.contains(l.as_str())) } else { footer.contains(want.as_str()) };
+                    (v.pty.clone(), shown)
+                });
+                if done {
+                    let _ = this.update(cx, |s, cx| {
+                        s.live_mode = Some(target.clone());
+                        cx.notify();
+                    });
+                    return;
+                }
+                let Some(pty) = pty else { return };
+                pty.write(key.clone());
+                cx.background_executor().timer(std::time::Duration::from_millis(200)).await;
+            }
+            let _ = this.update(cx, |s, cx| {
+                s.chat.push_notice("Could not switch the mode from here; use Shift+Tab in the terminal.");
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// Type `text` into the interface as the person would: pasted, then Enter.
@@ -448,6 +595,9 @@ impl AgentSession {
     pub fn on_hook(&mut self, call: hooks::Call, cx: &mut Context<Self>) {
         // It is past any question it was asking.
         self.asking = None;
+        if let Some(mode) = self.backend.hook_mode(&call.payload) {
+            self.live_mode = Some(mode);
+        }
         let Some(hook) = self.backend.parse_hook(&call.event, &call.payload, &self.chat.cwd) else { return };
         match hook {
             Hook::Started { session_id, .. } => {
@@ -462,7 +612,7 @@ impl AgentSession {
                 self.set_ready(cx);
             }
             Hook::Prompt(text) => {
-                let t = text.trim().to_string();
+                let t = plain(&text);
                 if !self.echo.iter().any(|e| *e == t) && !t.is_empty() {
                     // Typed in the terminal: show it now; the file's copy is skipped.
                     self.chat.push_user(&t);
@@ -515,6 +665,10 @@ impl AgentSession {
                 if was_busy {
                     cx.emit(SessionEvent::TurnEnded);
                 }
+                if std::mem::take(&mut self.restart_after_turn) {
+                    self.stop();
+                    self.start_terminal(cx);
+                }
             }
             Hook::Attention(_) => self.unseen = true,
         }
@@ -523,7 +677,7 @@ impl AgentSession {
     }
 
     fn push_echo(&mut self, text: String) {
-        self.echo.push_back(text);
+        self.echo.push_back(plain(&text));
         if self.echo.len() > 8 {
             self.echo.pop_front();
         }
@@ -578,10 +732,16 @@ impl AgentSession {
         match message {
             Message::Event(event) => {
                 if let Event::UserText(text) = &event
-                    && let Some(i) = self.echo.iter().position(|e| e == text.trim())
+                    && let Some(i) = self.echo.iter().position(|e| *e == plain(text))
                 {
                     // Shown already, when it was sent.
                     self.echo.remove(i);
+                    return;
+                }
+                if let Event::UserImages(_) = &event
+                    && self.skip_images > 0
+                {
+                    self.skip_images -= 1;
                     return;
                 }
                 if matches!(event, Event::Text { .. } | Event::TextDelta(_) | Event::ToolCall { .. })
@@ -616,8 +776,13 @@ impl AgentSession {
 
     /// Send a user turn, starting the agent when needed.
     pub fn send(&mut self, text: &str, cx: &mut Context<Self>) {
+        self.send_with(text, Vec::new(), cx);
+    }
+
+    /// Send a user turn with images (files).
+    pub fn send_with(&mut self, text: &str, images: Vec<PathBuf>, cx: &mut Context<Self>) {
         let text = text.trim();
-        if text.is_empty() {
+        if text.is_empty() && images.is_empty() {
             return;
         }
         if let Some(pid) = self.waiting_for {
@@ -631,18 +796,27 @@ impl AgentSession {
             self.sent_at = Some(std::time::Instant::now());
         }
         if self.interactive() {
-            self.chat.push_user(text);
-            self.push_echo(text.to_string());
+            if !text.is_empty() {
+                self.chat.push_user(text);
+                self.push_echo(text.to_string());
+            }
+            if !images.is_empty() {
+                self.chat.apply(Event::UserImages(images.clone()));
+                self.skip_images += 1;
+            }
             if !self.running(cx) {
                 self.start_terminal(cx);
             }
             if self.ready {
-                self.type_message(text, cx);
+                self.type_with_images(text.to_string(), images, cx);
             } else {
-                self.queued.push(text.to_string());
+                self.queued.push((text.to_string(), images));
             }
             cx.notify();
             return;
+        }
+        if !images.is_empty() {
+            self.chat.push_notice(format!("{} cannot take images here; sent the text only.", self.backend.name()));
         }
         if !self.agent.running()
             && let Err(e) = self.start(cx)
@@ -745,6 +919,25 @@ impl AgentSession {
         self._reader = None;
         self.chat.process_ended();
     }
+}
+
+/// A message as compared with its copy in the session file: without the interface's image
+/// markers (`[Image #1]`) and outer spaces.
+fn plain(text: &str) -> String {
+    let mut out = String::new();
+    let mut rest = text;
+    while let Some(i) = rest.find("[Image #") {
+        out.push_str(&rest[..i]);
+        match rest[i..].find(']') {
+            Some(j) => rest = &rest[i + j + 1..],
+            None => {
+                rest = &rest[i..];
+                break;
+            }
+        }
+    }
+    out.push_str(rest);
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// The conversation's last `n` lines of text, oldest first, `true` for the person's.

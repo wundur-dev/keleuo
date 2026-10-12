@@ -65,6 +65,8 @@ pub enum Item {
     /// Turn summaries and other quiet notes.
     Notice(String),
     Error(String),
+    /// Images the person sent with the message before.
+    Images(Vec<PathBuf>),
     /// A stretch of earlier conversation not read yet (bytes `from..to` of the session file):
     /// read when it comes into view.
     Earlier { from: u64, to: u64, messages: usize },
@@ -486,6 +488,11 @@ impl Conversation {
                 self.last_turn_ms = duration_ms;
                 if let Some(e) = error {
                     self.items.push(Item::Error(format!("The turn ended with an error: {}", one_line(&e, 300))));
+                }
+            }
+            Event::UserImages(paths) => {
+                if !paths.is_empty() {
+                    self.items.push(Item::Images(paths));
                 }
             }
             Event::CostEstimate { usd } => {

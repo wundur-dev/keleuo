@@ -104,6 +104,23 @@ fn user_text(v: &Value) -> Option<String> {
     (!t.is_empty() && !t.starts_with('<')).then(|| t.to_string())
 }
 
+/// The images in a `user` line, stored in the session's image folder.
+fn user_images(v: &Value) -> Vec<PathBuf> {
+    let Some(blocks) = v.get("message").and_then(|m| m.get("content")).and_then(Value::as_array) else { return Vec::new() };
+    let session = v.get("sessionId").and_then(Value::as_str);
+    let Some(dir) = crate::images::session_dir(session) else { return Vec::new() };
+    blocks
+        .iter()
+        .filter(|b| b.get("type").and_then(Value::as_str) == Some("image"))
+        .filter_map(|b| {
+            let source = b.get("source")?;
+            let data = crate::images::base64(source.get("data")?.as_str()?)?;
+            let ext = crate::images::extension(source.get("media_type").and_then(Value::as_str).unwrap_or("image/png"));
+            crate::images::store(&dir, &data, ext).ok()
+        })
+        .collect()
+}
+
 /// The sessions of `folder`, newest first, at most `max`.
 pub fn list_sessions(
     host: &dyn Host,
@@ -176,10 +193,13 @@ fn line_events(v: &Value, mapper: &mut Mapper) -> Vec<Event> {
             } else if v.get("isCompactSummary").and_then(Value::as_bool) == Some(true) {
                 // Shown as the compaction divider, not as something the person wrote.
                 Vec::new()
-            } else if v.get("isMeta").and_then(Value::as_bool) != Some(true)
-                && let Some(text) = user_text(v)
-            {
-                vec![Event::UserText(text)]
+            } else if v.get("isMeta").and_then(Value::as_bool) != Some(true) {
+                let mut out: Vec<Event> = user_text(v).map(Event::UserText).into_iter().collect();
+                let images = user_images(v);
+                if !images.is_empty() {
+                    out.push(Event::UserImages(images));
+                }
+                out
             } else {
                 Vec::new()
             }
