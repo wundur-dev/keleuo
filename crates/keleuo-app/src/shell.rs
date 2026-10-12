@@ -931,6 +931,10 @@ impl Shell {
                 cx.notify();
                 "ok".into()
             }
+            "about" => {
+                crate::about::open_tab(arg, cx);
+                "ok".into()
+            }
             "tabs" => (0..self.tabs.len())
                 .map(|i| format!("{}{}:{}", if i == self.active { "*" } else { "" }, i + 1, self.name(i, cx)))
                 .collect::<Vec<_>>()

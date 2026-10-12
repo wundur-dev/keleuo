@@ -1228,6 +1228,7 @@ impl Workspace {
             }
             "term" => self.new_terminal(window, cx),
             "web" => self.open_web(arg.to_string(), window, cx),
+            "diff" => self.open_diff(PathBuf::from(arg), None, window, cx),
             "type" => {
                 let text = arg.replace("\\n", "\r");
                 if let Some(t) = self

@@ -22,9 +22,9 @@ enum Tab {
     System,
 }
 
-/// The open About window, if any.
+/// The open About window and its view, if any.
 #[derive(Default)]
-struct Open(Option<AnyWindowHandle>);
+struct Open(Option<(AnyWindowHandle, WeakEntity<About>)>);
 impl Global for Open {}
 
 pub struct About {
@@ -38,13 +38,13 @@ pub struct About {
 
 /// Show the About window (or bring the open one forward).
 pub fn open(cx: &mut App) {
-    if let Some(handle) = cx.try_global::<Open>().and_then(|o| o.0)
+    if let Some((handle, _)) = cx.try_global::<Open>().and_then(|o| o.0.clone())
         && handle.update(cx, |_, window, _| window.activate_window()).is_ok()
     {
         return;
     }
     let options = WindowOptions {
-        window_bounds: Some(WindowBounds::centered(size(px(560.), px(500.)), cx)),
+        window_bounds: Some(WindowBounds::centered(size(px(640.), px(520.)), cx)),
         titlebar: Some(TitlebarOptions {
             title: Some("About Keleuo".into()),
             appears_transparent: true,
@@ -55,8 +55,24 @@ pub fn open(cx: &mut App) {
         ..Default::default()
     };
     match gpui_kit::open_window(options, cx, |_, cx| cx.new(About::new)) {
-        Ok((handle, _)) => cx.set_global(Open(Some(handle))),
+        Ok((handle, view)) => cx.set_global(Open(Some((handle, view.downgrade())))),
         Err(e) => eprintln!("keleuo: could not open the About window: {e}"),
+    }
+}
+
+/// Open the About window on a tab by name (`about`, `memory`, `system`; tests and scripting).
+pub fn open_tab(name: &str, cx: &mut App) {
+    open(cx);
+    let tab = match name {
+        "memory" => Tab::Memory,
+        "system" => Tab::System,
+        _ => Tab::About,
+    };
+    if let Some((_, view)) = cx.try_global::<Open>().and_then(|o| o.0.clone()) {
+        let _ = view.update(cx, |a, cx| {
+            a.tab = tab;
+            cx.notify();
+        });
     }
 }
 
@@ -204,8 +220,11 @@ impl About {
             bars = bars.child(div().flex_1().h(px(h as f32)).rounded_t(px(2.)).bg(accent.opacity(0.75)));
         }
         let big = |label: &'static str, value: String, note: String, color: Hsla| {
+            // Equal shares of the row, however long their notes: the notes wrap.
             div()
                 .flex_1()
+                .flex_basis(px(0.))
+                .min_w_0()
                 .flex()
                 .flex_col()
                 .gap(px(2.))
@@ -214,8 +233,8 @@ impl About {
                 .border_1()
                 .border_color(border)
                 .child(div().flex().items_center().gap_2().child(div().size(px(8.)).rounded_full().bg(color)).child(div().text_xs().text_color(muted).child(label)))
-                .child(div().text_size(px(26.)).font_weight(FontWeight::SEMIBOLD).text_color(fg).child(value))
-                .child(div().text_xs().text_color(muted).child(note))
+                .child(div().text_size(px(24.)).font_weight(FontWeight::SEMIBOLD).text_color(fg).child(value))
+                .child(div().text_xs().line_height(rems(1.35)).text_color(muted).child(note))
         };
         div()
             .flex()
