@@ -159,17 +159,16 @@ fn main() {
         }
     };
     // A window is already open: it takes the request.
-    if note.is_none() && instance::hand_over(&request) {
+    if note.is_none() && perf::step("hand over", || instance::hand_over(&request)) {
         return;
     }
     gpui_kit::application()
         .with_assets(gpui_kit::assets::Assets)
         .run(move |cx: &mut App| {
-            gpui_kit::init(cx);
+            perf::step("gpui init", || gpui_kit::init(cx));
             Theme::change(ThemeMode::Dark, None, cx);
-            cx.set_global(AppSettings(Rc::new(RefCell::new(Settings::load(
-                Settings::default_path(),
-            )))));
+            let settings = perf::step("settings", || Settings::load(Settings::default_path()));
+            cx.set_global(AppSettings(Rc::new(RefCell::new(settings))));
             cx.set_global(panels::Names(Rc::new(RefCell::new(
                 workbench_core::tabs::NameStore::open_default(),
             ))));
@@ -199,7 +198,7 @@ fn main() {
                 }
             })
             .detach();
-            carry_out(request, note, cx);
+            perf::step("open the window", || carry_out(request, note, cx));
             if !background() {
                 cx.activate(true);
             }

@@ -125,9 +125,27 @@ impl Browser {
             _tasks: Vec::new(),
             _subs: vec![sub],
         };
+        // This folder and the recent ones show at once; the folders here fill in when listed.
+        this.rebuild_rows(cx);
         this.go_to(dir.clone(), Some(dir), cx);
+        this.drop_missing_recent(cx);
         this.watch_running(cx);
         this
+    }
+
+    /// Recent folders that no longer exist go, checked off the UI thread.
+    fn drop_missing_recent(&mut self, cx: &mut Context<Self>) {
+        let (host, recent) = (self.host.clone(), self.recent.clone());
+        let task = cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let kept: Vec<PathBuf> = cx.background_spawn(async move { recent.into_iter().filter(|p| host.exists(p)).collect() }).await;
+            let _ = this.update(cx, |b, cx| {
+                if kept.len() != b.recent.len() {
+                    b.recent = kept;
+                    b.rebuild_rows(cx);
+                }
+            });
+        });
+        self._tasks.push(task);
     }
 
     /// List `dir`; select `select` (or the first folder).

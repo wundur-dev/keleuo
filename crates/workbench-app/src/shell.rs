@@ -118,15 +118,17 @@ impl Shell {
 
     /// Show the directory browser at `dir` (in place of the shown session, if any).
     pub fn open_browser(&mut self, host: Arc<dyn Host>, dir: PathBuf, note: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
-        let recent = if host.is_remote() { Vec::new() } else { cx.global::<AppSettings>().0.borrow().existing_recent() };
+        // Unchecked: the browser drops the ones that are gone off the UI thread (a recent folder
+        // on a sleeping or unplugged disk must not hold up the window).
+        let recent = if host.is_remote() { Vec::new() } else { cx.global::<AppSettings>().0.borrow().recent.clone() };
         let backends = crate::backends::all(cx);
         let open = self.open_sessions(cx);
         let overlay = !self.tabs.is_empty();
-        let browser = cx.new(|cx| {
+        let browser = crate::perf::step("browser", || cx.new(|cx| {
             let mut b = Browser::new(host, dir, recent, backends, open, overlay, window, cx);
             b.note = note;
             b
-        });
+        }));
         self._browser_sub = Some(cx.subscribe_in(&browser, window, |s, _, ev: &BrowserEvent, window, cx| s.on_browser(ev, window, cx)));
         self.browser = Some(browser);
         cx.notify();
@@ -239,7 +241,7 @@ impl Shell {
             settings.borrow_mut().add_recent(&root);
             let _ = settings.borrow().save();
         }
-        let ws = cx.new(|cx| Workspace::new(host.clone(), root.clone(), session, window, cx));
+        let ws = crate::perf::step("workspace", || cx.new(|cx| Workspace::new(host.clone(), root.clone(), session, window, cx)));
         ws.update(cx, |w, _| w.worktree = worktree);
         if let Some(pid) = wait_for {
             let session = ws.read(cx).session.clone();
@@ -741,13 +743,14 @@ fn initials(name: &str) -> String {
 }
 
 /// The folder the browser starts in when nothing says otherwise: the last folder, else home.
+/// Not checked here (that could wait on a sleeping disk); a folder that is gone lists empty.
 pub fn default_folder(cx: &App) -> PathBuf {
     cx.global::<AppSettings>()
         .0
         .borrow()
-        .existing_recent()
-        .into_iter()
-        .next()
+        .recent
+        .first()
+        .cloned()
         .or_else(dirs::home_dir)
         .unwrap_or_else(|| PathBuf::from("/"))
 }
@@ -789,7 +792,8 @@ impl Focusable for Shell {
 }
 
 impl Render for Shell {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        crate::perf::first_frame(window);
         let theme = cx.theme();
         let (bg, fg, hover, muted) = (theme.background, theme.foreground, theme.secondary_hover, theme.muted_foreground);
         let button = |id: &'static str, icon: IconName, tip: &'static str| {

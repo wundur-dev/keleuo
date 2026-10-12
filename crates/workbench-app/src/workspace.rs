@@ -150,6 +150,8 @@ pub struct Workspace {
     save_task: Option<Task<()>>,
     loading: bool,
     first_frame_logged: bool,
+    /// When this session was opened (for the ready time).
+    made: std::time::Instant,
     focus: FocusHandle,
     panel_subs: HashMap<EntityId, Vec<Subscription>>,
     _watch: Option<workbench_core::host::Watch>,
@@ -164,6 +166,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let made = std::time::Instant::now();
         let backend = session.backend.clone();
         let files = cx.new(|cx| FileTree::new(host.clone(), root.clone(), cx));
         let skills = cx.new(|cx| SkillsPanel::new(host.clone(), backend.clone(), root.clone(), cx));
@@ -188,7 +191,7 @@ impl Workspace {
             index: Rc::new(RefCell::new(Arc::new(Default::default()))),
             symbols: Rc::new(RefCell::new(Arc::new(Default::default()))),
         };
-        let (dock, skin) = crate::dock_skin::WorkbenchSkin::dock_area("workbench", Some(LAYOUT_VERSION), window, cx);
+        let (dock, skin) = crate::perf::step("workspace dock", || crate::dock_skin::WorkbenchSkin::dock_area("workbench", Some(LAYOUT_VERSION), window, cx));
         skin.set_panel_style(PanelStyle::TabBar, cx);
         skin.set_close_button_visible(true, cx);
 
@@ -281,7 +284,7 @@ impl Workspace {
             }),
         );
 
-        let watch = Self::watch_files(&host, &root, window, cx);
+        let watch = crate::perf::step("workspace watch", || Self::watch_files(&host, &root, window, cx));
         let mut this = Self {
             host,
             root,
@@ -305,15 +308,18 @@ impl Workspace {
             save_task: None,
             loading: false,
             first_frame_logged: false,
+            made,
             focus: cx.focus_handle(),
             panel_subs: HashMap::new(),
             _watch: watch,
             _subs: subs,
         };
         this.load_branch(cx);
-        if !this.restore_layout(window, cx) {
-            this.default_layout(window, cx);
-        }
+        crate::perf::step("workspace layout", || {
+            if !this.restore_layout(window, cx) {
+                this.default_layout(window, cx);
+            }
+        });
         this
     }
 
@@ -1304,14 +1310,13 @@ impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if !self.first_frame_logged {
             self.first_frame_logged = true;
-            window.on_next_frame(|_, _| {
-                if let Some(start) = crate::START.get() {
-                    eprintln!(
-                        "workbench: first frame {:.0} ms after start",
-                        start.elapsed().as_secs_f64() * 1000.0
-                    );
-                }
-            });
+            // A session opened later (from the browser): its own time, with WORKBENCH_PERF=1.
+            if crate::perf::enabled() {
+                let made = self.made;
+                window.on_next_frame(move |_, _| {
+                    eprintln!("workbench: workspace ready {:.0} ms after it was opened", made.elapsed().as_secs_f64() * 1000.0);
+                });
+            }
         }
         let theme = cx.theme();
         let (bg, muted, fg) = (theme.background, theme.muted_foreground, theme.foreground);

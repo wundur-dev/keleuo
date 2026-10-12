@@ -116,3 +116,29 @@ fn report(s: &mut State) {
     }
     s.last_report = Instant::now();
 }
+
+/// With `WORKBENCH_PERF=1`: how long a startup step took (stderr), to find what holds up the
+/// first frame.
+pub fn step<T>(name: &str, f: impl FnOnce() -> T) -> T {
+    if !enabled() {
+        return f();
+    }
+    let t = Instant::now();
+    let out = f();
+    eprintln!("workbench: step {name}: {:.1} ms", t.elapsed().as_secs_f64() * 1000.0);
+    out
+}
+
+/// The first frame of the first window, measured from process start; printed once.
+pub fn first_frame(window: &mut gpui_kit::Window) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static DONE: AtomicBool = AtomicBool::new(false);
+    if DONE.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    window.on_next_frame(|_, _| {
+        if let Some(start) = crate::START.get() {
+            eprintln!("workbench: first frame {:.0} ms after start", start.elapsed().as_secs_f64() * 1000.0);
+        }
+    });
+}
