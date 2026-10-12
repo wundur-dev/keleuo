@@ -52,6 +52,20 @@ impl Default for Layout {
     }
 }
 
+/// A session open in the window, opened again on the next start (closing it removes it;
+/// quitting does not).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SavedSession {
+    /// The session's place in the list (its tab name is kept by it).
+    pub number: usize,
+    pub folder: PathBuf,
+    /// The agent (backend id).
+    pub backend: String,
+    /// Its conversation, once it has one.
+    pub id: Option<String>,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -65,6 +79,10 @@ pub struct Settings {
     pub session_views: std::collections::BTreeMap<String, String>,
     /// The session list folded to a rail.
     pub sessions_folded: bool,
+    /// The sessions open when the window last changed, in list order.
+    pub open_sessions: Vec<SavedSession>,
+    /// Which of them was shown (its number).
+    pub shown_session: Option<usize>,
     /// When to show what a session costs: `"auto"` (the default: only when the agent is
     /// billed per use, else how full its context is), `"always"` or `"never"`.
     pub cost_display: String,
@@ -194,8 +212,15 @@ mod tests {
         s.add_recent(Path::new("/p/3"));
         s.layout.claude_width = 700.0;
         s.layout.sidebar_folded = true;
+        s.open_sessions = vec![
+            SavedSession { number: 2, folder: "/p/a".into(), backend: "claude".into(), id: Some("abc".into()) },
+            SavedSession { number: 5, folder: "/p/b".into(), backend: "claude".into(), id: None },
+        ];
+        s.shown_session = Some(5);
         s.save().unwrap();
         let back = Settings::load(Some(path.clone()));
+        assert_eq!(back.open_sessions, s.open_sessions);
+        assert_eq!(back.shown_session, Some(5));
         assert_eq!(back.recent.len(), MAX_RECENT);
         assert_eq!(back.recent[0], PathBuf::from("/p/3"));
         assert_eq!(back.recent[1], PathBuf::from("/p/14"));

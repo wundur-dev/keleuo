@@ -22,6 +22,7 @@ use keleuo_core::agent::Backend;
 use keleuo_core::host::{Host, LocalHost};
 
 use crate::AppSettings;
+use keleuo_core::settings::SavedSession;
 use crate::actions::*;
 use crate::agent_session::AgentSession;
 use crate::browser::{Browser, BrowserEvent, OpenSession};
@@ -83,6 +84,10 @@ pub struct Shell {
     rail_hover: bool,
     /// The folder being renamed, asked for its new name.
     folder_rename: Option<FolderRename>,
+    /// Sessions from the last run are being opened again: the saved list is not touched.
+    restoring: bool,
+    /// The open sessions as last saved (written again only when they change).
+    saved: Option<(Vec<SavedSession>, Option<usize>)>,
     focus: FocusHandle,
     subs: HashMap<EntityId, Vec<Subscription>>,
     _browser_sub: Option<Subscription>,
@@ -105,20 +110,135 @@ impl Shell {
             peek: false,
             rail_hover: false,
             folder_rename: None,
+            restoring: false,
+            saved: None,
             focus: cx.focus_handle(),
             subs: HashMap::new(),
             _browser_sub: None,
             opening: OpenGuard::default(),
             earlier: Vec::new(),
         };
+        let (saved, shown) = {
+            let settings = cx.global::<AppSettings>().0.borrow();
+            (settings.open_sessions.clone(), settings.shown_session)
+        };
+        if saved.is_empty() {
+            this.handle_start(start, window, cx);
+        } else {
+            this.restore(saved, shown, start, window, cx);
+        }
+        this
+    }
+
+    /// What the window was asked to show: a new session in a folder, or the browser at one
+    /// (the session open there, if there is one).
+    fn handle_start(&mut self, start: Start, window: &mut Window, cx: &mut Context<Self>) {
         match start {
             Start::Session(host, root) => {
                 let backend = crate::backends::backend(None, cx);
-                this.new_session_in(host, root, backend, window, cx);
+                self.new_session_in(host, root, backend, window, cx);
             }
-            Start::Browse(host, dir, note) => this.open_browser(host, dir, note, window, cx),
+            Start::Browse(host, dir, note) => {
+                // The shown session if it is in that folder, else the first one there.
+                let here = |ix: &usize| self.tabs[*ix].ws.read(cx).root() == dir;
+                let open_here = (!host.is_remote() && note.is_none())
+                    .then(|| Some(self.active).filter(|ix| *ix < self.tabs.len() && here(ix)).or_else(|| (0..self.tabs.len()).find(here)))
+                    .flatten();
+                match open_here {
+                    Some(ix) => self.activate(ix, window, cx),
+                    None => self.open_browser(host, dir, note, window, cx),
+                }
+            }
         }
-        this
+    }
+
+    // ----- sessions kept between runs -----
+
+    /// Open again the sessions of the last run, in their order and with their numbers (so their
+    /// tab names stay theirs), each dormant: its conversation shows at once, its agent starts
+    /// when it is needed. A folder or conversation that is gone is left out. Then `start`.
+    fn restore(&mut self, saved: Vec<SavedSession>, shown: Option<usize>, start: Start, window: &mut Window, cx: &mut Context<Self>) {
+        self.restoring = true;
+        let backends = crate::backends::all(cx);
+        let fallback = crate::backends::backend(None, cx);
+        cx.spawn_in(window, async move |this, cx| {
+            let loaded = cx
+                .background_spawn(async move {
+                    let host = LocalHost;
+                    saved
+                        .into_iter()
+                        .filter(|s| s.folder.is_dir())
+                        .filter_map(|s| {
+                            let backend = backends.iter().find(|b| b.id() == s.backend).cloned().unwrap_or_else(|| fallback.clone());
+                            let chat = match &s.id {
+                                Some(id) => Some(backend.load_session(&host, &s.folder, id).ok()?),
+                                None => None,
+                            };
+                            Some((s, backend, chat))
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .await;
+            let _ = this.update_in(cx, |shell, window, cx| {
+                let host: Arc<dyn Host> = Arc::new(LocalHost);
+                let mut last = shell.next;
+                for (s, backend, chat) in loaded {
+                    let mut session = match chat {
+                        Some(chat) => AgentSession::resumed(host.clone(), backend, s.folder.clone(), chat, false),
+                        None => AgentSession::new(host.clone(), backend, s.folder.clone()),
+                    };
+                    session.dormant = true;
+                    shell.next = s.number.max(1);
+                    shell.add_session(host.clone(), s.folder, session, None, None, window, cx);
+                    last = last.max(s.number + 1);
+                }
+                shell.next = last.max(shell.next);
+                shell.restoring = false;
+                if let Some(ix) = shown.and_then(|n| shell.tabs.iter().position(|t| t.number == n)) {
+                    shell.activate(ix, window, cx);
+                }
+                shell.handle_start(start, window, cx);
+                shell.save_open(cx);
+            });
+        })
+        .detach();
+    }
+
+    /// Keep the list of open sessions (and the shown one) for the next run, when it changed.
+    fn save_open(&mut self, cx: &mut Context<Self>) {
+        if self.restoring {
+            return;
+        }
+        let list: Vec<SavedSession> = self
+            .tabs
+            .iter()
+            .filter_map(|t| {
+                let w = t.ws.read(cx);
+                if w.host().is_remote() {
+                    return None;
+                }
+                let s = w.session.read(cx);
+                Some(SavedSession {
+                    number: t.number,
+                    folder: w.root().to_path_buf(),
+                    backend: s.backend.id().to_string(),
+                    id: s.chat.session_id.clone(),
+                })
+            })
+            .collect();
+        let shown = self.tabs.get(self.active).map(|t| t.number);
+        let now = (list, shown);
+        if self.saved.as_ref() == Some(&now) {
+            return;
+        }
+        let settings = cx.global::<AppSettings>().0.clone();
+        {
+            let mut s = settings.borrow_mut();
+            s.open_sessions = now.0.clone();
+            s.shown_session = now.1;
+        }
+        let _ = settings.borrow().save();
+        self.saved = Some(now);
     }
 
     pub fn active_workspace(&self) -> Option<Entity<Workspace>> {
@@ -535,15 +655,20 @@ impl Shell {
                 WorkspaceEvent::NewSession => shell.new_session(window, cx),
                 WorkspaceEvent::AgentEdited(path) => shell.edited(ws.clone(), path.clone(), window, cx),
             }),
-            // The row's name, dot, activity and cost follow the session.
+            // The row's name, dot, activity and cost follow the session; its conversation id,
+            // once it has one, is kept for the next run.
             cx.observe(&ws, |_, _, cx| cx.notify()),
-            cx.observe(&session, |_, _, cx| cx.notify()),
+            cx.observe(&session, |s, _, cx| {
+                s.save_open(cx);
+                cx.notify()
+            }),
         ];
         let number = self.next;
         self.next += 1;
         self.subs.insert(ws.entity_id(), subs);
         self.tabs.push(Tab { number, ws });
         self.activate(self.tabs.len() - 1, window, cx);
+        self.save_open(cx);
     }
 
     pub fn activate(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
@@ -556,9 +681,14 @@ impl Shell {
         self._browser_sub = None;
         let ws = self.tabs[ix].ws.clone();
         ws.update(cx, |w, cx| {
-            w.session.update(cx, |s, _| s.unseen = false);
+            w.session.update(cx, |s, cx| {
+                s.unseen = false;
+                // Reopened from the last run with its Terminal showing: start it now.
+                s.wake(cx);
+            });
             w.focus_main(window, cx);
         });
+        self.save_open(cx);
         let title = format!("{} - Keleuo", self.name(ix, cx));
         window.set_window_title(&title);
         cx.notify();
@@ -571,6 +701,8 @@ impl Shell {
         let tab = self.tabs.remove(ix);
         tab.ws.update(cx, |w, cx| w.session.update(cx, |s, cx| s.stop(cx)));
         self.subs.remove(&tab.ws.entity_id());
+        // Closed on purpose: not opened again next time.
+        self.save_open(cx);
         if self.tabs.is_empty() {
             // Nothing left: back to the browser rather than an empty window.
             let (host, dir) = {
@@ -594,6 +726,7 @@ impl Shell {
         let to = if to > from { to - 1 } else { to }.min(self.tabs.len());
         self.tabs.insert(to, tab);
         self.active = self.tabs.iter().position(|t| t.number == shown).unwrap_or(0);
+        self.save_open(cx);
         cx.notify();
     }
 

@@ -99,6 +99,9 @@ struct Following {
 
 pub struct AgentSession {
     host: Arc<dyn Host>,
+    /// Opened again at start: its conversation shows, but its agent starts only when it is
+    /// needed (a message, or its Terminal shown), so reopening many sessions costs nothing.
+    pub dormant: bool,
     pub cwd: PathBuf,
     pub chat: Conversation,
     pub backend: Arc<dyn Backend>,
@@ -161,6 +164,7 @@ impl AgentSession {
             agent: backend.new_agent(),
             backend,
             host,
+            dormant: false,
             chat: Conversation::new(cwd.to_string_lossy().to_string()),
             cwd,
             permission_mode: keleuo_core::env_var("PERMISSION_MODE").ok().filter(|m| !m.is_empty()),
@@ -248,7 +252,14 @@ impl AgentSession {
         if want == "terminal" {
             self.view = View::Terminal;
         }
-        if self.waiting_for.is_none() {
+        if self.waiting_for.is_none() && !self.dormant {
+            self.start_terminal(cx);
+        }
+    }
+
+    /// A dormant session was shown: start its agent if its Terminal is what shows.
+    pub fn wake(&mut self, cx: &mut Context<Self>) {
+        if self.dormant && self.view == View::Terminal && self.interactive() && self.terminal.is_none() && self.waiting_for.is_none() {
             self.start_terminal(cx);
         }
     }
@@ -345,6 +356,7 @@ impl AgentSession {
 
     /// Start the interface on this conversation (a new one, a resumed one, or a fork of one).
     fn start_terminal(&mut self, cx: &mut Context<Self>) {
+        self.dormant = false;
         let started = std::time::Instant::now();
         if self.hooks.is_none() {
             self.hooks = hooks::register(cx.entity().downgrade(), self.backend.as_ref(), cx);
