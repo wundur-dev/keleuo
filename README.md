@@ -1,4 +1,4 @@
-# Keleion
+# Keleuo
 
 A native desktop app for working with coding agents (Claude Code so far): a list of
 sessions, each a whole workspace with its chat or the agent's own terminal, files, skills
@@ -14,27 +14,27 @@ Keep the build output on the internal disk:
 
 ```sh
 export CARGO_TARGET_DIR="$HOME/Library/Caches/workbench-target"
-cargo run -p keleion-app --release -- /path/to/project      # the browser at that folder
-cargo run -p keleion-app --release -- --new /path/to/project # a session there at once
+cargo run -p keleuo-app --release -- /path/to/project      # the browser at that folder
+cargo run -p keleuo-app --release -- --new /path/to/project # a session there at once
 cargo test --workspace
 ```
 
 The window opens on the **session browser** at the folder given (or the current folder, like
 `code .`; started from the Finder, the last folder). Remote: `--ssh host:/path/on/host`.
 
-### The `keleion` command
+### The `keleuo` command
 
-`scripts/keleion` opens the browser at the current folder, or hands the request to the
+`scripts/keleuo` opens the browser at the current folder, or hands the request to the
 window that is already open (one window for everything; the first one listens on a socket in
 `$TMPDIR`). Install it once, after a release build:
 
 ```sh
-CARGO_TARGET_DIR="$HOME/Library/Caches/workbench-target" cargo build -p keleion-app --release
-ln -s "$PWD/scripts/keleion" "$HOME/.local/bin/keleion"   # any folder on your PATH
+CARGO_TARGET_DIR="$HOME/Library/Caches/workbench-target" cargo build -p keleuo-app --release
+ln -s "$PWD/scripts/keleuo" "$HOME/.local/bin/keleuo"   # any folder on your PATH
 ```
 
-Then `keleion`, `keleion ~/code/app`, `keleion --new .` or `keleion --ssh dev:/srv/app`.
-`KELEION_BIN` points it at another binary.
+Then `keleuo`, `keleuo ~/code/app`, `keleuo --new .` or `keleuo --ssh dev:/srv/app`.
+`KELEUO_BIN` points it at another binary.
 
 ## Layout and keys
 
@@ -111,7 +111,7 @@ Then `keleion`, `keleion ~/code/app`, `keleion --new .` or `keleion --ssh dev:/s
   into its own `[Image #N]` attachments; in the Terminal view Cmd+V with an image on the
   clipboard sends Ctrl+V, Claude Code's own image paste, and a copy is kept. Pointing at an
   `[Image #N]` on the terminal screen shows that image. Images in history show as
-  thumbnails. They are kept in `~/Library/Caches/keleion/images/<session>` and removed after
+  thumbnails. They are kept in `~/Library/Caches/keleuo/images/<session>` and removed after
   30 days; nothing is uploaded anywhere else.
 - **Light and dark** follow the macOS appearance, live; View > Appearance sets System, Light
   or Dark (saved as `appearance`). Both carry the round 4 hierarchy; the terminal has a light
@@ -119,11 +119,11 @@ Then `keleion`, `keleion ~/code/app`, `keleion --new .` or `keleion --ssh dev:/s
   can. The accent is the icon's periwinkle (#6084E8); crane yellow marks what wants
   attention. Claude Code draws its own interface with its own theme setting, so in the light
   terminal its theme may need to be set to light in Claude Code.
-- **The icon** (`crates/keleion-app/assets/icon`): the owner's art at 128 px and up, the
-  character alone for 16 to 64 px, in `Keleion.icns`; the Dock shows it while the app runs.
+- **The icon** (`crates/keleuo-app/assets/icon`): the owner's art at 128 px and up, the
+  character alone for 16 to 64 px, in `Keleuo.icns`; the Dock shows it while the app runs.
 - **Worktrees** are explicit: the browser's right side is titled with the folder's repository
   and branch, and "New session in a git worktree..." first shows what it will make ("Copy of
-  proj (main) into ../proj-2, branch keleion/proj-2") with the name editable.
+  proj (main) into ../proj-2, branch keleuo/proj-2") with the name editable.
 - **Panel headers and sheet tabs** (after an earlier app): a tool panel (Files, Skills,
   Terminals, Agent) has a title bar with a grip to drag it by, its title, its actions and
   options on hover; tool panels sharing a spot put their tabs along the bottom, the shown one
@@ -156,18 +156,18 @@ Then `keleion`, `keleion ~/code/app`, `keleion --new .` or `keleion --ssh dev:/s
 | Ctrl+- / Ctrl+Shift+- | Back / forward through jumps |
 | Cmd+L | Focus the message box |
 
-Environment: `KELEION_MODEL=haiku` picks the model; `KELEION_PERMISSION_MODE=default`
-starts sessions in that permission mode; `KELEION_PERF=1` prints timings;
-`KELEION_CONTROL=<fifo>` accepts test commands (`open`, `term`, `type`, `split`, `send`,
+Environment: `KELEUO_MODEL=haiku` picks the model; `KELEUO_PERMISSION_MODE=default`
+starts sessions in that permission mode; `KELEUO_PERF=1` prints timings;
+`KELEUO_CONTROL=<fifo>` accepts test commands (`open`, `term`, `type`, `split`, `send`,
 `allow`, `new`, `browse`, `tab`, `tabs`, `move-session`, `fold-sessions`, `view`,
 `term-type`, `term-screen`, `chat`, `chat-top`, `chat-scroll`, `panel`, `earlier`, `resume`, `fork`, `takeover`, `key`, `state`,
-...; see `control.rs`, `shell.rs`, `workspace.rs`); `KELEION_BACKGROUND=1` opens windows
-without taking focus; `KELEION_CONFIG_DIR` moves the settings folder (and the window's
-socket with it); `KELEION_TEST_BACKENDS=1` adds the scripted test agent to the browser.
+...; see `control.rs`, `shell.rs`, `workspace.rs`); `KELEUO_BACKGROUND=1` opens windows
+without taking focus; `KELEUO_CONFIG_DIR` moves the settings folder (and the window's
+socket with it); `KELEUO_TEST_BACKENDS=1` adds the scripted test agent to the browser.
 
 ## Layout of the code
 
-- `crates/keleion-core`: no UI. The gitignore-aware file tree, skills and frontmatter, the
+- `crates/keleuo-core`: no UI. The gitignore-aware file tree, skills and frontmatter, the
   chat state built from agent events (tool calls, permission prompts, diffs, subagents,
   cost), `path:line` link detection, tab names, and the `Host` interface every project
   operation and every program goes through.
@@ -178,13 +178,13 @@ socket with it); `KELEION_TEST_BACKENDS=1` adds the scripted test agent to the b
   - `backends::claude`: Claude Code. Its `stream-json` format, session files under
     `~/.claude/projects`, skill folders and process discovery live here and nowhere else.
   - `backends::scripted`: a fake agent for tests that plays a fixed turn of neutral events.
-- `crates/keleion-app`: the gpui window. It only knows `Backend`, `Agent` and `Event`;
+- `crates/keleuo-app`: the gpui window. It only knows `Backend`, `Agent` and `Event`;
   `src/backends.rs` is the one file that names a backend, and a test fails if another file
   does.
 
 ## Adding an agent backend
 
-1. Add `crates/keleion-core/src/backends/<name>/` (or one file) and list it in
+1. Add `crates/keleuo-core/src/backends/<name>/` (or one file) and list it in
    `backends/mod.rs`.
 2. Implement `Agent` for one running conversation: build a `ProgramSpec` (program, arguments,
    environment, folder) and start it with `host.program_command(&spec)`, so it runs locally or
@@ -196,20 +196,20 @@ socket with it); `KELEION_TEST_BACKENDS=1` adds the scripted test agent to the b
    `create_skill`, `earlier_sessions`, `session_count`, `load_session`, `running` and
    `running_elsewhere`. The window hides what `capabilities()` says is missing (skills, earlier
    sessions, forking, subagents, permission prompts, the accept-edits toggle, models).
-4. Register it in `crates/keleion-app/src/backends.rs`. The new-session browser then offers
+4. Register it in `crates/keleuo-app/src/backends.rs`. The new-session browser then offers
    it.
 5. Test it the way `backends/scripted.rs` and `backends/claude/mod.rs` do: drive the `Agent`
    through the trait and apply its events to a `Conversation`. Recorded output belongs in
-   `crates/keleion-core/tests/fixtures`.
+   `crates/keleuo-core/tests/fixtures`.
 
 ## How Claude runs
 
 Each session runs `claude` (`--session-id <new id>`, or `--resume <id>`, with
 `--fork-session` for a fork) in a pseudo-terminal in the project folder, plus
-`--settings <file>`: a settings file of the window's own (in a `keleion-<pid>` folder in
+`--settings <file>`: a settings file of the window's own (in a `keleuo-<pid>` folder in
 the system's temporary folder, removed when the window closes) that adds hooks. Nothing in
-`~/.claude` is changed. Each hook runs `keleion-hook <socket> <token> <event>` (built next
-to `keleion`; standard library only), which passes the hook's input to the window over a
+`~/.claude` is changed. Each hook runs `keleuo-hook <socket> <token> <event>` (built next
+to `keleuo`; standard library only), which passes the hook's input to the window over a
 local socket. Otherwise it is started as in a person's terminal: no stream flags, TERM
 `xterm-256color`, LANG set when the window has none, and the variables a running Claude Code
 gives its children unset (when the window was itself started from one).
@@ -236,7 +236,7 @@ folders, whose hooks could not reach the window.
 
 ## Remote over SSH: the plan
 
-Every project operation goes through `keleion_core::host::Host`: list and read files, read
+Every project operation goes through `keleuo_core::host::Host`: list and read files, read
 and write skills, watch for changes, the terminal's shell, and the `claude` command.
 
 - `LocalHost`: this machine.
@@ -244,7 +244,7 @@ and write skills, watch for changes, the terminal's shell, and the `claude` comm
   control connection (`ControlMaster`). The terminal is `ssh -t host 'cd dir && exec $SHELL -l'`
   in the local PTY; Claude is `ssh -T host claude -p ...` with the same stream over the ssh
   pipes. Files are read with `cat`, listed with `git ls-files`. No file watching.
-- Next: a small headless helper binary (`keleion-remote`), copied to the host on first
+- Next: a small headless helper binary (`keleuo-remote`), copied to the host on first
   connect and started over `ssh` (the approach Zed uses for remote development). It speaks a
   compact length-prefixed protocol over its stdin and stdout: list, read, write, watch
   (notify on the remote), spawn PTY, spawn `claude`, and later spawn language servers. One

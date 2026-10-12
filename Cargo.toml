@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/keleion-core", "crates/keleion-app"]
+members = ["crates/keleuo-core", "crates/keleuo-app"]
 
 [workspace.package]
 version = "0.1.0"
@@ -10,7 +10,7 @@ publish = false
 rust-version = "1.99"
 
 [workspace.dependencies]
-keleion-core = { path = "crates/keleion-core" }
+keleuo-core = { path = "crates/keleuo-core" }
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

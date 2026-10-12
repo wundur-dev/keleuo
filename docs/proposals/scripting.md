@@ -1,10 +1,10 @@
-# Proposal: scripting in Keleion
+# Proposal: scripting in Keleuo
 
 Status: proposal for the owner to read, nothing built. Written 2026-10-12.
 
 ## The idea in one paragraph
 
-Let Keleion watch what happens in a session (what Claude says and does, what scrolls past in a
+Let Keleuo watch what happens in a session (what Claude says and does, what scrolls past in a
 terminal, which files change) and react to it: notify you, highlight a line, run a command, send
 something to Claude, or answer a permission prompt by your own rules. It's a trigger idea from another of our apps
 moved to coding: "when you see X, do Y", across every session you have open.
@@ -76,9 +76,9 @@ on("turn.end", async (e) => {
 ```
 
 **Why JavaScript and not Lua.** Another of our apps already runs both (Lua through mlua, JavaScript through
-QuickJS), so either is cheap to embed. For Keleion's users, developers who work with Claude
+QuickJS), so either is cheap to embed. For Keleuo's users, developers who work with Claude
 Code, JavaScript is the language almost all of them already know, editors already understand
-it, and a TypeScript types file gives autocomplete in Keleion's own editor. QuickJS is small
+it, and a TypeScript types file gives autocomplete in Keleuo's own editor. QuickJS is small
 (about 1 MB), starts in microseconds, and can be sandboxed tightly. Lua stays a possible
 second language later only if people ask for it.
 
@@ -126,9 +126,9 @@ Scripts can type into Claude and approve its tool use. That makes them powerful 
 Six rules:
 
 1. **Declared powers.** Each script lists what it may do (`terminal`, `send`, `permissions`,
-   `shell`). On first enable, Keleion shows that list in plain words, as browser extensions do.
+   `shell`). On first enable, Keleuo shows that list in plain words, as browser extensions do.
    Changing the list asks again.
-2. **Project scripts never run on their own.** A repo can ship `.keleion/` rules and scripts, but
+2. **Project scripts never run on their own.** A repo can ship `.keleuo/` rules and scripts, but
    cloning someone's repo must not run their code. They stay off until you trust them for that
    folder, and they are re-checked when they change (a hash, like Claude Code's own trust
    prompt).
@@ -145,18 +145,18 @@ Six rules:
 
 ## How it fits Claude Code's own hooks
 
-Claude Code already has hooks: shell commands it runs on its own events. Keleion already uses them
+Claude Code already has hooks: shell commands it runs on its own events. Keleuo already uses them
 internally (for permissions and status), and they stay the right tool for things that must
-happen inside Claude Code no matter which app runs it. Keleion scripts are different: they see
+happen inside Claude Code no matter which app runs it. Keleuo scripts are different: they see
 terminals and files as well as the agent, they span several sessions, they can touch the UI, and
 they work with any agent backend. The Scripts panel could also list a project's Claude Code
 hooks read-only, so all automation is visible in one place.
 
 ## Where things live
 
-- **Your own:** `~/Library/Application Support/keleion/scripts/` (rules file plus `.js` files),
+- **Your own:** `~/Library/Application Support/keleuo/scripts/` (rules file plus `.js` files),
   available in every session.
-- **Per project:** `.keleion/rules.toml` and `.keleion/scripts/` in the repo, so a team can share
+- **Per project:** `.keleuo/rules.toml` and `.keleuo/scripts/` in the repo, so a team can share
   them, under the trust rule above.
 - **Over SSH:** scripts run in the app on your Mac; the events arrive over the connection, and
   terminal commands run on the remote machine through the same `Host` interface as everything
@@ -175,7 +175,7 @@ hooks read-only, so all automation is visible in one place.
 - A **Scripts** panel (a dock panel like Files and Skills): your rules and scripts with an on/off
   switch each, last fired time, and the trust state for project ones.
 - The **rule editor**: a form (event, pattern, actions) with a text view of the same rule.
-- The **script editor**: Keleion's editor with JavaScript highlighting and autocomplete from the
+- The **script editor**: Keleuo's editor with JavaScript highlighting and autocomplete from the
   types file.
 - A **test bench**: replay a recorded session (its events and terminal output) through a rule or
   script and see what would fire, without touching Claude or running anything.
@@ -189,7 +189,7 @@ hooks read-only, so all automation is visible in one place.
    example 3.
 3. **JavaScript scripts:** the runtime, the types file and editor support, declared powers,
    terminal commands, the store, the test bench. Delivers example 2.
-4. **Project scripts and sharing:** `.keleion/` in repos, the trust flow, maybe a small gallery
+4. **Project scripts and sharing:** `.keleuo/` in repos, the trust flow, maybe a small gallery
    of example packs.
 
 Each phase is usable on its own, and you can stop after any of them.

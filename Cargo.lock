@@ -3646,7 +3646,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "keleion-app"
+name = "keleuo-app"
 version = "0.1.0"
 dependencies = [
  "alacritty_terminal",
@@ -3654,7 +3654,7 @@ dependencies = [
  "async-channel",
  "dirs 6.0.0",
  "gpui-kit",
- "keleion-core",
+ "keleuo-core",
  "libc",
  "lsp-types",
  "objc2 0.6.5",
@@ -3664,7 +3664,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "keleion-core"
+name = "keleuo-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
