@@ -1925,8 +1925,6 @@ impl Focusable for ChatPanel {
     }
 }
 
-/// A paste's token in the message box: a small raised pill (rounded, lit from above, a soft
-/// shadow) with its size.
 /// Shift+Enter on a list line in the message box: the next item's marker on the new line, or
 /// the marker taken away on an item left empty (ending the list). False when it is a plain new
 /// line. Edits only around the cursor, so paste tokens stay tokens and Undo takes it back.
@@ -1942,8 +1940,15 @@ fn continue_list(input: &Entity<TextareaState>, window: &mut Window, cx: &mut Ap
     let start = text[..cursor].rfind('\n').map_or(0, |i| i + 1);
     let end = text[cursor..].find('\n').map_or(text.len(), |i| cursor + i);
     let Some(step) = compose::list_break(&text[start..end], cursor - start) else { return false };
+    // Splitting an item: the spaces after the cursor go, so the rest follows the marker as typed.
+    let spaces = text[cursor..end].len() - text[cursor..end].trim_start_matches([' ', '\t']).len();
     input.update(cx, |s, cx| match step {
-        ListBreak::Continue(marker) => s.insert(format!("\n{marker}"), window, cx),
+        ListBreak::Continue(marker) => {
+            if spaces > 0 {
+                s.set_selected_range(cursor..cursor + spaces, cx);
+            }
+            s.replace(format!("\n{marker}"), window, cx)
+        }
         ListBreak::End => {
             s.set_selected_range(start..end, cx);
             s.replace("", window, cx);
@@ -1952,6 +1957,8 @@ fn continue_list(input: &Entity<TextareaState>, window: &mut Window, cx: &mut Ap
     true
 }
 
+/// A paste's token in the message box: a small raised pill (rounded, lit from above, a soft
+/// shadow) with its size.
 fn paste_pill(token: &InlineTokenContext, _: &mut Window, cx: &mut App) -> AnyElement {
     let theme = cx.theme();
     let base = theme.secondary;
@@ -2628,7 +2635,7 @@ mod list_tests {
         })
         .unwrap();
         cx.simulate_keystrokes(handle, "shift-enter");
-        assert_eq!(value(cx), "- eggs\n-  and ham");
+        assert_eq!(value(cx), "- eggs\n- and ham");
         cx.simulate_keystrokes(handle, "cmd-z");
         assert_eq!(value(cx), "- eggs and ham", "Undo takes the new item back");
     }
