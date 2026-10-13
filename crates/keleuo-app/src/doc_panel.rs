@@ -74,6 +74,8 @@ pub struct DocPanel {
     diff: Option<DiffView>,
     /// The line to show when the diff is ready (else the first change).
     diff_line: Option<u32>,
+    /// The pointer was pressed on the diff's overview strip and not let go: moving drags.
+    overview_drag: Rc<Cell<bool>>,
     _sub: Option<Subscription>,
 }
 
@@ -115,6 +117,7 @@ impl DocPanel {
             diff_mode: false,
             diff: None,
             diff_line: None,
+            overview_drag: Rc::default(),
             _sub: None,
         };
         this.load(window, cx);
@@ -644,6 +647,7 @@ impl DocPanel {
         let scroll = view.scroll.clone();
         let bounds = Rc::new(Cell::new(Bounds::default()));
         let (paint_bounds, n) = (bounds.clone(), rows.len().max(1));
+        let (drag, drag_paint, jump_scroll) = (self.overview_drag.clone(), self.overview_drag.clone(), scroll.clone());
         div()
             .id("diff-overview")
             .w(px(14.))
@@ -657,6 +661,21 @@ impl DocPanel {
                     |_, _, _| (),
                     move |b, _, window, _| {
                         paint_bounds.set(b);
+                        // A drag that began on the strip follows the pointer anywhere in the
+                        // window until the button is let go.
+                        let (moving, letting_go) = (drag_paint.clone(), drag_paint.clone());
+                        let follow = jump_scroll.clone();
+                        window.on_mouse_event(move |e: &MouseMoveEvent, phase, window, _| {
+                            if phase == DispatchPhase::Bubble && moving.get() {
+                                if e.pressed_button == Some(MouseButton::Left) {
+                                    overview_jump(&follow, n, b, e.position.y);
+                                    window.refresh();
+                                } else {
+                                    moving.set(false);
+                                }
+                            }
+                        });
+                        window.on_mouse_event(move |_: &MouseUpEvent, _, _, _| letting_go.set(false));
                         window.paint_quad(fill(b, ground));
                         let h = f32::from(b.size.height);
                         let y_of = |ix: usize| f32::from(b.origin.y) + h * ix as f32 / n as f32;
@@ -698,14 +717,9 @@ impl DocPanel {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |doc, e: &MouseDownEvent, _, cx| {
-                    let b = bounds.get();
-                    if b.size.height <= px(0.) {
-                        return;
-                    }
-                    let at = (f32::from(e.position.y - b.origin.y) / f32::from(b.size.height)).clamp(0., 1.);
                     if let Some(view) = &doc.diff {
-                        let ix = ((at * view.rows.len() as f32) as usize).min(view.rows.len().saturating_sub(1));
-                        view.scroll.scroll_to_item(ix, ScrollStrategy::Center);
+                        drag.set(true);
+                        overview_jump(&view.scroll, view.rows.len(), bounds.get(), e.position.y);
                         cx.notify();
                     }
                 }),
@@ -899,4 +913,14 @@ fn path_from_uri(uri: &str) -> Option<PathBuf> {
             .replace("%3F", "?")
             .replace("%25", "%"),
     ))
+}
+
+/// Show the row at height `y` of the overview strip (in `strip`) in the middle of the diff.
+fn overview_jump(scroll: &UniformListScrollHandle, rows: usize, strip: Bounds<Pixels>, y: Pixels) {
+    if strip.size.height <= px(0.) || rows == 0 {
+        return;
+    }
+    let at = (f32::from(y - strip.origin.y) / f32::from(strip.size.height)).clamp(0., 1.);
+    let ix = ((at * rows as f32) as usize).min(rows - 1);
+    scroll.scroll_to_item(ix, ScrollStrategy::Center);
 }
