@@ -10,6 +10,7 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use crate::changes::{FileChange, group_of};
+use crate::diff::FileDiff;
 use crate::host::Host;
 
 /// The working tree when a turn started.
@@ -65,27 +66,45 @@ pub fn since(host: &dyn Host, base: &Baseline, skip: &HashSet<PathBuf>) -> Vec<F
         // Binary files count as no lines ("-").
         let (a, r) = (a.parse().unwrap_or(0), r.parse().unwrap_or(0));
         let rel = PathBuf::from(rel);
-        out.push(change(base.root.join(&rel), a, r, added.contains(&rel)));
+        let created = added.contains(&rel);
+        let before = if created { Some(String::new()) } else { before(host, base, &rel) };
+        out.push(change(host, base.root.join(&rel), a, r, created, before));
     }
     for rel in untracked(host, &base.root).unwrap_or_default() {
         if base.untracked.contains(&rel) {
             continue;
         }
         let path = base.root.join(&rel);
-        let small = host.len(&path).is_ok_and(|n| n <= READ_AT_MOST);
-        let lines = small
-            .then(|| host.read(&path).ok())
-            .flatten()
-            .map_or(0, |b| if b.contains(&0) { 0 } else { b.iter().filter(|c| **c == b'\n').count() });
-        out.push(change(path, lines, 0, true));
+        let lines = read_text(host, &path).map_or(0, |t| t.lines().count());
+        out.push(change(host, path, lines, 0, true, Some(String::new())));
     }
     out.retain(|c| !skip.contains(&c.path));
     out.sort_by(|a, b| a.group.cmp(&b.group).then_with(|| a.path.cmp(&b.path)));
     out
 }
 
-fn change(path: PathBuf, added: usize, removed: usize, created: bool) -> FileChange {
-    FileChange { group: group_of(&path), path, added, removed, created, edits: 0, by_command: true }
+/// A text file's content, when it is not too large to read.
+fn read_text(host: &dyn Host, path: &Path) -> Option<String> {
+    if !host.len(path).is_ok_and(|n| n <= READ_AT_MOST) {
+        return None;
+    }
+    let bytes = host.read(path).ok()?;
+    (!bytes.contains(&0)).then(|| String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// A tracked file's content in the baseline.
+fn before(host: &dyn Host, base: &Baseline, rel: &Path) -> Option<String> {
+    let bytes = host.git(&base.root, &["show", &format!("{}:{}", base.commit, rel.display())])?;
+    (bytes.len() as u64 <= READ_AT_MOST && !bytes.contains(&0)).then(|| String::from_utf8_lossy(&bytes).into_owned())
+}
+
+fn change(host: &dyn Host, path: PathBuf, added: usize, removed: usize, created: bool, before: Option<String>) -> FileChange {
+    let diff = before.zip(read_text(host, &path)).map(|(old, new)| FileDiff {
+        path: path.clone(),
+        created,
+        hunks: vec![crate::diff::text_hunk(&old, &new)],
+    });
+    FileChange { group: group_of(&path), path, added, removed, created, edits: 0, by_command: true, diff }
 }
 
 #[cfg(test)]
@@ -125,6 +144,11 @@ mod tests {
         let skip: HashSet<PathBuf> = [root.join("edited.rs")].into();
         let found: Vec<_> = since(&host, &base, &skip).into_iter().map(|c| (c.path, c.added, c.removed, c.created)).collect();
         assert_eq!(found, [(root.join("gen.rs"), 2, 0, true), (root.join("kept.rs"), 2, 2, false)]);
+        // Each carries its diff: undone, it gives the file as it was at the baseline.
+        let changes = since(&host, &base, &skip);
+        let kept = changes.iter().find(|c| c.path == root.join("kept.rs")).unwrap();
+        let now = std::fs::read_to_string(root.join("kept.rs")).unwrap();
+        assert_eq!(crate::diff::undo(&now, &[kept.diff.clone().unwrap()]), "a\nb\ndirty\n");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

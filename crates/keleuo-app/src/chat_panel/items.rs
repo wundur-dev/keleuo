@@ -171,7 +171,7 @@ impl ChatPanel {
         for c in changes.iter().take(SHOWN) {
             let name = c.path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
             let dir = c.path.parent().and_then(|p| p.strip_prefix(&root).ok()).map(|p| p.display().to_string()).unwrap_or_default();
-            let (path, by_command) = (c.path.clone(), c.by_command);
+            let path = c.path.clone();
             card = card.child(
                 div()
                     .id(SharedString::from(format!("turn-change-{ix}-{}", c.path.display())))
@@ -191,10 +191,7 @@ impl ChatPanel {
                     .when(c.created, |d| d.child(div().flex_none().text_size(px(10.)).text_color(green).child("new")))
                     .child(div().flex_none().text_size(px(11.)).text_color(green).child(format!("+{}", c.added)))
                     .child(div().flex_none().text_size(px(11.)).text_color(red).child(format!("−{}", c.removed)))
-                    .on_click(cx.listener(move |_, _, _, cx| {
-                        let event = if by_command { ChatPanelEvent::OpenFile(path.clone(), None) } else { ChatPanelEvent::OpenDiff(path.clone()) };
-                        cx.emit(event)
-                    })),
+                    .on_click(cx.listener(move |_, _, _, cx| cx.emit(ChatPanelEvent::OpenDiff(path.clone())))),
             );
         }
         if changes.len() > SHOWN {

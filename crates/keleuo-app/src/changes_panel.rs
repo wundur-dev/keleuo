@@ -67,7 +67,7 @@ impl ChangesPanel {
             .and_then(|p| p.strip_prefix(root).ok())
             .map(|p| p.display().to_string())
             .unwrap_or_default();
-        let (path, by_command) = (change.path.clone(), change.by_command);
+        let path = change.path.clone();
         let panel = self.panel.downgrade();
         div()
             .id(SharedString::from(format!("change-{}", change.path.display())))
@@ -91,15 +91,14 @@ impl ChangesPanel {
             .child(div().flex_none().text_size(px(11.)).text_color(red).child(format!("−{}", change.removed)))
             .tooltip({
                 let tip = match change.edits {
-                    0 => "Changed by a command, not an edit: opens the file".to_string(),
+                    0 => "Changed by a command, found with git".to_string(),
                     1 => "1 edit".to_string(),
                     n => format!("{n} edits"),
                 };
                 move |w, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(w, cx)
             })
             .on_click(move |_, _, cx| {
-                let event = if by_command { ChatPanelEvent::OpenFile(path.clone(), None) } else { ChatPanelEvent::OpenDiff(path.clone()) };
-                let _ = panel.update(cx, |_, cx| cx.emit(event));
+                let _ = panel.update(cx, |_, cx| cx.emit(ChatPanelEvent::OpenDiff(path.clone())));
             })
             .into_any_element()
     }

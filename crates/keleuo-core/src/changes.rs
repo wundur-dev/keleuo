@@ -27,6 +27,10 @@ pub struct FileChange {
     pub group: Group,
     /// Changed by a command, not the agent's edit tools (see [`crate::command_changes`]).
     pub by_command: bool,
+    /// For a change by a command: the file before and after, as one diff, so it opens as a
+    /// diff and takes its place among the session's changes. `None` when it could not be read
+    /// (too large, or deleted).
+    pub diff: Option<crate::diff::FileDiff>,
 }
 
 /// Which group `path` belongs in, from its name alone.
@@ -92,6 +96,7 @@ pub fn summarize(diffs: impl IntoIterator<Item = crate::diff::FileDiff>) -> Vec<
                 removed,
                 edits: 1,
                 by_command: false,
+                diff: None,
             }),
         }
     }

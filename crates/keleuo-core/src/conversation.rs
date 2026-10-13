@@ -470,6 +470,11 @@ impl Conversation {
 
     fn collect_changes(&self, items: &[Item], path: &Path, out: &mut Vec<FileDiff>) {
         for item in items {
+            // What commands changed, found when the turn ended.
+            if let Item::TurnChanges(changes) = item {
+                out.extend(changes.iter().filter(|c| c.path == path).filter_map(|c| c.diff.clone()));
+                continue;
+            }
             let Item::Tool(t) = item else { continue };
             if let Some(agent) = self.agent(&t.id) {
                 self.collect_changes(&agent.items, path, out);
@@ -1025,6 +1030,7 @@ mod tests {
             edits: 0,
             group: crate::changes::group_of(Path::new(p)),
             by_command: true,
+            diff: None,
         };
         chat.add_command_changes(turn, vec![cmd("/p/fmt.rs")]);
         chat.add_command_changes(turn, vec![cmd("/p/fmt.rs")]);
