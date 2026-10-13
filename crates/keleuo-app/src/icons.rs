@@ -37,6 +37,8 @@ icon_assets!(
         Square,
         Copy,
         Monitor,
+        FilePlus,
+        FolderPlus,
     ]
 );
 

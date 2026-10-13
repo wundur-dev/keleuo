@@ -140,6 +140,30 @@ pub fn is_markdown(path: &Path) -> bool {
     language_for(path) == "markdown"
 }
 
+/// Make a new empty file (or a folder) named `name` in the folder `dir`. The name may hold
+/// folders (`src/util/x.rs`), made as needed, but cannot leave `dir`. The error is said to the
+/// person as it is.
+pub fn create(host: &dyn Host, dir: &Path, name: &str, folder: bool) -> Result<PathBuf, String> {
+    let name = name.trim().trim_end_matches('/');
+    if name.is_empty() {
+        return Err("Type a name.".into());
+    }
+    let rel = Path::new(name);
+    if !rel.components().all(|c| matches!(c, std::path::Component::Normal(_))) {
+        return Err("Use a name inside this folder.".into());
+    }
+    let path = dir.join(rel);
+    if host.exists(&path) {
+        return Err(format!("{name} already exists."));
+    }
+    let made = if folder {
+        host.create_dir_all(&path)
+    } else {
+        path.parent().map_or(Ok(()), |p| host.create_dir_all(p)).and_then(|()| host.write(&path, b""))
+    };
+    made.map(|()| path).map_err(|e| e.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -192,5 +216,22 @@ mod tests {
         assert!(is_markdown(Path::new("README.MD")));
         assert!(looks_like_text(b"hello"));
         assert!(!looks_like_text(b"he\0llo"));
+    }
+
+    #[test]
+    fn creates_files_and_folders_inside_the_folder_only() {
+        let host = crate::host::LocalHost;
+        let dir = std::env::temp_dir().join(format!("keleuo-create-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = create(&host, &dir, " notes.md ", false).unwrap();
+        assert!(file.is_file() && file.ends_with("notes.md"));
+        let nested = create(&host, &dir, "src/util/x.rs", false).unwrap();
+        assert!(nested.is_file());
+        assert!(create(&host, &dir, "assets/icons/", true).unwrap().is_dir());
+        assert_eq!(create(&host, &dir, "notes.md", false), Err("notes.md already exists.".into()));
+        assert!(create(&host, &dir, "../out.txt", false).is_err());
+        assert!(create(&host, &dir, "/etc/x", false).is_err());
+        assert!(create(&host, &dir, "  ", true).is_err());
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

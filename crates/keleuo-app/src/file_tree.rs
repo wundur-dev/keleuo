@@ -5,7 +5,9 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use gpui_kit::component::ActiveTheme;
+use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::menu::{ContextMenuExt, PopupMenu, PopupMenuItem};
+use gpui_kit::component::{ActiveTheme, Icon, Sizable};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 use keleuo_core::files::{self, Node};
@@ -24,6 +26,26 @@ struct Row {
     path: PathBuf,
     is_dir: bool,
     open: bool,
+    kind: RowKind,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum RowKind {
+    Entry,
+    /// The name field of a file or folder being made.
+    Name,
+    /// Why that name did not work.
+    Problem,
+}
+
+/// A new file or folder being named, in place in the tree.
+struct Creating {
+    /// The folder it goes in.
+    dir: PathBuf,
+    folder: bool,
+    input: Entity<InputState>,
+    problem: Option<String>,
+    _sub: Subscription,
 }
 
 pub struct FileTree {
@@ -35,6 +57,9 @@ pub struct FileTree {
     rows: Arc<Vec<Row>>,
     pub selected: Option<PathBuf>,
     loading: bool,
+    creating: Option<Creating>,
+    /// Select this path once the next listing comes in (one just made).
+    reveal_after: Option<PathBuf>,
     scroll: UniformListScrollHandle,
     _task: Option<Task<()>>,
 }
@@ -52,6 +77,8 @@ impl FileTree {
             rows: Arc::new(Vec::new()),
             selected: None,
             loading: true,
+            creating: None,
+            reveal_after: None,
             scroll: UniformListScrollHandle::new(),
             _task: None,
         };
@@ -76,6 +103,9 @@ impl FileTree {
                     tree.nodes = nodes;
                     tree.loading = false;
                     tree.rebuild_rows();
+                    if let Some(path) = tree.reveal_after.take() {
+                        tree.reveal(&path, cx);
+                    }
                     cx.emit(FileTreeEvent::Indexed(Arc::new(index)));
                     cx.notify();
                 });
@@ -92,6 +122,7 @@ impl FileTree {
                     path: n.path.clone(),
                     is_dir: n.is_dir(),
                     open: expanded.contains(&n.path),
+                    kind: RowKind::Entry,
                 });
                 if let Some(children) = &n.children
                     && expanded.contains(&n.path)
@@ -102,7 +133,91 @@ impl FileTree {
         }
         let mut rows = Vec::new();
         walk(&self.nodes, 0, &self.expanded, &mut rows);
+        // The name field goes first in its folder.
+        if let Some(c) = &self.creating {
+            let (at, depth) = match rows.iter().position(|r| r.path == c.dir) {
+                Some(ix) => (ix + 1, rows[ix].depth + 1),
+                None => (0, 0),
+            };
+            let row = |kind| Row { depth, name: String::new(), path: c.dir.clone(), is_dir: c.folder, open: false, kind };
+            if c.problem.is_some() {
+                rows.insert(at, row(RowKind::Problem));
+            }
+            rows.insert(at, row(RowKind::Name));
+        }
         self.rows = Arc::new(rows);
+    }
+
+    pub fn root(&self) -> &std::path::Path {
+        &self.root
+    }
+
+    /// Start making a new file (or folder) in `dir`: a name field opens there in the tree.
+    pub fn start_create(&mut self, dir: PathBuf, folder: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let placeholder = if folder { "Folder name" } else { "File name (a/b.rs makes folders)" };
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder(placeholder));
+        input.update(cx, |s, cx| s.focus(window, cx));
+        let sub = cx.subscribe_in(&input, window, |tree, input, ev: &InputEvent, _, cx| match ev {
+            InputEvent::PressEnter { .. } => tree.finish_create(cx),
+            InputEvent::Change => {
+                if let Some(c) = tree.creating.as_mut().filter(|c| c.problem.is_some()) {
+                    c.problem = None;
+                    tree.rebuild_rows();
+                    cx.notify();
+                }
+            }
+            // Clicking away keeps a name typed, and drops an empty field.
+            InputEvent::Blur if input.read(cx).value().trim().is_empty() => tree.cancel_create(cx),
+            _ => {}
+        });
+        if dir != self.root {
+            self.expanded.insert(dir.clone());
+        }
+        self.creating = Some(Creating { dir, folder, input, problem: None, _sub: sub });
+        self.rebuild_rows();
+        if let Some(ix) = self.rows.iter().position(|r| r.kind == RowKind::Name) {
+            self.scroll.scroll_to_item(ix, ScrollStrategy::Center);
+        }
+        cx.notify();
+    }
+
+    fn cancel_create(&mut self, cx: &mut Context<Self>) {
+        if self.creating.take().is_some() {
+            self.rebuild_rows();
+            cx.notify();
+        }
+    }
+
+    /// Make what the name field names; a new file opens.
+    fn finish_create(&mut self, cx: &mut Context<Self>) {
+        let Some(c) = &self.creating else { return };
+        let (dir, folder) = (c.dir.clone(), c.folder);
+        let name = c.input.read(cx).value().to_string();
+        let host = self.host.clone();
+        cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let made = cx.background_spawn(async move { files::create(host.as_ref(), &dir, &name, folder) }).await;
+            let _ = this.update(cx, |tree, cx| match made {
+                Ok(path) => {
+                    tree.creating = None;
+                    if folder {
+                        tree.expanded.insert(path.clone());
+                    } else {
+                        tree.selected = Some(path.clone());
+                        cx.emit(FileTreeEvent::Open(path.clone()));
+                    }
+                    tree.reveal_after = Some(path);
+                    tree.refresh(cx);
+                }
+                Err(problem) => {
+                    if let Some(c) = tree.creating.as_mut() {
+                        c.problem = Some(problem);
+                    }
+                    tree.rebuild_rows();
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     fn click(&mut self, ix: usize, cx: &mut Context<Self>) {
@@ -139,6 +254,18 @@ impl FileTree {
     }
 }
 
+/// "New File…" and "New Folder…", made in `dir`.
+fn new_menu(menu: PopupMenu, tree: WeakEntity<FileTree>, dir: PathBuf) -> PopupMenu {
+    let item = |label: &'static str, icon, folder: bool| {
+        let (tree, dir) = (tree.clone(), dir.clone());
+        PopupMenuItem::new(label).icon(Icon::new(icon)).on_click(move |_, window, cx| {
+            let _ = tree.update(cx, |t, cx| t.start_create(dir.clone(), folder, window, cx));
+        })
+    };
+    menu.item(item("New File…", gpui_kit::assets::IconName::FilePlus, false))
+        .item(item("New Folder…", gpui_kit::assets::IconName::FolderPlus, true))
+}
+
 impl Focusable for FileTree {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus.clone()
@@ -167,12 +294,38 @@ impl Render for FileTree {
         let selected = self.selected.clone();
         let entity = cx.entity().downgrade();
         let sidebar_bg = cx.theme().sidebar;
+        let danger = cx.theme().danger;
+        let naming = self.creating.as_ref().map(|c| (c.input.clone(), c.problem.clone().unwrap_or_default()));
         let list = uniform_list("file-tree", rows.len(), move |range, _window, cx| {
             range
                 .map(|ix| {
                     let row = &rows[ix];
-                    let is_sel = selected.as_ref() == Some(&row.path);
                     let entity = entity.clone();
+                    let indent = px(6. + row.depth as f32 * 12.);
+                    if let (RowKind::Name | RowKind::Problem, Some((input, problem))) = (row.kind, &naming) {
+                        let base = div().id(ix).w_full().h(px(20.)).pl(indent).pr_1().flex().items_center().gap_1();
+                        let el = if row.kind == RowKind::Name {
+                            let icon = if row.is_dir { crate::icons::folder(false, cx) } else { crate::icons::file("", cx) };
+                            base.child(icon).child(
+                                div()
+                                    .flex_1()
+                                    .min_w(px(80.))
+                                    .capture_key_down(move |ev: &KeyDownEvent, _, cx| {
+                                        if ev.keystroke.key == "escape" {
+                                            cx.stop_propagation();
+                                            let _ = entity.update(cx, |tree, cx| tree.cancel_create(cx));
+                                        }
+                                    })
+                                    .child(Input::new(input).xsmall()),
+                            )
+                        } else {
+                            base.text_xs().text_color(danger).child(div().truncate().child(problem.clone()))
+                        };
+                        return el.into_any_element();
+                    }
+                    let is_sel = selected.as_ref() == Some(&row.path);
+                    let dir = if row.is_dir { row.path.clone() } else { row.path.parent().map(|p| p.to_path_buf()).unwrap_or_default() };
+                    let menu_tree = entity.clone();
                     let icon = if row.is_dir {
                         crate::icons::folder(row.open, cx)
                     } else {
@@ -181,7 +334,7 @@ impl Render for FileTree {
                     div()
                         .id(ix)
                         .h(px(20.))
-                        .pl(px(6. + row.depth as f32 * 12.))
+                        .pl(indent)
                         .pr_1()
                         .flex()
                         .items_center()
@@ -195,6 +348,8 @@ impl Render for FileTree {
                         .on_click(move |_, _, cx| {
                             let _ = entity.update(cx, |tree, cx| tree.click(ix, cx));
                         })
+                        .context_menu(move |menu, _, _| new_menu(menu, menu_tree.clone(), dir.clone()))
+                        .into_any_element()
                 })
                 .collect()
         })

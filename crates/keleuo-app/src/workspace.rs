@@ -1287,6 +1287,13 @@ impl Workspace {
                     c => s.answer_first(c == "allow", cx),
                 });
             }
+            "new-file" | "new-folder" => {
+                // In the folder `arg` (relative to the project), else at its root.
+                self.files.update(cx, |t, cx| {
+                    let dir = t.root().join(arg);
+                    t.start_create(dir, cmd == "new-folder", window, cx)
+                });
+            }
             "view" => {
                 let view = if arg == "terminal" { View::Terminal } else { View::Chat };
                 self.session.update(cx, |s, cx| s.set_view(view, cx));

@@ -234,6 +234,20 @@ impl Panel for FileTree {
     fn title(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         list_title(IconName::FolderOpen, "Files")
     }
+    fn toolbar_buttons(&mut self, _: &mut Window, cx: &mut Context<Self>) -> Option<Vec<Button>> {
+        let button = |id: &'static str, icon, tip: &'static str, folder: bool| {
+            Button::new(id)
+                .ghost()
+                .xsmall()
+                .icon(Icon::new(icon))
+                .tooltip(tip)
+                .on_click(cx.listener(move |t, _, window, cx| t.start_create(t.root().to_path_buf(), folder, window, cx)))
+        };
+        Some(vec![
+            button("new-file", gpui_kit::assets::IconName::FilePlus, "New file (right-click a folder for one inside it)", false),
+            button("new-folder", gpui_kit::assets::IconName::FolderPlus, "New folder", true),
+        ])
+    }
     fn zoom_control(&self, _: &App) -> Option<gpui_kit::component::dock::PanelControl> {
         None
     }
