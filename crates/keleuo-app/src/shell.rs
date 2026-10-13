@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
-use gpui_kit::component::menu::{ContextMenuExt, PopupMenuItem};
+use gpui_kit::component::menu::{ContextMenuExt, PopupMenu, PopupMenuItem};
 use gpui_kit::component::{ActiveTheme, Icon, IconName, Sizable, TitleBar, WindowExt};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
@@ -932,6 +932,54 @@ impl Shell {
         panels::tab_label(&self.key(ix), self.list_name(ix, cx), cx)
     }
 
+    /// A session's right-click menu, the same from the list, the rail and the peeking list.
+    fn session_menu(
+        &self,
+        ix: usize,
+        cx: &mut Context<Self>,
+    ) -> impl Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu + 'static {
+        let number = self.tabs[ix].number;
+        let (key, auto, current) = (self.key(ix), self.list_name(ix, cx), self.name(ix, cx));
+        let w = self.tabs[ix].ws.read(cx);
+        let (remote, folder) = (w.host().is_remote(), w.root().to_path_buf());
+        let weak = cx.entity().downgrade();
+        move |menu: PopupMenu, _: &mut Window, _: &mut Context<PopupMenu>| {
+            let (w1, w3) = (weak.clone(), weak.clone());
+            let (k, a, c, k2) = (key.clone(), auto.clone(), current.clone(), key.clone());
+            let path = folder.display().to_string();
+            menu.item(PopupMenuItem::new("Rename").on_click(move |_, window, cx| {
+                start_tab_rename(k.clone(), a.clone(), c.clone(), window, cx);
+                // Folded, the name is edited in the list peeking out over the rail.
+                let _ = w3.update(cx, |s, cx| {
+                    if s.folded {
+                        s.peek = true;
+                        cx.notify();
+                    }
+                });
+            }))
+            .item(PopupMenuItem::new("Reset name").on_click(move |_, window, cx| panels::reset_tab_name(&k2, window, cx)))
+            .separator()
+            .when(!remote, |m| {
+                let (w2, f, f2) = (weak.clone(), folder.clone(), folder.clone());
+                m.item(PopupMenuItem::new("Reveal in Finder").on_click(move |_, _, cx| cx.reveal_path(&f2)))
+                    .item(PopupMenuItem::new("Rename folder…").on_click(move |_, window, cx| {
+                        let _ = w2.update(cx, |s, cx| s.ask_rename_folder(f.clone(), window, cx));
+                    }))
+            })
+            .item(PopupMenuItem::new("Copy folder path").on_click(move |_, _, cx| {
+                cx.write_to_clipboard(ClipboardItem::new_string(path.clone()))
+            }))
+            .separator()
+            .item(PopupMenuItem::new("Close session").on_click(move |_, window, cx| {
+                let _ = w1.update(cx, |s, cx| {
+                    if let Some(ix) = s.tabs.iter().position(|t| t.number == number) {
+                        s.request_close(ix, window, cx)
+                    }
+                });
+            }))
+        }
+    }
+
     /// Give the shown session a name, as a rename does (empty: named after its first message).
     fn name_shown(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
         let Some(key) = (self.active < self.tabs.len()).then(|| self.key(self.active)) else { return };
@@ -1287,10 +1335,9 @@ impl Shell {
             let auto = self.list_name(ix, cx);
             let current = self.name(ix, cx);
             let title = panels::title_element(&key, auto.clone(), None, None, cx);
-            let weak = cx.entity().downgrade();
-            let (remote, folder) = (w.host().is_remote(), w.root().to_path_buf());
-            let (k1, a1, c1) = (key.clone(), auto.clone(), current.clone());
             let drag = SessionDrag { number, name: current.clone().into() };
+            let (k1, a1, c1) = (key, auto, current);
+            let menu = self.session_menu(ix, cx);
             col = col.child(
                 div()
                     .id(("session-row", number))
@@ -1364,28 +1411,7 @@ impl Shell {
                         let to = s.tabs.iter().position(|t| t.number == number).unwrap_or(0);
                         s.reorder(d.number, to, cx)
                     }))
-                    .context_menu(move |menu, _, _| {
-                        let w1 = weak.clone();
-                        let (k, a, c, k2) = (key.clone(), auto.clone(), current.clone(), key.clone());
-                        menu.item(PopupMenuItem::new("Rename").on_click(move |_, window, cx| {
-                            start_tab_rename(k.clone(), a.clone(), c.clone(), window, cx)
-                        }))
-                        .item(PopupMenuItem::new("Reset name").on_click(move |_, window, cx| panels::reset_tab_name(&k2, window, cx)))
-                        .when(!remote, |m| {
-                            let (w2, f) = (weak.clone(), folder.clone());
-                            m.item(PopupMenuItem::new("Rename folder…").on_click(move |_, window, cx| {
-                                let _ = w2.update(cx, |s, cx| s.ask_rename_folder(f.clone(), window, cx));
-                            }))
-                        })
-                        .separator()
-                        .item(PopupMenuItem::new("Close session").on_click(move |_, window, cx| {
-                            let _ = w1.update(cx, |s, cx| {
-                                if let Some(ix) = s.tabs.iter().position(|t| t.number == number) {
-                                    s.request_close(ix, window, cx)
-                                }
-                            });
-                        }))
-                    }),
+                    .context_menu(menu),
             );
         }
         // Room below the last row: dropping there moves a session to the end.
@@ -1452,6 +1478,7 @@ impl Shell {
             .border_color(border)
             // A press here is meant for what is under it: the list does not come out over it.
             .on_mouse_down(MouseButton::Left, cx.listener(|s, _, _, _| s.peek_held = true))
+            .on_mouse_down(MouseButton::Right, cx.listener(|s, _, _, _| s.peek_held = true))
             .child(
                 div()
                     .id("rail-new")
@@ -1519,7 +1546,8 @@ impl Shell {
                         if let Some(ix) = s.tabs.iter().position(|t| t.number == number) {
                             s.activate(ix, window, cx);
                         }
-                    })),
+                    }))
+                    .context_menu(self.session_menu(ix, cx)),
             );
         }
         col.into_any_element()
@@ -1566,6 +1594,8 @@ impl Shell {
             let active = ix == self.active && self.browser.is_none();
             let number = self.tabs[ix].number;
             let name = self.name(ix, cx);
+            // The name, or the field renaming it.
+            let title = panels::title_element(&self.key(ix), self.list_name(ix, cx), None, None, cx);
             let w = self.tabs[ix].ws.read(cx);
             let folder = w.root().file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
             let detail = w.session.read(cx).chat.last_activity(80).unwrap_or(folder);
@@ -1607,14 +1637,15 @@ impl Shell {
                             .min_w_0()
                             .flex()
                             .flex_col()
-                            .child(div().truncate().text_size(px(12.5)).line_height(px(15.)).text_color(fg).child(name))
+                            .child(div().truncate().text_size(px(12.5)).line_height(px(15.)).text_color(fg).child(title))
                             .child(div().truncate().text_size(px(10.5)).line_height(px(13.)).text_color(muted).child(detail)),
                     )
                     .on_click(cx.listener(move |s, _, window, cx| {
                         if let Some(ix) = s.tabs.iter().position(|t| t.number == number) {
                             s.activate(ix, window, cx);
                         }
-                    })),
+                    }))
+                    .context_menu(self.session_menu(ix, cx)),
             );
         }
         col.into_any_element()
@@ -1928,7 +1959,13 @@ impl Render for Shell {
                             // floats outside it, and holds the pointer while it is open).
                             .when(self.peek, |d| {
                                 d.on_mouse_move(cx.listener(|s, _: &MouseMoveEvent, _, cx| {
-                                    if s.peek {
+                                    // A session being renamed in it keeps it out.
+                                    let renaming = cx
+                                        .global::<panels::Renaming>()
+                                        .0
+                                        .as_ref()
+                                        .is_some_and(|r| s.tabs.iter().any(|t| panels::session_key(t.number) == r.key));
+                                    if s.peek && !renaming {
                                         s.peek = false;
                                         s.rail_hover = false;
                                         cx.notify();
