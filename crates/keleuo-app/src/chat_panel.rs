@@ -23,6 +23,7 @@ use keleuo_core::conversation::{
 use keleuo_core::agent::Issue;
 use keleuo_core::diff::{FileDiff, LineKind};
 use keleuo_core::links::{self, FileIndex};
+use keleuo_core::paste;
 use keleuo_core::conversation::{one_line, to_markdown};
 
 use crate::actions::CopyConversation;
@@ -63,6 +64,9 @@ pub struct ChatPanel {
     loading: HashSet<u64>,
     /// Images to send with the next message.
     attachments: Vec<PathBuf>,
+    /// Long pastes in the message box, shown there as tokens (`[Pasted text #1 · …]`, see
+    /// [`keleuo_core::paste`]); paste `n` is `pastes[n - 1]`.
+    pastes: Vec<String>,
     /// An image shown full size over the chat.
     preview: Option<PathBuf>,
     /// The known failure whose fixes are being offered.
@@ -121,17 +125,9 @@ impl ChatPanel {
         let s1 = cx.subscribe_in(
             &input,
             window,
-            |panel, input, ev: &InputEvent, window, cx| {
+            |panel, _, ev: &InputEvent, window, cx| {
                 if let InputEvent::PressEnter { shift: false, .. } = ev {
-                    let text = input.read(cx).value().to_string();
-                    if text.trim().is_empty() && panel.attachments.is_empty() {
-                        return;
-                    }
-                    input.update(cx, |s, cx| s.set_value("", window, cx));
-                    // Sending goes back to the end and follows it.
-                    panel.list.set_follow_mode(FollowMode::Tail);
-                    let images = std::mem::take(&mut panel.attachments);
-                    panel.session.update(cx, |s, cx| s.send_with(&text, images, cx));
+                    panel.send_composed(window, cx);
                 }
             },
         );
@@ -186,6 +182,7 @@ impl ChatPanel {
             list_len: 0,
             loading: HashSet::new(),
             attachments: Vec::new(),
+            pastes: Vec::new(),
             preview: None,
             fixing: None,
             fixed: Default::default(),
@@ -485,6 +482,74 @@ impl ChatPanel {
     }
 
     /// The divider where the context was compacted, its summary on request.
+    /// The person's message, its long pastes folded to a line that opens them.
+    fn render_user_text(&self, key: &str, text: &str, cx: &mut Context<Self>) -> AnyElement {
+        let parts = paste::parts(text);
+        if !parts.iter().any(|p| matches!(p, paste::Part::Pasted(_))) {
+            return text.to_string().into_any_element();
+        }
+        let theme = cx.theme();
+        let (muted, border, hover, code_bg) = (theme.muted_foreground, theme.border, theme.secondary_hover, theme.background);
+        let mut col = div().flex().flex_col().gap_1();
+        for (k, part) in parts.into_iter().enumerate() {
+            match part {
+                paste::Part::Text(t) => {
+                    if !t.trim().is_empty() {
+                        col = col.child(t.trim().to_string());
+                    }
+                }
+                paste::Part::Pasted(p) => {
+                    let id = format!("paste:{key}:{k}");
+                    let open = self.toggled.contains(&id);
+                    let toggle = id.clone();
+                    col = col.child(
+                        div()
+                            .rounded(px(8.))
+                            .border_1()
+                            .border_color(border)
+                            .overflow_hidden()
+                            .child(
+                                div()
+                                    .id(SharedString::from(id))
+                                    .px_2()
+                                    .py_1()
+                                    .flex()
+                                    .items_center()
+                                    .gap_1()
+                                    .text_xs()
+                                    .text_color(muted)
+                                    .cursor_pointer()
+                                    .hover(|d| d.bg(hover))
+                                    .child(Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight }).xsmall())
+                                    .child(format!("Pasted text · {}", paste::size(p)))
+                                    .on_click(cx.listener(move |panel, _, _, cx| {
+                                        if !panel.toggled.remove(&toggle) {
+                                            panel.toggled.insert(toggle.clone());
+                                        }
+                                        panel.list.remeasure();
+                                        cx.notify();
+                                    })),
+                            )
+                            .when(open, |d| {
+                                d.child(
+                                    div()
+                                        .px_2()
+                                        .py_1()
+                                        .bg(code_bg)
+                                        .font_family("monospace")
+                                        .text_xs()
+                                        .flex()
+                                        .flex_col()
+                                        .children(p.lines().map(|l| if l.is_empty() { " ".to_string() } else { l.to_string() })),
+                                )
+                            }),
+                    );
+                }
+            }
+        }
+        col.into_any_element()
+    }
+
     fn render_compacted(&self, summary: &str, trigger: Option<&str>, tokens: Option<u64>, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
         let (muted, border, hover) = (theme.muted_foreground, theme.border, theme.secondary_hover);
@@ -1202,7 +1267,7 @@ impl ChatPanel {
             let el = match item {
                 // The person's message: a rounded bubble on the right.
                 Item::User(text) => {
-                    let copy = text.clone();
+                    let copy = paste::without_markers(text);
                     let group = SharedString::from(format!("user-{key}-{ix}"));
                     div()
                         .group(group.clone())
@@ -1221,7 +1286,7 @@ impl ChatPanel {
                                 .text_sm()
                                 .line_height(rems(1.45))
                                 .text_color(fg)
-                                .child(text.clone()),
+                                .child(self.render_user_text(&format!("{key}-{ix}"), text, cx)),
                         )
                         .child(hover_actions(group, format!("{key}-{ix}"), copy, muted))
                         .into_any_element()
@@ -1949,10 +2014,58 @@ impl Render for ChatPanel {
 }
 
 impl ChatPanel {
-    /// Tests: send `text` with what is attached.
+    /// Tests: send `text` with what is attached and pasted.
     pub fn test_send(&mut self, text: &str, cx: &mut Context<Self>) {
         let images = std::mem::take(&mut self.attachments);
-        self.session.update(cx, |s, cx| s.send_with(text, images, cx));
+        let text = paste::expand(text, &std::mem::take(&mut self.pastes), true);
+        self.session.update(cx, |s, cx| s.send_with(&text, images, cx));
+    }
+
+    /// Tests: paste `text` into the message box (short text goes in as typed).
+    pub fn test_paste(&mut self, text: String, window: &mut Window, cx: &mut Context<Self>) {
+        if paste::is_long(&text) {
+            self.paste_long(text, window, cx);
+        } else {
+            self.input.update(cx, |s, cx| s.insert(text, window, cx));
+        }
+    }
+
+    /// Tests: press send.
+    pub fn test_send_composed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.send_composed(window, cx);
+    }
+
+    /// Send what the message box holds: its text with the long pastes put back (marked, so
+    /// the chat folds them), and the attached images. The box empties.
+    fn send_composed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let typed = self.input.read(cx).value().to_string();
+        if typed.trim().is_empty() && self.attachments.is_empty() {
+            return;
+        }
+        let text = paste::expand(&typed, &std::mem::take(&mut self.pastes), true);
+        self.input.update(cx, |s, cx| s.set_value("", window, cx));
+        // Sending goes back to the end and follows it.
+        self.list.set_follow_mode(FollowMode::Tail);
+        let images = std::mem::take(&mut self.attachments);
+        self.session.update(cx, |s, cx| s.send_with(&text, images, cx));
+    }
+
+    /// A long paste: kept aside, a token for it typed at the cursor.
+    fn paste_long(&mut self, text: String, window: &mut Window, cx: &mut Context<Self>) {
+        let token = paste::token(self.pastes.len() + 1, &text);
+        self.pastes.push(text);
+        self.input.update(cx, |s, cx| s.insert(token, window, cx));
+        cx.notify();
+    }
+
+    /// Paste `n` back into the message box as plain text (`inline`), or out of it.
+    fn unfold_paste(&mut self, n: usize, inline: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(text) = self.pastes.get(n - 1).cloned() else { return };
+        let token = paste::token(n, &text);
+        let value = self.input.read(cx).value().to_string();
+        let value = value.replacen(&token, if inline { &text } else { "" }, 1);
+        self.input.update(cx, |s, cx| s.set_value(value, window, cx));
+        cx.notify();
     }
 
     /// Tests: attach an image file.
@@ -2041,6 +2154,49 @@ impl ChatPanel {
             );
         }
 
+        // Long pastes still in the box: what each holds, to put back in the text or drop.
+        let value = self.input.read(cx).value().to_string();
+        let mut paste_chips = 0;
+        for n in paste::tokens_in(&value) {
+            let Some(text) = self.pastes.get(n.wrapping_sub(1)) else { continue };
+            paste_chips += 1;
+            let first = text.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim().to_string();
+            let action = |id: &'static str, label: &'static str, inline: bool| {
+                div()
+                    .id((id, n))
+                    .px_1()
+                    .rounded(px(4.))
+                    .cursor_pointer()
+                    .hover(|d| d.text_color(fg))
+                    .child(label)
+                    .on_click(cx.listener(move |p, _, window, cx| p.unfold_paste(n, inline, window, cx)))
+            };
+            chips = chips.child(
+                div()
+                    .h(px(56.))
+                    .max_w(px(280.))
+                    .px_2()
+                    .rounded(px(10.))
+                    .border_1()
+                    .border_color(border)
+                    .bg(field)
+                    .flex()
+                    .flex_col()
+                    .justify_center()
+                    .text_xs()
+                    .text_color(muted)
+                    .child(div().text_color(fg).truncate().child(format!("Pasted text #{n} · {}", paste::size(text))))
+                    .child(div().truncate().font_family("monospace").child(first))
+                    .child(
+                        div()
+                            .flex()
+                            .gap_1()
+                            .child(action("paste-inline", "Show in text field", true))
+                            .child(action("paste-drop", "Remove", false)),
+                    ),
+            );
+        }
+
         let models: Vec<String> = caps.models.clone();
         let (w_model, w_mode) = (weak.clone(), weak.clone());
         let model_button = Button::new("model")
@@ -2085,7 +2241,6 @@ impl ChatPanel {
                 }
                 menu
             });
-        let input = self.input.clone();
         let send = div()
             .id("send")
             .size(px(28.))
@@ -2108,14 +2263,7 @@ impl ChatPanel {
                     p.session.update(cx, |s, cx| s.interrupt(cx));
                     return;
                 }
-                let text = input.read(cx).value().to_string();
-                if text.trim().is_empty() && p.attachments.is_empty() {
-                    return;
-                }
-                input.update(cx, |s, cx| s.set_value("", window, cx));
-                p.list.set_follow_mode(FollowMode::Tail);
-                let images = std::mem::take(&mut p.attachments);
-                p.session.update(cx, |s, cx| s.send_with(&text, images, cx));
+                p.send_composed(window, cx);
             }));
         let attach = Button::new("attach")
             .xsmall()
@@ -2174,12 +2322,12 @@ impl ChatPanel {
                                 }),
                         )
                     })
-                    .when(!self.attachments.is_empty(), |d| d.child(chips))
+                    .when(!self.attachments.is_empty() || paste_chips > 0, |d| d.child(chips))
                     .child(
                         Textarea::new(&self.input)
                             .appearance(false)
                             .text_sm()
-                            .on_paste(move |item, _, cx| {
+                            .on_paste(move |item, window, cx| {
                                 // An image (or image files) on the clipboard: attach it.
                                 let mut took = false;
                                 for entry in item.entries() {
@@ -2202,6 +2350,17 @@ impl ChatPanel {
                                         }
                                         _ => {}
                                     }
+                                }
+                                // Long text: a token in the box, the text kept aside (the box is
+                                // being changed now, so after this).
+                                if !took
+                                    && let Some(text) = item.text().filter(|t| paste::is_long(t))
+                                {
+                                    let target = paste_target.clone();
+                                    window.defer(cx, move |window, cx| {
+                                        let _ = target.update(cx, |p, cx| p.paste_long(text, window, cx));
+                                    });
+                                    took = true;
                                 }
                                 took
                             }),

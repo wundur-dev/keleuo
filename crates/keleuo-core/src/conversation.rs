@@ -234,7 +234,7 @@ impl Conversation {
     /// A short title: the first user message, cut to `max` characters.
     pub fn title(&self, max: usize) -> Option<String> {
         self.items.iter().find_map(|i| match i {
-            Item::User(t) => Some(one_line(t, max)),
+            Item::User(t) => Some(one_line(&crate::paste::title_text(t), max)),
             _ => None,
         })
     }
@@ -735,7 +735,7 @@ pub fn to_markdown(items: &[Item], agent: &str) -> String {
     let mut last_tool = false;
     for item in items {
         let block = match item {
-            Item::User(text) => format!("### You\n\n{}", text.trim()),
+            Item::User(text) => format!("### You\n\n{}", crate::paste::without_markers(text).trim()),
             Item::Assistant { text, .. } if text.trim().is_empty() => continue,
             Item::Assistant { text, .. } => format!("### {agent}\n\n{}", text.trim()),
             Item::Tool(t) => tool_line(t),

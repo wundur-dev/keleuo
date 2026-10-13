@@ -78,7 +78,7 @@ impl Summary {
             && v.get("isMeta").and_then(Value::as_bool) != Some(true)
             && v.get("isCompactSummary").and_then(Value::as_bool) != Some(true)
         {
-            self.title = user_text(&v).map(|t| one_line(&t, 80));
+            self.title = user_text(&v).map(|t| one_line(&crate::paste::title_text(&t), 80));
         }
     }
 

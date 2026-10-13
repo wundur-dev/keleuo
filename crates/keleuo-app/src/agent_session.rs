@@ -882,9 +882,12 @@ impl AgentSession {
         self.send_with(text, Vec::new(), cx);
     }
 
-    /// Send a user turn with images (files).
+    /// Send a user turn with images (files). Pastes marked in `text` (see
+    /// [`keleuo_core::paste`]) show folded in the chat and go without their markers.
     pub fn send_with(&mut self, text: &str, images: Vec<PathBuf>, cx: &mut Context<Self>) {
-        let text = text.trim();
+        let shown = text.trim();
+        let sent = keleuo_core::paste::without_markers(shown);
+        let text = sent.trim();
         if text.is_empty() && images.is_empty() {
             return;
         }
@@ -900,7 +903,7 @@ impl AgentSession {
         }
         if self.interactive() {
             if !text.is_empty() {
-                self.chat.push_user(text);
+                self.chat.push_user(shown);
                 self.push_echo(text.to_string());
             }
             if !images.is_empty() {
@@ -928,7 +931,7 @@ impl AgentSession {
             cx.notify();
             return;
         }
-        self.chat.push_user(text);
+        self.chat.push_user(shown);
         if let Err(e) = self.agent.send(text) {
             self.chat.push_error(format!("Could not send to {}: {e}", self.backend.name()));
         }
@@ -1049,10 +1052,11 @@ const PREVIEW_EVERY: std::time::Duration = std::time::Duration::from_millis(100)
 const PREVIEW_LINES: usize = 400;
 
 /// A message as compared with its copy in the session file: without the interface's image
-/// markers (`[Image #1]`) and outer spaces.
+/// markers (`[Image #1]`), its paste markers, and outer spaces.
 fn plain(text: &str) -> String {
+    let text = keleuo_core::paste::without_markers(text);
     let mut out = String::new();
-    let mut rest = text;
+    let mut rest = text.as_str();
     while let Some(i) = rest.find("[Image #") {
         out.push_str(&rest[..i]);
         match rest[i..].find(']') {

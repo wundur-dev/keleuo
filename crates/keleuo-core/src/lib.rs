@@ -25,6 +25,7 @@ pub mod frontmatter;
 pub mod images;
 pub mod host;
 pub mod links;
+pub mod paste;
 pub mod settings;
 pub mod skills;
 pub mod symbols;

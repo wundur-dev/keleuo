@@ -1385,6 +1385,12 @@ impl Workspace {
                 self.claude.update(cx, |p, cx| p.test_command(c, dy, cx));
             }
             "attach" => self.claude.update(cx, |p, cx| p.test_attach(PathBuf::from(arg), cx)),
+            // As if the file's text were pasted into the message box.
+            "paste-file" => {
+                let text = std::fs::read_to_string(arg).unwrap_or_default();
+                self.claude.update(cx, |p, cx| p.test_paste(text, window, cx));
+            }
+            "compose-send" => self.claude.update(cx, |p, cx| p.test_send_composed(window, cx)),
             "send-attached" => {
                 // Tests: send with what is attached.
                 let text = arg.to_string();
