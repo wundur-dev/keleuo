@@ -66,6 +66,9 @@ pub struct FileTree {
     asked: Vec<PathBuf>,
     /// Changed paths the listing leaves out (ignored by git): no re-listing for them again.
     unlisted: HashSet<PathBuf>,
+    /// The row under the pointer: a right-click there makes new files in its folder, one on
+    /// empty space at the project root.
+    hovered: Option<usize>,
     scroll: UniformListScrollHandle,
     _task: Option<Task<()>>,
 }
@@ -88,6 +91,7 @@ impl FileTree {
             known: HashSet::new(),
             asked: Vec::new(),
             unlisted: HashSet::new(),
+            hovered: None,
             scroll: UniformListScrollHandle::new(),
             _task: None,
         };
@@ -178,6 +182,16 @@ impl FileTree {
             }
         }
         changes
+    }
+
+    /// Where a right-click makes new files: the hovered folder, a hovered file's folder, else
+    /// the project root.
+    fn menu_folder(&self) -> PathBuf {
+        match self.hovered.and_then(|ix| self.rows.get(ix)).filter(|r| r.kind == RowKind::Entry) {
+            Some(r) if r.is_dir => r.path.clone(),
+            Some(r) => r.path.parent().map_or_else(|| self.root.clone(), |p| p.to_path_buf()),
+            None => self.root.clone(),
+        }
     }
 
     pub fn root(&self) -> &std::path::Path {
@@ -325,6 +339,7 @@ impl Render for FileTree {
         let rows = self.rows.clone();
         let selected = self.selected.clone();
         let entity = cx.entity().downgrade();
+        let menu_tree = entity.clone();
         let sidebar_bg = cx.theme().sidebar;
         let danger = cx.theme().danger;
         let naming = self.creating.as_ref().map(|c| (c.input.clone(), c.problem.clone().unwrap_or_default()));
@@ -356,8 +371,7 @@ impl Render for FileTree {
                         return el.into_any_element();
                     }
                     let is_sel = selected.as_ref() == Some(&row.path);
-                    let dir = if row.is_dir { row.path.clone() } else { row.path.parent().map(|p| p.to_path_buf()).unwrap_or_default() };
-                    let menu_tree = entity.clone();
+                    let hover_tree = entity.clone();
                     let icon = if row.is_dir {
                         crate::icons::folder(row.open, cx)
                     } else {
@@ -380,7 +394,15 @@ impl Render for FileTree {
                         .on_click(move |_, _, cx| {
                             let _ = entity.update(cx, |tree, cx| tree.click(ix, cx));
                         })
-                        .context_menu(move |menu, _, _| new_menu(menu, menu_tree.clone(), dir.clone()))
+                        .on_hover(move |inside, _, cx| {
+                            let _ = hover_tree.update(cx, |t, _| {
+                                if *inside {
+                                    t.hovered = Some(ix);
+                                } else if t.hovered == Some(ix) {
+                                    t.hovered = None;
+                                }
+                            });
+                        })
                         .into_any_element()
                 })
                 .collect()
@@ -388,9 +410,15 @@ impl Render for FileTree {
         .track_scroll(&self.scroll)
         .size_full();
         div()
+            .id("file-tree-space")
             .size_full()
             .bg(sidebar_bg)
             .child(list)
+            .context_menu(move |menu, _, cx| {
+                let Some(tree) = menu_tree.upgrade() else { return menu };
+                let dir = tree.read(cx).menu_folder();
+                new_menu(menu, menu_tree.clone(), dir)
+            })
             .into_any_element()
     }
 }
