@@ -22,9 +22,11 @@ pub struct FileChange {
     pub removed: usize,
     /// It did not exist before.
     pub created: bool,
-    /// How many edits made the change.
+    /// How many edits made the change (none when a command made it).
     pub edits: usize,
     pub group: Group,
+    /// Changed by a command, not the agent's edit tools (see [`crate::command_changes`]).
+    pub by_command: bool,
 }
 
 /// Which group `path` belongs in, from its name alone.
@@ -89,6 +91,7 @@ pub fn summarize(diffs: impl IntoIterator<Item = crate::diff::FileDiff>) -> Vec<
                 added,
                 removed,
                 edits: 1,
+                by_command: false,
             }),
         }
     }

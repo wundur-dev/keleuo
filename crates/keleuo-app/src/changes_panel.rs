@@ -67,7 +67,7 @@ impl ChangesPanel {
             .and_then(|p| p.strip_prefix(root).ok())
             .map(|p| p.display().to_string())
             .unwrap_or_default();
-        let path = change.path.clone();
+        let (path, by_command) = (change.path.clone(), change.by_command);
         let panel = self.panel.downgrade();
         div()
             .id(SharedString::from(format!("change-{}", change.path.display())))
@@ -82,17 +82,24 @@ impl ChangesPanel {
             .cursor_pointer()
             .hover(|d| d.bg(hover))
             .child(crate::icons::file(&name, cx))
-            .child(div().flex_none().child(name))
+            // The name gives way before the counts do.
+            .child(div().flex_shrink(1.).min_w(px(40.)).truncate().child(name))
             .child(div().flex_1().min_w_0().truncate().text_size(px(11.)).text_color(muted).child(dir))
+            .when(change.by_command, |d| d.child(div().flex_none().text_size(px(10.)).text_color(muted).child("by a command")))
             .when(change.created, |d| d.child(div().flex_none().text_size(px(10.)).text_color(green).child("new")))
             .child(div().flex_none().text_size(px(11.)).text_color(green).child(format!("+{}", change.added)))
             .child(div().flex_none().text_size(px(11.)).text_color(red).child(format!("−{}", change.removed)))
             .tooltip({
-                let tip = if change.edits == 1 { "1 edit".to_string() } else { format!("{} edits", change.edits) };
+                let tip = match change.edits {
+                    0 => "Changed by a command, not an edit: opens the file".to_string(),
+                    1 => "1 edit".to_string(),
+                    n => format!("{n} edits"),
+                };
                 move |w, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(w, cx)
             })
             .on_click(move |_, _, cx| {
-                let _ = panel.update(cx, |_, cx| cx.emit(ChatPanelEvent::OpenDiff(path.clone())));
+                let event = if by_command { ChatPanelEvent::OpenFile(path.clone(), None) } else { ChatPanelEvent::OpenDiff(path.clone()) };
+                let _ = panel.update(cx, |_, cx| cx.emit(event));
             })
             .into_any_element()
     }

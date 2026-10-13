@@ -387,9 +387,52 @@ impl Conversation {
     /// Changes panel: a turn from [`Self::turn_start`], the session from 0. Changes made by
     /// commands (a formatter, `sed`) are not tool edits and are not here.
     pub fn changes(&self, from: usize) -> Vec<crate::changes::FileChange> {
+        let items = self.items.get(from..).unwrap_or(&[]);
         let mut diffs = Vec::new();
-        self.collect_all_changes(self.items.get(from..).unwrap_or(&[]), &mut diffs);
-        crate::changes::summarize(diffs)
+        self.collect_all_changes(items, &mut diffs);
+        let mut out = crate::changes::summarize(diffs);
+        // And what commands changed, as the turns' cards recorded it.
+        let by_command = items.iter().filter_map(|i| if let Item::TurnChanges(c) = i { Some(c) } else { None }).flatten();
+        for c in by_command.filter(|c| c.by_command) {
+            match out.iter_mut().find(|o| o.path == c.path) {
+                Some(o) if o.by_command => {
+                    o.added += c.added;
+                    o.removed += c.removed;
+                }
+                Some(_) => {}
+                None => out.push(c.clone()),
+            }
+        }
+        out.sort_by_key(|c| c.group);
+        out
+    }
+
+    /// Add what commands changed in the turn that starts at `turn` (its first item; see
+    /// [`Self::turn_start`]) to its end-of-turn card, making the card when the edit tools
+    /// changed nothing. Found after the turn ended (git takes a moment); dropped if another
+    /// turn has started since.
+    pub fn add_command_changes(&mut self, turn: usize, changes: Vec<crate::changes::FileChange>) {
+        if changes.is_empty() || self.turn_start() != turn {
+            return;
+        }
+        let card = self.items[turn..].iter_mut().find_map(|i| if let Item::TurnChanges(c) = i { Some(c) } else { None });
+        match card {
+            Some(card) => {
+                for c in changes {
+                    if !card.iter().any(|k| k.path == c.path) {
+                        card.push(c);
+                    }
+                }
+                card.sort_by_key(|c| c.group);
+            }
+            None => self.items.push(Item::TurnChanges(changes)),
+        }
+        self.revision += 1;
+    }
+
+    /// The files the agent's edit tools changed in the turn starting at `turn`.
+    pub fn edited_in_turn(&self, turn: usize) -> std::collections::HashSet<PathBuf> {
+        self.changes(turn).into_iter().filter(|c| !c.by_command).map(|c| c.path).collect()
     }
 
     /// End the turn with a card of the files it changed, if it changed any (once: the turn end
@@ -971,6 +1014,29 @@ mod tests {
         let cards: Vec<_> = chat.items.iter().filter_map(|i| if let Item::TurnChanges(c) = i { Some(c) } else { None }).collect();
         assert_eq!(cards.len(), 1);
         assert_eq!(cards[0][0].path, Path::new("/p/a.rs"));
+
+        // What a command changed joins the card (once), and the turn's and session's lists.
+        let turn = chat.turn_start();
+        let cmd = |p: &str| crate::changes::FileChange {
+            path: p.into(),
+            added: 3,
+            removed: 1,
+            created: false,
+            edits: 0,
+            group: crate::changes::group_of(Path::new(p)),
+            by_command: true,
+        };
+        chat.add_command_changes(turn, vec![cmd("/p/fmt.rs")]);
+        chat.add_command_changes(turn, vec![cmd("/p/fmt.rs")]);
+        assert_eq!(chat.changes(turn).iter().map(|c| (c.path.display().to_string(), c.by_command)).collect::<Vec<_>>(), [
+            ("/p/a.rs".into(), false),
+            ("/p/fmt.rs".into(), true)
+        ]);
+        assert_eq!(chat.edited_in_turn(turn), [PathBuf::from("/p/a.rs")].into());
+        // Too late: another turn has begun.
+        chat.apply(Event::UserText("next".into()));
+        chat.add_command_changes(turn, vec![cmd("/p/late.rs")]);
+        assert!(!chat.changes(0).iter().any(|c| c.path == Path::new("/p/late.rs")));
     }
 
     fn call(id: &str, name: &str, summary: &str) -> Event {

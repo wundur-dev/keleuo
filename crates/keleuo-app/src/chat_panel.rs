@@ -678,7 +678,7 @@ impl ChatPanel {
         for c in changes.iter().take(SHOWN) {
             let name = c.path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
             let dir = c.path.parent().and_then(|p| p.strip_prefix(&root).ok()).map(|p| p.display().to_string()).unwrap_or_default();
-            let path = c.path.clone();
+            let (path, by_command) = (c.path.clone(), c.by_command);
             card = card.child(
                 div()
                     .id(SharedString::from(format!("turn-change-{ix}-{}", c.path.display())))
@@ -694,10 +694,14 @@ impl ChatPanel {
                     .child(crate::icons::file(&name, cx))
                     .child(div().flex_none().text_color(fg).child(name))
                     .child(div().flex_1().min_w_0().truncate().text_size(px(11.)).text_color(muted).child(dir))
+                    .when(c.by_command, |d| d.child(div().flex_none().text_size(px(10.)).text_color(muted).child("by a command")))
                     .when(c.created, |d| d.child(div().flex_none().text_size(px(10.)).text_color(green).child("new")))
                     .child(div().flex_none().text_size(px(11.)).text_color(green).child(format!("+{}", c.added)))
                     .child(div().flex_none().text_size(px(11.)).text_color(red).child(format!("−{}", c.removed)))
-                    .on_click(cx.listener(move |_, _, _, cx| cx.emit(ChatPanelEvent::OpenDiff(path.clone())))),
+                    .on_click(cx.listener(move |_, _, _, cx| {
+                        let event = if by_command { ChatPanelEvent::OpenFile(path.clone(), None) } else { ChatPanelEvent::OpenDiff(path.clone()) };
+                        cx.emit(event)
+                    })),
             );
         }
         if changes.len() > SHOWN {

@@ -154,6 +154,9 @@ pub struct AgentSession {
     restart_after_turn: bool,
     /// Why the interface is starting again, while it does (for the composer).
     pub restarting: Option<String>,
+    /// The current turn (where it starts in the chat) and the git working tree when it started,
+    /// once read: what commands changed is found against it when the turn ends.
+    git_turn: Option<(usize, Option<keleuo_core::command_changes::Baseline>)>,
 }
 
 impl EventEmitter<SessionEvent> for AgentSession {}
@@ -199,6 +202,7 @@ impl AgentSession {
             pasted_images: Vec::new(),
             restart_after_turn: false,
             restarting: None,
+            git_turn: None,
         }
     }
 
@@ -856,7 +860,9 @@ impl AgentSession {
                 if let Some(path) = applied.file_changed {
                     cx.emit(SessionEvent::FileChanged(path));
                 }
+                self.watch_turn(cx);
                 if applied.turn_ended {
+                    self.find_command_changes(cx);
                     cx.emit(SessionEvent::TurnEnded);
                 }
             }
@@ -873,6 +879,47 @@ impl AgentSession {
                 self.chat.process_ended();
             }
         }
+    }
+
+    /// When a turn has just begun, read the git working tree (in the background) to find later
+    /// what commands changed in it. Not over SSH, and not for turns read back from a file.
+    fn watch_turn(&mut self, cx: &mut Context<Self>) {
+        let turn = self.chat.turn_start();
+        if self.host.is_remote()
+            || !self.chat.busy
+            || !matches!(self.chat.items.get(turn), Some(keleuo_core::conversation::Item::User(_)))
+            || self.git_turn.as_ref().is_some_and(|(t, _)| *t == turn)
+        {
+            return;
+        }
+        self.git_turn = Some((turn, None));
+        let cwd = self.cwd.clone();
+        cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let base = cx.background_executor().spawn(async move { keleuo_core::command_changes::baseline(&cwd) }).await;
+            let _ = this.update(cx, |s, _| {
+                if let Some((t, b)) = &mut s.git_turn
+                    && *t == turn
+                {
+                    *b = base;
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// The turn ended: add what commands changed in it to its card.
+    fn find_command_changes(&mut self, cx: &mut Context<Self>) {
+        let turn = self.chat.turn_start();
+        let Some((_, Some(base))) = self.git_turn.take_if(|(t, b)| *t == turn && b.is_some()) else { return };
+        let skip = self.chat.edited_in_turn(turn);
+        cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let found = cx.background_executor().spawn(async move { keleuo_core::command_changes::since(&base, &skip) }).await;
+            let _ = this.update(cx, |s, cx| {
+                s.chat.add_command_changes(turn, found);
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     // ----- what the window asks -----
@@ -937,6 +984,7 @@ impl AgentSession {
             return;
         }
         self.chat.push_user(shown);
+        self.watch_turn(cx);
         if let Err(e) = self.agent.send(text) {
             self.chat.push_error(format!("Could not send to {}: {e}", self.backend.name()));
         }
