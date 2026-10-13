@@ -1397,6 +1397,8 @@ impl Workspace {
                 let inline = words.next() != Some("drop");
                 self.claude.update(cx, |p, cx| p.test_unfold(n, inline, window, cx));
             }
+            // As if "Other model…" were used with `arg` typed.
+            "other-model" => self.claude.update(cx, |p, cx| p.test_other_model(arg, cx)),
             "compose-send" => self.claude.update(cx, |p, cx| p.test_send_composed(window, cx)),
             "send-attached" => {
                 // Tests: send with what is attached.

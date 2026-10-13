@@ -72,7 +72,8 @@ impl Backend for ClaudeBackend {
             subagents: true,
             permission_prompts: true,
             accept_edits_mode: Some("acceptEdits".into()),
-            models: ["haiku", "sonnet", "opus"].map(String::from).into(),
+            // Claude Code's aliases, each the latest of its family; any other name is typed in.
+            models: ["fable", "opus", "sonnet", "haiku"].map(String::from).into(),
             terminal_view: true,
         }
     }

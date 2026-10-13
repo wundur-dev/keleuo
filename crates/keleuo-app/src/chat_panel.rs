@@ -7,7 +7,7 @@ use std::rc::Rc;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use gpui_kit::component::input::{Enter, InlineToken, InlineTokenContext, InputContent, InputEvent, Textarea, TextareaState};
+use gpui_kit::component::input::{Enter, InlineToken, InlineTokenContext, Input, InputContent, InputEvent, InputState, Textarea, TextareaState};
 
 use crate::agent_session::{Asking, Spend, View};
 use gpui_kit::component::button::{Button, ButtonVariants};
@@ -68,6 +68,8 @@ pub struct ChatPanel {
     /// Long pastes in the message box, shown there as tokens (`[Pasted text #1 · …]`, see
     /// [`keleuo_core::paste`]); paste `n` is `pastes[n - 1]`.
     pastes: Vec<String>,
+    /// "Other model…": a field for a model name in place of the model button.
+    model_input: Option<(Entity<InputState>, Subscription)>,
     /// An image shown full size over the chat.
     preview: Option<PathBuf>,
     /// The known failure whose fixes are being offered.
@@ -184,6 +186,7 @@ impl ChatPanel {
             loading: HashSet::new(),
             attachments: Vec::new(),
             pastes: Vec::new(),
+            model_input: None,
             preview: None,
             fixing: None,
             fixed: Default::default(),
@@ -2112,6 +2115,37 @@ impl ChatPanel {
         }
     }
 
+    /// "Other model…": a field for any model name the backend takes; Enter switches to it and
+    /// keeps it among the recent ones, Escape or clicking away drops it.
+    fn start_model_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder("Model name, e.g. claude-opus-4-1"));
+        input.update(cx, |s, cx| s.focus(window, cx));
+        let sub = cx.subscribe_in(&input, window, |p, input, ev: &InputEvent, _, cx| match ev {
+            InputEvent::PressEnter { .. } => {
+                let name = input.read(cx).value().trim().to_string();
+                p.model_input = None;
+                if !name.is_empty() {
+                    remember_model(&name, cx);
+                    p.session.update(cx, |s, cx| s.set_model(&name, cx));
+                }
+                cx.notify();
+            }
+            InputEvent::Blur => {
+                p.model_input = None;
+                cx.notify();
+            }
+            _ => {}
+        });
+        self.model_input = Some((input, sub));
+        cx.notify();
+    }
+
+    /// Tests: "Other model…" with `name` typed and Enter.
+    pub fn test_other_model(&mut self, name: &str, cx: &mut Context<Self>) {
+        remember_model(name, cx);
+        self.session.update(cx, |s, cx| s.set_model(name, cx));
+    }
+
     /// Tests: a paste's "Show in text field" (`inline`) or "Remove".
     pub fn test_unfold(&mut self, n: usize, inline: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.unfold_paste(n, inline, window, cx);
@@ -2316,23 +2350,69 @@ impl ChatPanel {
             );
         }
 
+        // The backend's own names (aliases, each the latest of its family), the names typed in
+        // before, and "Other model…" to type one. The running one is ticked; an alias shows
+        // what it stands for.
         let models: Vec<String> = caps.models.clone();
+        let recent: Vec<String> = cx.global::<crate::AppSettings>().0.borrow().recent_models.clone();
         let (w_model, w_mode) = (weak.clone(), weak.clone());
+        let panel_for_menu = entity.clone();
+        // What was picked (an alias or a typed name), and what it runs as.
+        let (picked, running_as) = (session.model.clone(), session.chat.model.clone());
         let model_button = Button::new("model")
             .xsmall()
             .ghost()
             .label(short_model(&model))
             .tooltip("Model")
             .dropdown_menu(move |menu, _, _| {
+                use gpui_kit::component::menu::PopupMenuItem;
                 let mut menu = menu;
+                let is = |m: &str| match (&picked, &running_as) {
+                    (Some(p), _) => p == m,
+                    (None, Some(r)) => r.contains(m),
+                    (None, None) => false,
+                };
                 for m in &models {
                     let (w, m2) = (w_model.clone(), m.clone());
-                    menu = menu.item(gpui_kit::component::menu::PopupMenuItem::new(capitalize(m)).on_click(move |_, _, cx| {
+                    let running = is(m);
+                    let label = match (&running_as, running) {
+                        (Some(r), true) if r != m => format!("{} ({})", capitalize(m), r),
+                        _ => capitalize(m),
+                    };
+                    menu = menu.item(PopupMenuItem::new(label).checked(running).on_click(move |_, _, cx| {
                         let _ = w.update(cx, |s, cx| s.set_model(&m2, cx));
                     }));
                 }
-                menu
+                if !recent.is_empty() {
+                    menu = menu.separator();
+                    for m in &recent {
+                        let (w, m2) = (w_model.clone(), m.clone());
+                        menu = menu.item(PopupMenuItem::new(m.clone()).checked(picked.as_deref() == Some(m.as_str())).on_click(move |_, _, cx| {
+                            remember_model(&m2, cx);
+                            let _ = w.update(cx, |s, cx| s.set_model(&m2, cx));
+                        }));
+                    }
+                }
+                let panel = panel_for_menu.clone();
+                menu.separator().item(PopupMenuItem::new("Other model…").on_click(move |_, window, cx| {
+                    let _ = panel.update(cx, |p, cx| p.start_model_input(window, cx));
+                }))
             });
+        // Typing a model name: the field takes the button's place.
+        let model_control = match &self.model_input {
+            Some((input, _)) => div()
+                .w(px(240.))
+                .capture_key_down(cx.listener(|p, ev: &KeyDownEvent, _, cx| {
+                    if ev.keystroke.key == "escape" {
+                        cx.stop_propagation();
+                        p.model_input = None;
+                        cx.notify();
+                    }
+                }))
+                .child(Input::new(input).xsmall())
+                .into_any_element(),
+            None => model_button.into_any_element(),
+        };
         let modes: Vec<(Option<String>, &'static str)> = vec![
             (None, "Ask before acting"),
             (caps.accept_edits_mode.clone(), "Accept edits"),
@@ -2498,7 +2578,7 @@ impl ChatPanel {
                             .gap_1()
                             .text_color(muted)
                             .child(attach)
-                            .child(model_button)
+                            .child(model_control)
                             .when(caps.permission_prompts, |d| d.child(mode_button))
                             .child(div().flex_1())
                             .child(send),
@@ -2512,6 +2592,13 @@ impl ChatPanel {
 const COLUMN: f32 = 760.;
 
 /// `claude-opus-5-5` as `opus-5-5`; a short name stays.
+/// Keep a typed model name among the recent ones, saved.
+fn remember_model(name: &str, cx: &mut App) {
+    let settings = cx.global::<crate::AppSettings>().0.clone();
+    settings.borrow_mut().remember_model(name);
+    let _ = settings.borrow().save();
+}
+
 fn short_model(model: &str) -> String {
     model.strip_prefix("claude-").unwrap_or(model).to_string()
 }

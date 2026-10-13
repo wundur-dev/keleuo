@@ -88,11 +88,24 @@ pub struct Settings {
     pub cost_display: String,
     /// Light or dark: `"system"` (the default: follow macOS), `"light"` or `"dark"`.
     pub appearance: String,
+    /// Model names typed in beyond a backend's own list, most recent first.
+    pub recent_models: Vec<String>,
     #[serde(skip)]
     path: Option<PathBuf>,
 }
 
 impl Settings {
+    /// Put a typed model name first among the recent ones (at most six are kept).
+    pub fn remember_model(&mut self, model: &str) {
+        let model = model.trim();
+        if model.is_empty() {
+            return;
+        }
+        self.recent_models.retain(|m| m != model);
+        self.recent_models.insert(0, model.to_string());
+        self.recent_models.truncate(6);
+    }
+
     /// `settings.json` in [`config_dir`].
     pub fn default_path() -> Option<PathBuf> {
         config_dir().map(|d| d.join("settings.json"))
@@ -174,6 +187,15 @@ pub fn encode_folder(folder: &std::path::Path) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn typed_models_are_remembered_most_recent_first() {
+        let mut s = Settings::default();
+        for m in ["a", "b", "a", " ", "c", "d", "e", "f", "g"] {
+            s.remember_model(m);
+        }
+        assert_eq!(s.recent_models, ["g", "f", "e", "d", "c", "a"]);
+    }
 
     #[test]
     fn recent_folders_follow_a_rename() {
