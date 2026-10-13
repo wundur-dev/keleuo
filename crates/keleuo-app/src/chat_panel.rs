@@ -770,6 +770,10 @@ impl ChatPanel {
                 let code = block.code();
                 let lang = block.lang().unwrap_or_else(|| "code".into());
                 let muted = cx.theme().muted_foreground;
+                let theme = cx.theme();
+                let (go, go_hover, go_active) = (theme.success, theme.success_hover, theme.success_active);
+                // The dark theme's green is light: dark text on it reads, its own green does not.
+                let go_fg = if theme.is_dark() { theme.background } else { theme.success_foreground };
                 let command = shell_command(&code);
                 let panel = panel.clone();
                 div()
@@ -780,12 +784,27 @@ impl ChatPanel {
                     .text_color(muted)
                     .child(lang)
                     .when_some(command, |d, command| {
+                        // A green pill, so it reads as a button at a glance: brighter under the
+                        // pointer, darker while pressed.
                         d.child(
-                            Button::new("run-code")
-                                .xsmall()
-                                .label("Run")
-                                .icon(gpui_kit::assets::IconName::Play)
-                                .tooltip("Run it in a terminal in this folder")
+                            div()
+                                .id("run-code")
+                                .h(px(20.))
+                                .px(px(8.))
+                                .flex()
+                                .items_center()
+                                .gap(px(4.))
+                                .rounded(px(10.))
+                                .bg(go)
+                                .text_color(go_fg)
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .shadow_xs()
+                                .cursor_pointer()
+                                .hover(|d| d.bg(go_hover).shadow_sm())
+                                .active(|d| d.bg(go_active))
+                                .child(Icon::new(gpui_kit::assets::IconName::Play).xsmall().text_color(go_fg))
+                                .child("Run")
+                                .tooltip(|w, cx| gpui_kit::component::tooltip::Tooltip::new("Run it in a terminal in this folder").build(w, cx))
                                 .on_click(move |_, _, cx| {
                                     let text = command.clone();
                                     let _ = panel.update(cx, |_, cx| cx.emit(ChatPanelEvent::RunCommand(text)));
