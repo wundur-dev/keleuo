@@ -254,6 +254,7 @@ impl Workspace {
                 ChatPanelEvent::OpenAgent(id) => ws.open_agent(id.clone(), window, cx),
                 ChatPanelEvent::OpenWeb(url) => ws.open_web(url.clone(), window, cx),
                 ChatPanelEvent::RunCommand(command) => ws.run_in_terminal(command.clone(), window, cx),
+                ChatPanelEvent::ShowChanges => ws.show_changes(window, cx),
                 ChatPanelEvent::Closed | ChatPanelEvent::Activated => {}
             },
         ));
@@ -621,6 +622,12 @@ impl Workspace {
         });
     }
 
+    /// Show the Changes panel on the current turn.
+    fn show_changes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.changes.update(cx, |p, cx| p.set_session_scope(false, cx));
+        self.show_panel(PanelId::from(self.changes.entity_id()), window, cx);
+    }
+
     fn show_panel(&mut self, id: PanelId, window: &mut Window, cx: &mut Context<Self>) {
         let left_closed = self
             .dock
@@ -698,6 +705,7 @@ impl Workspace {
                 ChatPanelEvent::OpenAgent(agent) => ws.open_agent(agent.clone(), window, cx),
                 ChatPanelEvent::OpenWeb(url) => ws.open_web(url.clone(), window, cx),
                 ChatPanelEvent::RunCommand(command) => ws.run_in_terminal(command.clone(), window, cx),
+                ChatPanelEvent::ShowChanges => ws.show_changes(window, cx),
                 ChatPanelEvent::NewSession => cx.emit(WorkspaceEvent::NewSession),
                 ChatPanelEvent::Activated => ws.touch_code(panel.entity_id()),
                 ChatPanelEvent::Closed => {

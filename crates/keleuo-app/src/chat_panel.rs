@@ -45,6 +45,8 @@ pub enum ChatPanelEvent {
     OpenWeb(String),
     /// Run a shell command in a terminal tab of the session's folder.
     RunCommand(String),
+    /// Show the Changes panel.
+    ShowChanges,
 }
 
 pub struct ChatPanel {
@@ -629,6 +631,94 @@ impl ChatPanel {
                 )
             })
             .into_any_element()
+    }
+
+    /// The end-of-turn card: the files the turn changed, each opening as its diff.
+    fn render_turn_changes(&self, ix: usize, changes: &[keleuo_core::changes::FileChange], cx: &mut Context<Self>) -> AnyElement {
+        const SHOWN: usize = 8;
+        let root = self.session.read(cx).cwd.clone();
+        let theme = cx.theme();
+        let (fg, muted, border, hover, green, red) =
+            (theme.foreground, theme.muted_foreground, theme.border, theme.secondary_hover, theme.green, theme.red);
+        let (added, removed) = changes.iter().fold((0, 0), |(a, r), c| (a + c.added, r + c.removed));
+        let count = |n: usize| if n == 1 { "1 file".to_string() } else { format!("{n} files") };
+        let mut card = div()
+            .flex()
+            .flex_col()
+            .rounded_md()
+            .border_1()
+            .border_color(border)
+            .text_size(px(12.))
+            .child(
+                div()
+                    .px_2()
+                    .h(px(26.))
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .text_color(fg)
+                    .child(Icon::new(gpui_kit::assets::IconName::FileDiff).xsmall().text_color(muted))
+                    .child(format!("Changed {}", count(changes.len())))
+                    .child(div().text_size(px(11.)).text_color(green).child(format!("+{added}")))
+                    .child(div().text_size(px(11.)).text_color(red).child(format!("−{removed}")))
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("turn-changes-{ix}")))
+                            .px_1()
+                            .rounded(px(4.))
+                            .text_size(px(11.))
+                            .text_color(muted)
+                            .cursor_pointer()
+                            .hover(|d| d.bg(hover).text_color(fg))
+                            .child("Changes")
+                            .on_click(cx.listener(|_, _, _, cx| cx.emit(ChatPanelEvent::ShowChanges))),
+                    ),
+            );
+        for c in changes.iter().take(SHOWN) {
+            let name = c.path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+            let dir = c.path.parent().and_then(|p| p.strip_prefix(&root).ok()).map(|p| p.display().to_string()).unwrap_or_default();
+            let path = c.path.clone();
+            card = card.child(
+                div()
+                    .id(SharedString::from(format!("turn-change-{ix}-{}", c.path.display())))
+                    .px_2()
+                    .h(px(22.))
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .border_t_1()
+                    .border_color(border)
+                    .cursor_pointer()
+                    .hover(|d| d.bg(hover))
+                    .child(crate::icons::file(&name, cx))
+                    .child(div().flex_none().text_color(fg).child(name))
+                    .child(div().flex_1().min_w_0().truncate().text_size(px(11.)).text_color(muted).child(dir))
+                    .when(c.created, |d| d.child(div().flex_none().text_size(px(10.)).text_color(green).child("new")))
+                    .child(div().flex_none().text_size(px(11.)).text_color(green).child(format!("+{}", c.added)))
+                    .child(div().flex_none().text_size(px(11.)).text_color(red).child(format!("−{}", c.removed)))
+                    .on_click(cx.listener(move |_, _, _, cx| cx.emit(ChatPanelEvent::OpenDiff(path.clone())))),
+            );
+        }
+        if changes.len() > SHOWN {
+            card = card.child(
+                div()
+                    .id(SharedString::from(format!("turn-changes-more-{ix}")))
+                    .px_2()
+                    .h(px(22.))
+                    .flex()
+                    .items_center()
+                    .border_t_1()
+                    .border_color(border)
+                    .text_size(px(11.))
+                    .text_color(muted)
+                    .cursor_pointer()
+                    .hover(|d| d.bg(hover))
+                    .child(format!("and {} more", count(changes.len() - SHOWN)))
+                    .on_click(cx.listener(|_, _, _, cx| cx.emit(ChatPanelEvent::ShowChanges))),
+            );
+        }
+        card.into_any_element()
     }
 
     /// Another agent's message (a subagent's report): one row with its first line, the whole
@@ -1397,6 +1487,7 @@ impl ChatPanel {
                     .child(t.clone())
                     .into_any_element(),
                 Item::AgentMessage { from, title, text, .. } => self.render_agent_message(from, title, text, cx),
+                Item::TurnChanges(changes) => self.render_turn_changes(ix, changes, cx),
             };
             out.push(el);
         }

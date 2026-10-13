@@ -104,6 +104,8 @@ pub enum Item {
     /// A message from another agent: `from` its id, `agent` the subagent's tool call when it
     /// is one of this session's, `title` what it was asked to do (or its id).
     AgentMessage { from: String, agent: Option<String>, title: String, text: String },
+    /// The files the turn just ended changed: the end-of-turn card.
+    TurnChanges(Vec<crate::changes::FileChange>),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -388,6 +390,19 @@ impl Conversation {
         let mut diffs = Vec::new();
         self.collect_all_changes(self.items.get(from..).unwrap_or(&[]), &mut diffs);
         crate::changes::summarize(diffs)
+    }
+
+    /// End the turn with a card of the files it changed, if it changed any (once: the turn end
+    /// can arrive twice, from a hook and from the session file).
+    fn close_turn(&mut self) {
+        let from = self.turn_start();
+        if self.items[from..].iter().any(|i| matches!(i, Item::TurnChanges(_))) {
+            return;
+        }
+        let changes = self.changes(from);
+        if !changes.is_empty() {
+            self.items.push(Item::TurnChanges(changes));
+        }
     }
 
     fn collect_all_changes(&self, items: &[Item], out: &mut Vec<FileDiff>) {
@@ -700,6 +715,7 @@ impl Conversation {
                 }
                 self.last_turn_tokens = Some((input_tokens, output_tokens));
                 self.last_turn_ms = duration_ms;
+                self.close_turn();
                 if let Some(e) = error {
                     self.items.push(Item::Error(format!("The turn ended with an error: {}", one_line(&e, 300))));
                 }
@@ -777,6 +793,10 @@ pub fn to_markdown(items: &[Item], agent: &str) -> String {
                 format!("- Permission for **{}** {}: {answer}", p.tool_name, one_line(&p.summary, 120))
             }
             Item::Notice(text) => format!("*{}*", text.trim()),
+            Item::TurnChanges(changes) => {
+                let names: Vec<String> = changes.iter().map(|c| format!("`{}`", c.path.display())).collect();
+                format!("*Changed {}: {}*", plural(changes.len(), "file"), names.join(", "))
+            }
             Item::Error(text) => format!("**Error:** {}", text.trim()),
             Item::Images(paths) => {
                 let names: Vec<String> = paths
@@ -927,6 +947,30 @@ mod tests {
             paths(chat.changes(0)),
             [("/p/src/a.rs".into(), 3), ("/p/tests/a.rs".into(), 1), ("/p/Cargo.lock".into(), 1)]
         );
+    }
+
+    #[test]
+    fn a_turn_that_changed_files_ends_with_one_card() {
+        let end = || Event::TurnEnded {
+            error: None,
+            cost_total_usd: None,
+            input_tokens: 0,
+            output_tokens: 0,
+            duration_ms: None,
+            session_id: None,
+        };
+        let mut chat = Conversation::new("/p");
+        chat.apply(Event::UserText("look".into()));
+        chat.apply(end());
+        assert!(!chat.items.iter().any(|i| matches!(i, Item::TurnChanges(_))), "nothing changed, no card");
+        chat.apply(Event::UserText("fix".into()));
+        chat.apply_all(edit("t1", "/p/a.rs", "1", "2", None));
+        chat.apply(end());
+        // The same turn end again (hook, then the session file): still one card.
+        chat.apply(end());
+        let cards: Vec<_> = chat.items.iter().filter_map(|i| if let Item::TurnChanges(c) = i { Some(c) } else { None }).collect();
+        assert_eq!(cards.len(), 1);
+        assert_eq!(cards[0][0].path, Path::new("/p/a.rs"));
     }
 
     fn call(id: &str, name: &str, summary: &str) -> Event {
