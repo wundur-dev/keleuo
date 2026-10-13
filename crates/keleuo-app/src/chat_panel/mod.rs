@@ -86,7 +86,8 @@ pub struct ChatPanel {
     /// Escape closed the list for this query.
     slash_closed: bool,
     /// The theme the message box's Markdown was coloured for (dark or not).
-    marked_dark: Option<bool>,
+    /// The theme (dark or not) and the Settings switch the Markdown marks were made for.
+    marked_as: Option<(bool, bool)>,
     /// The message box's Markdown styles (made the first time there is something to mark).
     md_marks: Option<TextDecorationCollection<TextareaMode>>,
     /// A syntax highlighter per language named on a code fence in the message box.
@@ -213,7 +214,7 @@ impl ChatPanel {
             slash_ix: 0,
             slash_query: String::new(),
             slash_closed: false,
-            marked_dark: None,
+            marked_as: None,
             md_marks: None,
             md_highlighters: HashMap::new(),
             preview: None,
@@ -369,6 +370,10 @@ impl ChatPanel {
     fn render_entry(&mut self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
         let item = self.item_at(ix, cx);
         let Some(item) = item else { return div().into_any_element() };
+        // The end-of-turn card, turned off in Settings: nothing, taking no room.
+        if matches!(item, Item::TurnChanges(_)) && !crate::prefs(cx).turn_card {
+            return div().into_any_element();
+        }
         if let Item::Earlier { from, to, .. } = item {
             // In view (or about to be): read it.
             self.load_earlier(from, to, cx);
@@ -665,9 +670,8 @@ impl Render for ChatPanel {
         if let Some(id) = self.agent.clone() {
             return self.render_agent_view(&id, cx);
         }
-        // Light and dark changed: the Markdown colours follow.
-        let dark = cx.theme().is_dark();
-        if self.marked_dark != Some(dark) {
+        // Light and dark changed, or the marks were turned on or off: they follow.
+        if self.marked_as != Some((cx.theme().is_dark(), crate::prefs(cx).markdown_marks)) {
             self.mark_markdown(cx);
         }
         let started = std::time::Instant::now();

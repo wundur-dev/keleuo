@@ -886,6 +886,7 @@ impl AgentSession {
     fn watch_turn(&mut self, cx: &mut Context<Self>) {
         let turn = self.chat.turn_start();
         if !self.chat.busy
+            || !crate::prefs(cx).command_changes
             || !matches!(self.chat.items.get(turn), Some(keleuo_core::conversation::Item::User(_)))
             || self.git_turn.as_ref().is_some_and(|(t, _)| *t == turn)
         {

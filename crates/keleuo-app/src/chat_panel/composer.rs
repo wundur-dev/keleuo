@@ -75,7 +75,7 @@ impl ChatPanel {
 
     /// Tests: paste `text` into the message box (short text goes in as typed).
     pub fn test_paste(&mut self, text: String, window: &mut Window, cx: &mut Context<Self>) {
-        if paste::is_long(&text) {
+        if paste::is_long(&text) && crate::prefs(cx).paste_pills {
             self.paste_long(text, window, cx);
         } else {
             self.input.update(cx, |s, cx| s.insert(text, window, cx));
@@ -89,8 +89,10 @@ impl ChatPanel {
         use keleuo_core::markdown_marks::{Mark, marks};
         let theme = cx.theme();
         let (muted, code_bg, link) = (theme.muted_foreground, theme.foreground.opacity(0.07), theme.blue);
-        self.marked_dark = Some(theme.is_dark());
-        let text = self.input.read(cx).value().to_string();
+        let on = crate::prefs(cx).markdown_marks;
+        self.marked_as = Some((theme.is_dark(), on));
+        // Turned off in Settings: no marks (an empty set clears the ones there).
+        let text = if on { self.input.read(cx).value().to_string() } else { String::new() };
         let mut decorations: Vec<TextDecoration> = marks(&text)
             .into_iter()
             .map(|(range, mark)| {
@@ -790,6 +792,7 @@ fn take_paste(item: &ClipboardItem, paste_target: &WeakEntity<ChatPanel>, window
     // Long text: a token in the box, the text kept aside (the box is being changed now, so
     // after this).
     if !took
+        && crate::prefs(cx).paste_pills
         && let Some(text) = item.text().filter(|t| paste::is_long(t))
     {
         let target = paste_target.clone();

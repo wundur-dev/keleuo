@@ -239,6 +239,7 @@ running it asks whether to quit anyway.
 | Ctrl+- / Ctrl+Shift+- | Back / forward through jumps |
 | Cmd+L | Focus the message box |
 | Cmd+Opt+C | Copy the conversation as Markdown |
+| Cmd+, | Settings: appearance, sessions, the chat, the message box, terminals, alerts |
 
 Environment: `KELEUO_MODEL=haiku` picks the model; `KELEUO_PERMISSION_MODE=default`
 starts sessions in that permission mode; `KELEUO_PERF=1` prints timings;

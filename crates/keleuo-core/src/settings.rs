@@ -69,6 +69,56 @@ impl Default for Notify {
     }
 }
 
+/// Behaviour that can be turned off in Settings. Everything here is on by default, which is
+/// why it is apart from [`Settings`] (whose missing fields read as off).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Prefs {
+    /// Open again the sessions that were open when Keleuo quit.
+    pub reopen_sessions: bool,
+    /// Light Markdown highlighting in the message box.
+    pub markdown_marks: bool,
+    /// A long paste goes in the message box as a pill, its text kept aside.
+    pub paste_pills: bool,
+    /// A turn that changed files ends with a card listing them.
+    pub turn_card: bool,
+    /// Files changed by commands (not the edit tools) are found with git.
+    pub command_changes: bool,
+    /// A terminal shows what it showed before Keleuo last quit.
+    pub keep_terminal_history: bool,
+    /// The terminals' font size, in points.
+    pub terminal_font_size: f32,
+}
+
+/// The terminals' font size when none is set, and the range allowed.
+pub const TERMINAL_FONT_SIZE: f32 = 12.5;
+pub const TERMINAL_FONT_SIZES: std::ops::RangeInclusive<f32> = 9.0..=24.0;
+
+impl Default for Prefs {
+    fn default() -> Self {
+        Self {
+            reopen_sessions: true,
+            markdown_marks: true,
+            paste_pills: true,
+            turn_card: true,
+            command_changes: true,
+            keep_terminal_history: true,
+            terminal_font_size: TERMINAL_FONT_SIZE,
+        }
+    }
+}
+
+impl Prefs {
+    /// The terminal font size, kept in range (a hand-edited file may hold anything).
+    pub fn terminal_font_size(&self) -> f32 {
+        if self.terminal_font_size.is_finite() {
+            self.terminal_font_size.clamp(*TERMINAL_FONT_SIZES.start(), *TERMINAL_FONT_SIZES.end())
+        } else {
+            TERMINAL_FONT_SIZE
+        }
+    }
+}
+
 /// A session open in the window, opened again on the next start (closing it removes it;
 /// quitting does not).
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -112,6 +162,8 @@ pub struct Settings {
     pub always_proportional: bool,
     /// When to tell the person a session needs them.
     pub notify: Notify,
+    /// What can be turned off in Settings.
+    pub prefs: Prefs,
     /// Conversations that were working when Keleuo quit, to be told to carry on when it starts
     /// again (the person asked for it on quitting).
     pub continue_on_start: Vec<String>,
@@ -212,6 +264,20 @@ pub fn encode_folder(folder: &std::path::Path) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn prefs_are_on_unless_turned_off() {
+        // An older file has no prefs at all: everything on.
+        let old: Settings = serde_json::from_str(r#"{"appearance": "dark"}"#).unwrap();
+        assert_eq!(old.prefs, Prefs::default());
+        assert!(old.prefs.reopen_sessions && old.prefs.paste_pills && old.prefs.command_changes);
+        // One turned off keeps the others on.
+        let one: Settings = serde_json::from_str(r#"{"prefs": {"turn_card": false}}"#).unwrap();
+        assert!(!one.prefs.turn_card && one.prefs.markdown_marks);
+        // A font size out of range is brought back into it.
+        let big: Settings = serde_json::from_str(r#"{"prefs": {"terminal_font_size": 90}}"#).unwrap();
+        assert_eq!(big.prefs.terminal_font_size(), 24.0);
+    }
 
     #[test]
     fn typed_models_are_remembered_most_recent_first() {

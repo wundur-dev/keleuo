@@ -6,6 +6,7 @@ actions!(
     keleuo,
     [
         ShowAbout,
+        ShowSettings,
         Quit,
         OpenFolder,
         Save,
@@ -51,6 +52,7 @@ actions!(
 pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("cmd-q", Quit, None),
+        KeyBinding::new("cmd-,", ShowSettings, None),
         KeyBinding::new("cmd-o", OpenFolder, None),
         KeyBinding::new("cmd-s", Save, None),
         KeyBinding::new("cmd-w", CloseTab, None),
@@ -89,6 +91,8 @@ pub fn menus(cx: &App) -> Vec<Menu> {
     vec![
         Menu::new("Keleuo").items([
             MenuItem::action("About Keleuo", ShowAbout),
+            MenuItem::separator(),
+            MenuItem::action("Settings…", ShowSettings),
             MenuItem::separator(),
             MenuItem::action("Alert When a Session Asks", ToggleNotifyWaiting).checked(notify.waiting),
             MenuItem::action("Alert When a Turn Finishes", ToggleNotifyFinished).checked(notify.finished),

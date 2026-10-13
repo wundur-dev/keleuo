@@ -20,7 +20,10 @@ use crate::palette;
 use crate::pty::{GridSize, Pty, PtyEvent};
 
 pub const FONT_FAMILY: &str = "Menlo";
-pub const FONT_SIZE: f32 = 12.5;
+/// The font size, from Settings.
+pub fn font_size(cx: &App) -> f32 {
+    crate::prefs(cx).terminal_font_size()
+}
 
 fn hsla(rgb: u32) -> Hsla {
     gpui_kit::rgb(rgb).into()
@@ -160,6 +163,8 @@ impl TerminalView {
     }
 
     fn start(spec: keleuo_core::host::CommandSpec, history: Option<String>, cx: &mut Context<Self>) -> Self {
+        // Settings: not kept, so neither shown again nor saved.
+        let history = history.filter(|_| crate::prefs(cx).keep_terminal_history);
         let preface = history
             .as_deref()
             .and_then(keleuo_core::term_history::path)
@@ -242,7 +247,7 @@ impl TerminalView {
     /// Keep what it shows, two seconds after its output stops (a running program writing
     /// steadily is saved at most every two seconds).
     fn schedule_save(&mut self, cx: &mut Context<Self>) {
-        if self.history.is_none() || self.save.is_some() {
+        if self.history.is_none() || self.save.is_some() || !crate::prefs(cx).keep_terminal_history {
             return;
         }
         self.save = Some(cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
@@ -734,6 +739,7 @@ impl Render for TerminalView {
         if let Some(err) = &self.error {
             return base.p_2().text_color(hsla(if palette::is_dark() { 0xcc6666 } else { 0xc0392b })).child(err.clone());
         }
+        let text_size = font_size(cx);
         let placeholder = self
             .placeholder
             .as_ref()
@@ -751,7 +757,7 @@ impl Render for TerminalView {
                     .gap_1()
                     .overflow_hidden()
                     .font_family(FONT_FAMILY)
-                    .text_size(px(FONT_SIZE));
+                    .text_size(px(text_size));
                 for (user, line) in &p.lines {
                     col = col.child(
                         div()
@@ -764,9 +770,9 @@ impl Render for TerminalView {
             });
         base.px_1().relative().child(
             canvas(
-                move |bounds, window, _cx| {
+                move |bounds, window, cx| {
                     bounds_cell.set(bounds);
-                    let font_size = px(FONT_SIZE);
+                    let font_size = px(font_size(cx));
                     let font = font(FONT_FAMILY);
                     let ts = window.text_system();
                     let font_id = ts.resolve_font(&font);
@@ -831,7 +837,7 @@ fn paint_grid(
     let selection = content.selection;
     let cols = term.columns();
     let rows = term.screen_lines();
-    let font_size = px(FONT_SIZE);
+    let font_size = px(font_size(cx));
     let base_font = font(FONT_FAMILY);
     let default_bg = palette::background();
     let grid = term.grid();

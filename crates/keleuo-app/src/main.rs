@@ -42,6 +42,7 @@ mod procstats;
 mod instance;
 mod pty;
 mod sheet_tabs;
+mod settings_window;
 mod shell;
 mod skills_panel;
 mod terminal_view;
@@ -57,6 +58,12 @@ pub static START: OnceLock<Instant> = OnceLock::new();
 pub struct AppSettings(pub Rc<RefCell<Settings>>);
 
 impl Global for AppSettings {}
+
+/// The on-by-default behaviour from Settings (the defaults where there are no settings, as in
+/// tests).
+pub fn prefs(cx: &App) -> keleuo_core::settings::Prefs {
+    cx.try_global::<AppSettings>().map(|s| s.0.borrow().prefs.clone()).unwrap_or_default()
+}
 
 /// The command line as a request: which folder, on which machine, browse or start.
 fn parse_args() -> anyhow::Result<(instance::Request, Option<String>)> {
@@ -238,6 +245,7 @@ fn main() {
             workspace::register_panels(cx);
             theme::apply(theme::wants_dark(cx), cx);
             cx.on_action(|_: &ShowAbout, cx| about::open(cx));
+            cx.on_action(|_: &ShowSettings, cx| settings_window::open(cx));
             cx.on_action(|_: &AppearanceSystem, cx| theme::set_appearance("system", cx));
             cx.on_action(|_: &AppearanceLight, cx| theme::set_appearance("light", cx));
             cx.on_action(|_: &AppearanceDark, cx| theme::set_appearance("dark", cx));

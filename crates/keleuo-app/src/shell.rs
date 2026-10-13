@@ -162,7 +162,9 @@ impl Shell {
         };
         let (saved, shown) = {
             let settings = cx.global::<AppSettings>().0.borrow();
-            (settings.open_sessions.clone(), settings.shown_session)
+            // Settings: not reopening them starts afresh.
+            let saved = if settings.prefs.reopen_sessions { settings.open_sessions.clone() } else { Vec::new() };
+            (saved, settings.shown_session)
         };
         if saved.is_empty() {
             this.handle_start(start, window, cx);
@@ -1145,6 +1147,10 @@ impl Shell {
             }
             "about" => {
                 crate::about::open_tab(arg, cx);
+                "ok".into()
+            }
+            "settings" => {
+                crate::settings_window::open(cx);
                 "ok".into()
             }
             "tabs" => (0..self.tabs.len())
