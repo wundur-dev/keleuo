@@ -25,6 +25,7 @@ use crate::actions::*;
 use crate::chat_panel::{ChatPanel, ChatPanelEvent};
 use crate::agent_session::{AgentSession, SessionEvent, View};
 use crate::agent_side::AgentSide;
+use crate::changes_panel::ChangesPanel;
 use crate::doc_panel::{DocContext, DocEvent, DocPanel};
 use crate::file_tree::{FileTree, FileTreeEvent};
 use crate::panels::{self, doc_key, start_tab_rename, term_key};
@@ -41,6 +42,7 @@ struct Factory {
     skills: Entity<SkillsPanel>,
     claude: Entity<ChatPanel>,
     agent_side: Entity<AgentSide>,
+    changes: Entity<ChangesPanel>,
     doc_ctx: DocContext,
     shell: keleuo_core::host::CommandSpec,
     session: Entity<AgentSession>,
@@ -72,13 +74,14 @@ fn factory(ctx: &PanelBuildContext, cx: &App) -> Option<Rc<Factory>> {
 /// Register the panel kinds once, so saved layouts can be rebuilt.
 pub fn register_panels(cx: &mut App) {
     cx.set_global(Factories::default());
-    for name in ["Files", "Skills", "Agent", "Chat"] {
+    for name in ["Files", "Skills", "Agent", "Changes", "Chat"] {
         register_panel(cx, name, move |ctx, _window, cx| {
             let f = factory(&ctx, cx).expect("a workspace for this dock");
             match name {
                 "Files" => panel_handle(f.files.clone()),
                 "Skills" => panel_handle(f.skills.clone()),
                 "Agent" => panel_handle(f.agent_side.clone()),
+                "Changes" => panel_handle(f.changes.clone()),
                 _ => panel_handle(f.claude.clone()),
             }
         });
@@ -159,6 +162,7 @@ pub struct Workspace {
     pub session: Entity<AgentSession>,
     pub claude: Entity<ChatPanel>,
     agent_side: Entity<AgentSide>,
+    changes: Entity<ChangesPanel>,
     /// Shown on the session tab: a git worktree made for this session.
     pub worktree: Option<String>,
     terminals: Rc<RefCell<Vec<Entity<TerminalView>>>>,
@@ -200,6 +204,7 @@ impl Workspace {
         session.update(cx, |s, cx| s.begin(cx));
         let claude = cx.new(|cx| ChatPanel::new(session.clone(), window, cx));
         let agent_side = cx.new(|cx| AgentSide::new(session.clone(), claude.clone(), cx));
+        let changes = cx.new(|cx| ChangesPanel::new(session.clone(), claude.clone(), cx));
         let terminals = Rc::new(RefCell::new(Vec::new()));
         let doc_ctx = DocContext {
             host: host.clone(),
@@ -294,6 +299,7 @@ impl Workspace {
             session,
             claude,
             agent_side,
+            changes,
             worktree: None,
             terminals,
             next_term: 1,
@@ -414,6 +420,7 @@ impl Workspace {
         if caps.skills {
             look = look.panel_view(panel_handle(self.skills.clone()), cx);
         }
+        look = look.panel_view(panel_handle(self.changes.clone()), cx);
         let left = if caps.subagents {
             let running = DockLayout::tabs().panel_view(panel_handle(self.agent_side.clone()), cx);
             DockLayout::v_split().child(look, None).child(running, Some(px(300.)))
@@ -457,6 +464,7 @@ impl Workspace {
             skills: self.skills.clone(),
             claude: self.claude.clone(),
             agent_side: self.agent_side.clone(),
+            changes: self.changes.clone(),
             doc_ctx: self.doc_ctx.clone(),
             shell: self.host.shell_command(&self.root),
             session: self.session.clone(),
@@ -482,6 +490,17 @@ impl Workspace {
                 Made::Agent(view) => self.adopt_agent(view, window, cx),
                 Made::Web(view) => self.adopt_web(view, window, cx),
             }
+        }
+        // A layout saved before the Changes panel: it joins the Files group, behind Files.
+        let changes = PanelId::from(self.changes.entity_id());
+        if !self.in_dock(changes, cx)
+            && let Some(node) = self.find_node(PanelId::from(self.files.entity_id()), cx)
+        {
+            let view = panel_handle(self.changes.clone());
+            self.dock.update(cx, |a, cx| {
+                a.add_panel_view(view, DockPlacement::Center, None, window, cx);
+                a.move_panel(changes, InsertTarget::Tabs { node, ix: None, activate: false }, window, cx);
+            });
         }
         if !self.in_dock(PanelId::from(self.claude.entity_id()), cx) {
             let view = panel_handle(self.claude.clone());
@@ -1389,6 +1408,7 @@ impl Workspace {
                 let id = match arg {
                     "skills" => PanelId::from(self.skills.entity_id()),
                     "agent" => PanelId::from(self.agent_side.entity_id()),
+                    "changes" => PanelId::from(self.changes.entity_id()),
                     "chat" => PanelId::from(self.claude.entity_id()),
                     _ => PanelId::from(self.files.entity_id()),
                 };
@@ -1508,22 +1528,15 @@ impl Workspace {
             theme.muted_foreground,
             theme.secondary_hover,
         );
-        let items: [(IconName, &'static str, PanelId); 3] = [
+        let items: [(Icon, &'static str, PanelId); 4] = [
+            (Icon::new(IconName::FolderOpen), "Files", PanelId::from(self.files.entity_id())),
+            (Icon::new(IconName::BookOpen), "Skills", PanelId::from(self.skills.entity_id())),
             (
-                IconName::FolderOpen,
-                "Files",
-                PanelId::from(self.files.entity_id()),
+                Icon::new(gpui_kit::assets::IconName::FileDiff),
+                "Changes: what this turn changed",
+                PanelId::from(self.changes.entity_id()),
             ),
-            (
-                IconName::BookOpen,
-                "Skills",
-                PanelId::from(self.skills.entity_id()),
-            ),
-            (
-                IconName::Bot,
-                "Agent: subagents",
-                PanelId::from(self.agent_side.entity_id()),
-            ),
+            (Icon::new(IconName::Bot), "Agent: subagents", PanelId::from(self.agent_side.entity_id())),
         ];
         let mut col = div()
             .w(px(34.))
@@ -1547,7 +1560,7 @@ impl Workspace {
                     .justify_center()
                     .rounded_sm()
                     .hover(|d| d.bg(hover))
-                    .child(Icon::new(icon).small().text_color(muted))
+                    .child(icon.small().text_color(muted))
                     .tooltip(move |window, cx| {
                         gpui_kit::component::tooltip::Tooltip::new(tip).build(window, cx)
                     })

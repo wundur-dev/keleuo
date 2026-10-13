@@ -17,6 +17,7 @@ use keleuo_core::tabs::NameStore;
 
 use crate::chat_panel::{ChatPanel, ChatPanelEvent};
 use crate::agent_side::AgentSide;
+use crate::changes_panel::ChangesPanel;
 use crate::doc_panel::{DocEvent, DocPanel};
 use crate::file_tree::FileTree;
 use crate::skills_panel::SkillsPanel;
@@ -157,6 +158,7 @@ macro_rules! list_panel {
 list_panel!(FileTree, "Files", "Files", IconName::FolderOpen);
 list_panel!(SkillsPanel, "Skills", "Skills", IconName::BookOpen);
 list_panel!(AgentSide, "Agent", "Agent", IconName::Bot);
+list_panel!(ChangesPanel, "Changes", "Changes", IconName::Bot);
 
 /// A quiet section header in a sidebar list: an icon, the title, a faint count and, when the
 /// section folds, a chevron. Space above it separates groups (none for the first); the rows
@@ -269,6 +271,24 @@ impl Panel for SkillsPanel {
                 .tooltip("New project skill")
                 .on_click(cx.listener(|s, _, _, cx| s.new_skill(cx))),
         ])
+    }
+    fn zoom_control(&self, _: &App) -> Option<gpui_kit::component::dock::PanelControl> {
+        None
+    }
+    fn inner_padding(&self, _: &App) -> bool {
+        false
+    }
+}
+
+impl Panel for ChangesPanel {
+    fn title(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .flex()
+            .items_center()
+            .gap_1()
+            .child(Icon::new(gpui_kit::assets::IconName::FileDiff).xsmall())
+            .child("Changes")
+            .into_any_element()
     }
     fn zoom_control(&self, _: &App) -> Option<gpui_kit::component::dock::PanelControl> {
         None

@@ -24,6 +24,7 @@ mod app_icon;
 mod attention;
 mod browser;
 mod backends;
+mod changes_panel;
 mod chat_panel;
 mod closing;
 mod agent_session;

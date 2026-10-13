@@ -39,6 +39,7 @@ icon_assets!(
         Monitor,
         FilePlus,
         FolderPlus,
+        FileDiff,
     ]
 );
 

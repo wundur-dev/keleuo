@@ -19,6 +19,7 @@
 
 pub mod agent;
 pub mod backends;
+pub mod changes;
 pub mod compose;
 pub mod conversation;
 pub mod diff;

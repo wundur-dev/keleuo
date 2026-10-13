@@ -376,6 +376,35 @@ impl Conversation {
         out
     }
 
+    /// Where the current (or last) turn starts: the person's last message.
+    pub fn turn_start(&self) -> usize {
+        self.items.iter().rposition(|i| matches!(i, Item::User(_))).unwrap_or(0)
+    }
+
+    /// The files changed by the edits in `self.items[from..]` (subagents' included), for the
+    /// Changes panel: a turn from [`Self::turn_start`], the session from 0. Changes made by
+    /// commands (a formatter, `sed`) are not tool edits and are not here.
+    pub fn changes(&self, from: usize) -> Vec<crate::changes::FileChange> {
+        let mut diffs = Vec::new();
+        self.collect_all_changes(self.items.get(from..).unwrap_or(&[]), &mut diffs);
+        crate::changes::summarize(diffs)
+    }
+
+    fn collect_all_changes(&self, items: &[Item], out: &mut Vec<FileDiff>) {
+        for item in items {
+            let Item::Tool(t) = item else { continue };
+            if let Some(agent) = self.agent(&t.id) {
+                self.collect_all_changes(&agent.items, out);
+            }
+            if let Some(d) = &t.diff
+                && t.done()
+                && !t.is_error
+            {
+                out.push(d.clone());
+            }
+        }
+    }
+
     /// Whether this session changed `path`.
     pub fn edited(&self, path: &Path) -> bool {
         !self.file_changes(path).is_empty()
@@ -873,6 +902,31 @@ mod tests {
         assert_eq!(diff::undo("3", &changes), "1");
         assert!(chat.edited(Path::new("/p/b")));
         assert!(!chat.edited(Path::new("/p/c")));
+    }
+
+    #[test]
+    fn a_turn_and_the_session_list_their_changed_files() {
+        let mut chat = Conversation::new("/p");
+        chat.apply(Event::UserText("first".into()));
+        chat.apply_all(edit("t1", "/p/src/a.rs", "1", "2", None));
+        chat.apply_all(edit("t2", "/p/Cargo.lock", "x", "y", None));
+        chat.apply(Event::UserText("second".into()));
+        chat.apply_all(edit("t3", "/p/tests/a.rs", "1", "2", None));
+        chat.apply_all([
+            Event::ToolCall { id: "ag".into(), name: "Agent".into(), summary: String::new(), input: json!({}), diff: None, parent: None },
+            Event::SubagentStarted { id: "ag".into(), description: "help".into(), kind: "general".into() },
+        ]);
+        chat.apply_all(edit("t4", "/p/src/a.rs", "2", "3", Some("ag")));
+        chat.apply_all(edit("t5", "/p/src/a.rs", "3", "4", None));
+
+        let paths = |c: Vec<crate::changes::FileChange>| c.into_iter().map(|c| (c.path.display().to_string(), c.edits)).collect::<Vec<_>>();
+        // This turn: the subagent's edit counts, code before tests.
+        assert_eq!(paths(chat.changes(chat.turn_start())), [("/p/src/a.rs".into(), 2), ("/p/tests/a.rs".into(), 1)]);
+        // The session: the lock file last.
+        assert_eq!(
+            paths(chat.changes(0)),
+            [("/p/src/a.rs".into(), 3), ("/p/tests/a.rs".into(), 1), ("/p/Cargo.lock".into(), 1)]
+        );
     }
 
     fn call(id: &str, name: &str, summary: &str) -> Event {
