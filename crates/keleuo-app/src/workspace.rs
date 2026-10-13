@@ -1390,6 +1390,13 @@ impl Workspace {
                 let text = std::fs::read_to_string(arg).unwrap_or_default();
                 self.claude.update(cx, |p, cx| p.test_paste(text, window, cx));
             }
+            // As if "Show in text field" (`unfold N`) or "Remove" (`unfold N drop`) were clicked.
+            "unfold" => {
+                let mut words = arg.split_whitespace();
+                let n = words.next().and_then(|w| w.parse().ok()).unwrap_or(1);
+                let inline = words.next() != Some("drop");
+                self.claude.update(cx, |p, cx| p.test_unfold(n, inline, window, cx));
+            }
             "compose-send" => self.claude.update(cx, |p, cx| p.test_send_composed(window, cx)),
             "send-attached" => {
                 // Tests: send with what is attached.

@@ -7,7 +7,7 @@ use std::rc::Rc;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
+use gpui_kit::component::input::{InlineToken, InlineTokenContext, InputContent, InputEvent, Textarea, TextareaState};
 
 use crate::agent_session::{Asking, Spend, View};
 use gpui_kit::component::button::{Button, ButtonVariants};
@@ -1924,6 +1924,36 @@ impl Focusable for ChatPanel {
     }
 }
 
+/// A paste's token in the message box: a small raised pill (rounded, lit from above, a soft
+/// shadow) with its size.
+fn paste_pill(token: &InlineTokenContext, _: &mut Window, cx: &mut App) -> AnyElement {
+    let theme = cx.theme();
+    let base = theme.secondary;
+    let (top, bottom, edge) = if theme.is_dark() {
+        (Hsla { l: (base.l + 0.13).min(1.), ..base }, Hsla { l: (base.l + 0.04).min(1.), ..base }, theme.foreground.opacity(0.18))
+    } else {
+        (Hsla { l: (base.l + 0.03).min(1.), ..base }, Hsla { l: (base.l - 0.05).max(0.), ..base }, theme.border)
+    };
+    let edge = if token.is_selected() { theme.ring } else { edge };
+    div()
+        .h(token.line_height() - px(2.))
+        .mx(px(1.))
+        .px(px(7.))
+        .flex()
+        .items_center()
+        .gap(px(4.))
+        .rounded(px(7.))
+        .border_1()
+        .border_color(edge)
+        .bg(linear_gradient(180., linear_color_stop(top, 0.), linear_color_stop(bottom, 1.)))
+        .shadow_xs()
+        .text_xs()
+        .text_color(theme.foreground)
+        .child(Icon::new(gpui_kit::assets::IconName::FileText).xsmall().text_color(theme.muted_foreground))
+        .child(token.token().label().clone())
+        .into_any_element()
+}
+
 impl Render for ChatPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if let Some(id) = self.agent.clone() {
@@ -2030,6 +2060,11 @@ impl ChatPanel {
         }
     }
 
+    /// Tests: a paste's "Show in text field" (`inline`) or "Remove".
+    pub fn test_unfold(&mut self, n: usize, inline: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.unfold_paste(n, inline, window, cx);
+    }
+
     /// Tests: press send.
     pub fn test_send_composed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.send_composed(window, cx);
@@ -2050,21 +2085,53 @@ impl ChatPanel {
         self.session.update(cx, |s, cx| s.send_with(&text, images, cx));
     }
 
-    /// A long paste: kept aside, a token for it typed at the cursor.
+    /// A long paste: kept aside, and a token for it put at the cursor. The token is one unit
+    /// in the box (the cursor steps over it, Backspace takes it whole), drawn as a pill; its
+    /// text is the `[Pasted text #n · …]` that sending expands.
     fn paste_long(&mut self, text: String, window: &mut Window, cx: &mut Context<Self>) {
-        let token = paste::token(self.pastes.len() + 1, &text);
+        let n = self.pastes.len() + 1;
+        let typed = paste::token(n, &text);
+        let token = InlineToken::new(format!("paste-{n}"), typed.clone()).with_label(format!("Pasted text · {}", paste::size(&text)));
         self.pastes.push(text);
-        self.input.update(cx, |s, cx| s.insert(token, window, cx));
+        self.input.update(cx, |s, cx| {
+            if s.replace_with_token(token, window, cx).is_err() {
+                s.insert(typed, window, cx);
+            }
+        });
         cx.notify();
     }
 
-    /// Paste `n` back into the message box as plain text (`inline`), or out of it.
+    /// Paste `n` back into the message box as plain text (`inline`), or out of it. The other
+    /// tokens stay tokens.
     fn unfold_paste(&mut self, n: usize, inline: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(text) = self.pastes.get(n - 1).cloned() else { return };
-        let token = paste::token(n, &text);
-        let value = self.input.read(cx).value().to_string();
-        let value = value.replacen(&token, if inline { &text } else { "" }, 1);
-        self.input.update(cx, |s, cx| s.set_value(value, window, cx));
+        let Some(pasted) = self.pastes.get(n - 1).cloned() else { return };
+        let id = format!("paste-{n}");
+        let content = self.input.read(cx).content();
+        let text = content.text().to_string();
+        let (mut out, mut kept, mut last) = (String::new(), Vec::new(), 0);
+        for span in content.tokens() {
+            let r = span.range();
+            out.push_str(&text[last..r.start]);
+            last = r.end;
+            if span.token().id().as_ref() == id {
+                if inline {
+                    out.push_str(&pasted);
+                }
+            } else {
+                let start = out.len();
+                out.push_str(&text[r]);
+                kept.push((start..out.len(), span.token().clone()));
+            }
+        }
+        out.push_str(&text[last..]);
+        let mut rebuilt = InputContent::new(out.clone());
+        for (range, token) in kept {
+            rebuilt = match rebuilt.clone().with_token(range, token) {
+                Ok(c) => c,
+                Err(_) => rebuilt,
+            };
+        }
+        self.input.update(cx, |s, cx| s.set_value(rebuilt, window, cx));
         cx.notify();
     }
 
@@ -2185,7 +2252,7 @@ impl ChatPanel {
                     .justify_center()
                     .text_xs()
                     .text_color(muted)
-                    .child(div().text_color(fg).truncate().child(format!("Pasted text #{n} · {}", paste::size(text))))
+                    .child(div().text_color(fg).truncate().child(format!("Pasted text · {}", paste::size(text))))
                     .child(div().truncate().font_family("monospace").child(first))
                     .child(
                         div()
@@ -2327,6 +2394,7 @@ impl ChatPanel {
                         Textarea::new(&self.input)
                             .appearance(false)
                             .text_sm()
+                            .token(paste_pill)
                             .on_paste(move |item, window, cx| {
                                 // An image (or image files) on the clipboard: attach it.
                                 let mut took = false;
