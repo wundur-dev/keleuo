@@ -27,6 +27,7 @@ pub mod frontmatter;
 pub mod images;
 pub mod host;
 pub mod links;
+pub mod markdown_marks;
 pub mod paste;
 pub mod settings;
 pub mod skills;

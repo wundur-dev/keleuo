@@ -7,7 +7,7 @@ use std::rc::Rc;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use gpui_kit::component::input::{Enter, Escape, IndentInline, MoveDown, MoveUp, InlineToken, InlineTokenContext, Input, InputContent, InputEvent, InputState, Textarea, TextareaState};
+use gpui_kit::component::input::{Enter, Escape, IndentInline, MoveDown, MoveUp, InlineToken, TextDecoration, InlineTokenContext, Input, InputContent, InputEvent, InputState, Textarea, TextareaState};
 
 use crate::agent_session::{Asking, Spend, View};
 use gpui_kit::component::button::{Button, ButtonVariants};
@@ -78,6 +78,8 @@ pub struct ChatPanel {
     slash_query: String,
     /// Escape closed the list for this query.
     slash_closed: bool,
+    /// The theme the message box's Markdown was coloured for (dark or not).
+    marked_dark: Option<bool>,
     /// An image shown full size over the chat.
     preview: Option<PathBuf>,
     /// The known failure whose fixes are being offered.
@@ -137,8 +139,11 @@ impl ChatPanel {
             &input,
             window,
             |panel, _, ev: &InputEvent, window, cx| {
-                if let InputEvent::PressEnter { shift: false, .. } = ev {
-                    panel.send_composed(window, cx);
+                match ev {
+                    InputEvent::PressEnter { shift: false, .. } => panel.send_composed(window, cx),
+                    // Any edit clears the box's styles: mark the Markdown again.
+                    InputEvent::Change => panel.mark_markdown(cx),
+                    _ => {}
                 }
             },
         );
@@ -199,6 +204,7 @@ impl ChatPanel {
             slash_ix: 0,
             slash_query: String::new(),
             slash_closed: false,
+            marked_dark: None,
             preview: None,
             fixing: None,
             fixed: Default::default(),
@@ -2026,6 +2032,11 @@ impl Render for ChatPanel {
         if let Some(id) = self.agent.clone() {
             return self.render_agent_view(&id, cx);
         }
+        // Light and dark changed: the Markdown colours follow.
+        let dark = cx.theme().is_dark();
+        if self.marked_dark != Some(dark) {
+            self.mark_markdown(cx);
+        }
         let started = std::time::Instant::now();
         if crate::perf::enabled() {
             // Build, layout and paint: from here to the frame being on screen.
@@ -2128,6 +2139,29 @@ impl ChatPanel {
         } else {
             self.input.update(cx, |s, cx| s.insert(text, window, cx));
         }
+    }
+
+    /// Light Markdown in the message box: code on a faint ground, headings and bold in bold,
+    /// italic in italic, quotes and Markdown's own characters quieter. The text is unchanged.
+    fn mark_markdown(&mut self, cx: &mut Context<Self>) {
+        use keleuo_core::markdown_marks::{Mark, marks};
+        let theme = cx.theme();
+        let (muted, code_bg) = (theme.muted_foreground, theme.foreground.opacity(0.07));
+        self.marked_dark = Some(theme.is_dark());
+        let text = self.input.read(cx).value().to_string();
+        let decorations: Vec<TextDecoration> = marks(&text)
+            .into_iter()
+            .map(|(range, mark)| {
+                let style = match mark {
+                    Mark::Code => HighlightStyle { background_color: Some(code_bg), ..Default::default() },
+                    Mark::Heading | Mark::Bold => HighlightStyle { font_weight: Some(FontWeight::BOLD), ..Default::default() },
+                    Mark::Italic => HighlightStyle { font_style: Some(FontStyle::Italic), ..Default::default() },
+                    Mark::Quote | Mark::Syntax => HighlightStyle { color: Some(muted), ..Default::default() },
+                };
+                TextDecoration::new(range, style)
+            })
+            .collect();
+        self.input.update(cx, |s, cx| s.set_text_decorations(decorations, cx));
     }
 
     /// The `/` list for what is typed: its matches, when the message is a lone `/word` and the
@@ -2360,6 +2394,7 @@ impl ChatPanel {
             };
         }
         self.input.update(cx, |s, cx| s.set_value(rebuilt, window, cx));
+        self.mark_markdown(cx);
         cx.notify();
     }
 

@@ -23,3 +23,8 @@ dirs = "6"
 # Dependencies optimised so gpui and the terminal stay smooth in debug builds.
 [profile.dev.package."*"]
 opt-level = 2
+
+# gpui-base with text decorations for multi-line text (the message box's Markdown
+# highlighting). Proposed upstream; drop this once a release has it.
+[patch.crates-io]
+gpui-base = { path = "vendor/gpui-base" }
