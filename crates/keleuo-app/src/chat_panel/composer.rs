@@ -396,21 +396,128 @@ impl ChatPanel {
     /// send, the text, and the session's controls (attach, model, permission mode, send/stop).
     pub(super) fn render_composer(&self, slash: Option<AnyElement>, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
-        let (border, muted, fg, field, accent) = (theme.border, theme.muted_foreground, theme.foreground, theme.secondary, theme.ring);
+        let (border, muted, field, accent) = (theme.border, theme.muted_foreground, theme.secondary, theme.ring);
         let session = self.session.read(cx);
         let busy = session.chat.busy;
-        let caps = session.backend.capabilities();
-        let model = session.chat.model.clone().or_else(|| session.model.clone()).unwrap_or_else(|| "default model".into());
-        let mode = session.live_mode.clone().or_else(|| session.permission_mode.clone()).unwrap_or_else(|| "default".into());
+        let permission_prompts = session.backend.capabilities().permission_prompts;
         let has_text = !self.input.read(cx).value().trim().is_empty() || !self.attachments.is_empty();
         let mono = !cx.global::<crate::AppSettings>().0.borrow().always_proportional
             && keleuo_core::markdown_marks::has_fence(&self.input.read(cx).value());
         let restarting = session.restarting.clone();
         let queued = session.queued_count();
         let name = session.backend.name();
-        let weak = self.session.downgrade();
-        let entity = cx.entity().downgrade();
+        let chips = self.render_chips(cx);
+        let attach = self.render_attach(cx);
+        let model_control = self.render_model_control(cx);
+        let mode_button = permission_prompts.then(|| self.render_mode_button(cx));
+        let send = self.render_send(busy, has_text, cx);
+        let paste_target = cx.entity().downgrade();
+        div()
+            .flex_none()
+            .w_full()
+            .flex()
+            .flex_col()
+            .items_center()
+            .px_4()
+            .pb_3()
+            .pt_1()
+            // The `/` list, just above the box it completes.
+            .children(slash.map(|s| div().w_full().max_w(px(COLUMN)).child(s)))
+            .child(
+                div()
+                    .id("composer")
+                    .w_full()
+                    .max_w(px(COLUMN))
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .px_3()
+                    .pt_2()
+                    .pb_1()
+                    .rounded(px(20.))
+                    .border_1()
+                    .border_color(border)
+                    .bg(field)
+                    .shadow_md()
+                    .drag_over::<ExternalPaths>(move |d, _, _, _| d.border_color(accent))
+                    .on_drop(cx.listener(|p, paths: &ExternalPaths, _, cx| p.attach(paths.paths().to_vec(), cx)))
+                    // Shift+Enter on a list item: before the box puts in its plain new line.
+                    // Enter with the `/` list up takes the highlighted name.
+                    .capture_action(cx.listener(|p, action: &Enter, window, cx| {
+                        let used = !action.secondary
+                            && if action.shift { continue_list(&p.input, window, cx) } else { p.slash_key("enter", window, cx) };
+                        if used {
+                            cx.stop_propagation();
+                        }
+                    }))
+                    // Up, Down, Tab and Escape steer the `/` list while it is up (they are the
+                    // box's own actions, so they are caught before it moves its cursor).
+                    .capture_action(cx.listener(|p, _: &MoveUp, window, cx| {
+                        if p.slash_key("up", window, cx) {
+                            cx.stop_propagation();
+                        }
+                    }))
+                    .capture_action(cx.listener(|p, _: &MoveDown, window, cx| {
+                        if p.slash_key("down", window, cx) {
+                            cx.stop_propagation();
+                        }
+                    }))
+                    .capture_action(cx.listener(|p, _: &IndentInline, window, cx| {
+                        if p.slash_key("tab", window, cx) {
+                            cx.stop_propagation();
+                        }
+                    }))
+                    .capture_action(cx.listener(|p, _: &Escape, window, cx| {
+                        if p.slash_key("escape", window, cx) {
+                            cx.stop_propagation();
+                        }
+                    }))
+                    .when_some(restarting, |d, why| {
+                        // Restarting (a new model or mode): what is typed now waits for it.
+                        d.child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .text_size(px(11.5))
+                                .text_color(muted)
+                                .child(Icon::new(IconName::LoaderCircle).xsmall())
+                                .child(match queued {
+                                    0 => format!("Restarting {name} {why}. A message sent now goes when it is up."),
+                                    n => format!("Restarting {name} {why}. {n} message{} waiting to go.", if n == 1 { "" } else { "s" }),
+                                }),
+                        )
+                    })
+                    .children(chips)
+                    .child(
+                        Textarea::new(&self.input)
+                            .appearance(false)
+                            .text_sm()
+                            // A message holding a code block is written in the code font (View menu).
+                            .when(mono, |t| t.font_family(cx.theme().mono_font_family.clone()))
+                            .token(paste_pill)
+                            .on_paste(move |item, window, cx| take_paste(item, &paste_target, window, cx)),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .text_color(muted)
+                            .child(attach)
+                            .child(model_control)
+                            .children(mode_button)
+                            .child(div().flex_1())
+                            .child(send),
+                    ),
+            )
+            .into_any_element()
+    }
 
+    /// The images and long pastes waiting to go with the message, above the box.
+    fn render_chips(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let theme = cx.theme();
+        let (border, muted, fg, field) = (theme.border, theme.muted_foreground, theme.foreground, theme.secondary);
         let mut chips = div().flex().flex_wrap().gap_2();
         for (n, path) in self.attachments.iter().enumerate() {
             let (p1, p2) = (path.clone(), path.clone());
@@ -494,13 +601,20 @@ impl ChatPanel {
             );
         }
 
+        (!self.attachments.is_empty() || paste_chips > 0).then(|| chips.into_any_element())
+    }
+
+    /// The model menu, or the field typing a model's name in its place.
+    fn render_model_control(&self, cx: &mut Context<Self>) -> AnyElement {
+        let session = self.session.read(cx);
+        let model = session.chat.model.clone().or_else(|| session.model.clone()).unwrap_or_else(|| "default model".into());
+        let w_model = self.session.downgrade();
+        let panel_for_menu = cx.entity().downgrade();
         // The backend's own names (aliases, each the latest of its family), the names typed in
         // before, and "Other model…" to type one. The running one is ticked; an alias shows
         // what it stands for.
-        let models: Vec<String> = caps.models.clone();
+        let models: Vec<String> = session.backend.capabilities().models.clone();
         let recent: Vec<String> = cx.global::<crate::AppSettings>().0.borrow().recent_models.clone();
-        let (w_model, w_mode) = (weak.clone(), weak.clone());
-        let panel_for_menu = entity.clone();
         // What was picked (an alias or a typed name), and what it runs as.
         let (picked, running_as) = (session.model.clone(), session.chat.model.clone());
         let model_button = Button::new("model")
@@ -543,7 +657,7 @@ impl ChatPanel {
                 }))
             });
         // Typing a model name: the field takes the button's place.
-        let model_control = match &self.model_input {
+        match &self.model_input {
             Some((input, _)) => div()
                 .w(px(240.))
                 .capture_key_down(cx.listener(|p, ev: &KeyDownEvent, _, cx| {
@@ -556,7 +670,15 @@ impl ChatPanel {
                 .child(Input::new(input).xsmall())
                 .into_any_element(),
             None => model_button.into_any_element(),
-        };
+        }
+    }
+
+    /// The permission mode menu.
+    fn render_mode_button(&self, cx: &mut Context<Self>) -> AnyElement {
+        let session = self.session.read(cx);
+        let mode = session.live_mode.clone().or_else(|| session.permission_mode.clone()).unwrap_or_else(|| "default".into());
+        let caps = session.backend.capabilities();
+        let w_mode = self.session.downgrade();
         let modes: Vec<(Option<String>, &'static str)> = vec![
             (None, "Ask before acting"),
             (caps.accept_edits_mode.clone(), "Accept edits"),
@@ -584,6 +706,13 @@ impl ChatPanel {
                 }
                 menu
             });
+        mode_button.into_any_element()
+    }
+
+    /// Send, or Stop while the agent works.
+    fn render_send(&self, busy: bool, has_text: bool, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let (fg, muted) = (theme.foreground, theme.muted_foreground);
         let send = div()
             .id("send")
             .size(px(28.))
@@ -608,6 +737,11 @@ impl ChatPanel {
                 }
                 p.send_composed(window, cx);
             }));
+        send.into_any_element()
+    }
+
+    /// The paperclip: pick images to attach.
+    fn render_attach(&self, cx: &mut Context<Self>) -> AnyElement {
         let attach = Button::new("attach")
             .xsmall()
             .ghost()
@@ -622,147 +756,51 @@ impl ChatPanel {
                 })
                 .detach();
             }));
-        let paste_target = entity.clone();
-        div()
-            .flex_none()
-            .w_full()
-            .flex()
-            .flex_col()
-            .items_center()
-            .px_4()
-            .pb_3()
-            .pt_1()
-            // The `/` list, just above the box it completes.
-            .children(slash.map(|s| div().w_full().max_w(px(COLUMN)).child(s)))
-            .child(
-                div()
-                    .id("composer")
-                    .w_full()
-                    .max_w(px(COLUMN))
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .px_3()
-                    .pt_2()
-                    .pb_1()
-                    .rounded(px(20.))
-                    .border_1()
-                    .border_color(border)
-                    .bg(field)
-                    .shadow_md()
-                    .drag_over::<ExternalPaths>(move |d, _, _, _| d.border_color(accent))
-                    .on_drop(cx.listener(|p, paths: &ExternalPaths, _, cx| p.attach(paths.paths().to_vec(), cx)))
-                    // Shift+Enter on a list item: before the box puts in its plain new line.
-                    // Enter with the `/` list up takes the highlighted name.
-                    .capture_action(cx.listener(|p, action: &Enter, window, cx| {
-                        let used = !action.secondary
-                            && if action.shift { continue_list(&p.input, window, cx) } else { p.slash_key("enter", window, cx) };
-                        if used {
-                            cx.stop_propagation();
-                        }
-                    }))
-                    // Up, Down, Tab and Escape steer the `/` list while it is up (they are the
-                    // box's own actions, so they are caught before it moves its cursor).
-                    .capture_action(cx.listener(|p, _: &MoveUp, window, cx| {
-                        if p.slash_key("up", window, cx) {
-                            cx.stop_propagation();
-                        }
-                    }))
-                    .capture_action(cx.listener(|p, _: &MoveDown, window, cx| {
-                        if p.slash_key("down", window, cx) {
-                            cx.stop_propagation();
-                        }
-                    }))
-                    .capture_action(cx.listener(|p, _: &IndentInline, window, cx| {
-                        if p.slash_key("tab", window, cx) {
-                            cx.stop_propagation();
-                        }
-                    }))
-                    .capture_action(cx.listener(|p, _: &Escape, window, cx| {
-                        if p.slash_key("escape", window, cx) {
-                            cx.stop_propagation();
-                        }
-                    }))
-                    .when_some(restarting, |d, why| {
-                        // Restarting (a new model or mode): what is typed now waits for it.
-                        d.child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap_1()
-                                .text_size(px(11.5))
-                                .text_color(muted)
-                                .child(Icon::new(IconName::LoaderCircle).xsmall())
-                                .child(match queued {
-                                    0 => format!("Restarting {name} {why}. A message sent now goes when it is up."),
-                                    n => format!("Restarting {name} {why}. {n} message{} waiting to go.", if n == 1 { "" } else { "s" }),
-                                }),
-                        )
-                    })
-                    .when(!self.attachments.is_empty() || paste_chips > 0, |d| d.child(chips))
-                    .child(
-                        Textarea::new(&self.input)
-                            .appearance(false)
-                            .text_sm()
-                            // A message holding a code block is written in the code font (View menu).
-                            .when(mono, |t| t.font_family(cx.theme().mono_font_family.clone()))
-                            .token(paste_pill)
-                            .on_paste(move |item, window, cx| {
-                                // An image (or image files) on the clipboard: attach it.
-                                let mut took = false;
-                                for entry in item.entries() {
-                                    match entry {
-                                        ClipboardEntry::Image(image) => {
-                                            let ext = match image.format {
-                                                ImageFormat::Jpeg => "jpg",
-                                                ImageFormat::Gif => "gif",
-                                                ImageFormat::Webp => "webp",
-                                                _ => "png",
-                                            };
-                                            let bytes = image.bytes.clone();
-                                            let _ = paste_target.update(cx, |p, cx| p.attach_bytes(&bytes, ext, cx));
-                                            took = true;
-                                        }
-                                        ClipboardEntry::ExternalPaths(paths) => {
-                                            let paths = paths.paths().to_vec();
-                                            let _ = paste_target.update(cx, |p, cx| p.attach(paths, cx));
-                                            took = true;
-                                        }
-                                        _ => {}
-                                    }
-                                }
-                                // Long text: a token in the box, the text kept aside (the box is
-                                // being changed now, so after this).
-                                if !took
-                                    && let Some(text) = item.text().filter(|t| paste::is_long(t))
-                                {
-                                    let target = paste_target.clone();
-                                    window.defer(cx, move |window, cx| {
-                                        let _ = target.update(cx, |p, cx| p.paste_long(text, window, cx));
-                                    });
-                                    took = true;
-                                }
-                                took
-                            }),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_1()
-                            .text_color(muted)
-                            .child(attach)
-                            .child(model_control)
-                            .when(caps.permission_prompts, |d| d.child(mode_button))
-                            .child(div().flex_1())
-                            .child(send),
-                    ),
-            )
-            .into_any_element()
+        attach.into_any_element()
     }
+
 }
 
-/// `claude-opus-5-5` as `opus-5-5`; a short name stays.
+/// What the message box does with a paste: images (or image files) are attached, long text
+/// becomes a pill with the text kept aside. True when it took the paste.
+fn take_paste(item: &ClipboardItem, paste_target: &WeakEntity<ChatPanel>, window: &mut Window, cx: &mut App) -> bool {
+    // An image (or image files) on the clipboard: attach it.
+    let mut took = false;
+    for entry in item.entries() {
+        match entry {
+            ClipboardEntry::Image(image) => {
+                let ext = match image.format {
+                    ImageFormat::Jpeg => "jpg",
+                    ImageFormat::Gif => "gif",
+                    ImageFormat::Webp => "webp",
+                    _ => "png",
+                };
+                let bytes = image.bytes.clone();
+                let _ = paste_target.update(cx, |p, cx| p.attach_bytes(&bytes, ext, cx));
+                took = true;
+            }
+            ClipboardEntry::ExternalPaths(paths) => {
+                let paths = paths.paths().to_vec();
+                let _ = paste_target.update(cx, |p, cx| p.attach(paths, cx));
+                took = true;
+            }
+            _ => {}
+        }
+    }
+    // Long text: a token in the box, the text kept aside (the box is being changed now, so
+    // after this).
+    if !took
+        && let Some(text) = item.text().filter(|t| paste::is_long(t))
+    {
+        let target = paste_target.clone();
+        window.defer(cx, move |window, cx| {
+            let _ = target.update(cx, |p, cx| p.paste_long(text, window, cx));
+        });
+        took = true;
+    }
+    took
+}
+
 /// Keep a typed model name among the recent ones, saved.
 pub(super) fn remember_model(name: &str, cx: &mut App) {
     let settings = cx.global::<crate::AppSettings>().0.clone();
@@ -770,6 +808,7 @@ pub(super) fn remember_model(name: &str, cx: &mut App) {
     let _ = settings.borrow().save();
 }
 
+/// `claude-opus-5-5` as `opus-5-5`; a short name stays.
 pub(super) fn short_model(model: &str) -> String {
     model.strip_prefix("claude-").unwrap_or(model).to_string()
 }
