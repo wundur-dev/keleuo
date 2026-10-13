@@ -131,10 +131,21 @@ fn carry_out(request: instance::Request, note: Option<String>, cx: &mut App) {
         let host = cx.background_spawn(async move { SshHost::connect(&dest) }).await;
         cx.update(|cx| match host {
             Ok(host) => show(Arc::new(host), path, new, note, cx),
-            Err(e) => eprintln!("keleuo: could not connect to {ssh}: {e}"),
+            Err(e) => {
+                let message = format!("Could not connect to {ssh}: {e}");
+                eprintln!("keleuo: {message}");
+                tell(message, cx);
+            }
         });
     })
     .detach();
+}
+
+/// A notice in the open window, if there is one.
+fn tell(message: String, cx: &mut App) {
+    if let Some((handle, _)) = cx.global::<control::ControlTargets>().workspace.clone() {
+        let _ = handle.update(cx, |_, window, cx| gpui_kit::component::WindowExt::push_notification(window, message, cx));
+    }
 }
 
 fn show(host: Arc<dyn Host>, path: PathBuf, new: bool, note: Option<String>, cx: &mut App) {

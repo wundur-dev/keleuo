@@ -360,7 +360,7 @@ impl SshHost {
     }
 
     fn control_args(&self) -> Vec<String> {
-        let socket = std::env::temp_dir().join("keleuo-ssh-%C");
+        let socket = control_dir().join("%C");
         vec![
             "-o".into(),
             "ControlMaster=auto".into(),
@@ -408,6 +408,28 @@ impl SshHost {
             ))
         }
     }
+}
+
+/// Where the shared connections' sockets go: a folder of this user's own under /tmp. A socket
+/// path may be at most 104 bytes on macOS, and the user's temp folder (/var/folders/…) plus
+/// the 40-character connection hash and the suffix ssh adds while creating it is longer.
+fn control_dir() -> PathBuf {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+        let uid = unsafe { libc::getuid() };
+        let dir = PathBuf::from(format!("/tmp/keleuo-ssh-{uid}"));
+        let _ = std::fs::DirBuilder::new().mode(0o700).create(&dir);
+        // Someone else's folder by that name: not this user's to keep sockets in.
+        if let Ok(m) = std::fs::symlink_metadata(&dir)
+            && m.is_dir()
+            && m.uid() == uid
+        {
+            let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+            return dir;
+        }
+    }
+    std::env::temp_dir()
 }
 
 /// Quote a string for a POSIX shell.

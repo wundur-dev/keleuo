@@ -16,3 +16,6 @@ ignore = { workspace = true }
 similar = { workspace = true }
 dirs = { workspace = true }
 notify = "8"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
