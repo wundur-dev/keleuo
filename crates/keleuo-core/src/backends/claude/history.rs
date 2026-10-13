@@ -267,6 +267,25 @@ fn line_events(v: &Value, mapper: &mut Mapper) -> Vec<Event> {
             }
         }
         Some("assistant") => mapper.map(stream::parse_value(v)),
+        // Delivered while a turn ran (a message the person sent, another agent's report, a
+        // task's end): recorded as a queued attachment, read as the user line it stands for.
+        Some("attachment") => {
+            let a = v.get("attachment");
+            let prompt = a
+                .filter(|a| a.get("type").and_then(Value::as_str) == Some("queued_command"))
+                .and_then(|a| a.get("prompt"))
+                .and_then(Value::as_str);
+            match prompt {
+                Some(prompt) => {
+                    let mut line = serde_json::json!({"type": "user", "message": {"role": "user", "content": prompt}});
+                    if let Some(origin) = a.and_then(|a| a.get("origin")) {
+                        line["origin"] = origin.clone();
+                    }
+                    line_events(&line, mapper)
+                }
+                None => Vec::new(),
+            }
+        }
         _ => Vec::new(),
     }
 }
@@ -1119,6 +1138,31 @@ mod tests {
         attach_subagent(&mut chat, "toolu_before_the_compaction", &fixture("subagent_transcript.jsonl"));
         assert_eq!(chat.agents.len(), before);
         assert!(chat.agent("toolu_before_the_compaction").is_none());
+    }
+
+    #[test]
+    fn messages_delivered_mid_turn_count_like_the_rest() {
+        // A message the person sent, a subagent's report and its end, while a turn ran: the
+        // interface records them as queued attachments, not user lines.
+        let queued = |prompt: &str, origin: Value| {
+            serde_json::json!({"type": "attachment", "attachment": {"type": "queued_command", "prompt": prompt, "commandMode": "prompt", "origin": origin}})
+        };
+        let launch = serde_json::json!({"type": "assistant", "message": {"id": "m1", "role": "assistant", "content": [
+            {"type": "tool_use", "id": "toolu_ag", "name": "Agent", "input": {"description": "look around", "subagent_type": "general-purpose", "run_in_background": true}}]}});
+        let launched = serde_json::json!({"type": "user", "message": {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "toolu_ag", "content": [{"type": "text", "text": "Async agent launched successfully.\nagentId: a123 (internal ID)"}]}]}});
+        let lines = [
+            launch,
+            launched,
+            queued("also check the docs", serde_json::json!({"kind": "human"})),
+            queued("<agent-message from=\"a123\">\nThe report follows:\n  All good.\n</agent-message>", serde_json::json!({"kind": "human"})),
+            queued("<task-notification>\n<task-id>a123</task-id>\n<tool-use-id>toolu_ag</tool-use-id>\n<status>completed</status>\n</task-notification>", serde_json::json!({"kind": "human"})),
+        ];
+        let text: String = lines.iter().map(|l| l.to_string() + "\n").collect();
+        let chat = load_conversation(&text, "/p");
+        assert!(chat.items.iter().any(|i| matches!(i, Item::User(t) if t == "also check the docs")), "{:?}", chat.items);
+        assert!(chat.items.iter().any(|i| matches!(i, Item::AgentMessage { text, .. } if text.contains("All good"))));
+        assert!(chat.agents.iter().all(|a| !a.running()), "the subagent finished");
     }
 
     #[test]
