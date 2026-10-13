@@ -1,0 +1,58 @@
+#!/bin/sh
+# restart [--no-build]
+#
+# Build the release binary, find the running Keleuo, quit it and start the new build in the
+# same folder with the same arguments. The sessions that were open come back (Keleuo saves
+# them as they change). Safe to run from a terminal inside Keleuo: after the
+# build, quitting and starting again is done by a detached process that outlives the app.
+# Test copies of the debug build are left running. KELEUO_BIN overrides the binary, as in
+# scripts/keleuo.
+
+REPO=$(cd "$(dirname "$0")/.." && pwd)
+TARGET="${CARGO_TARGET_DIR:-$HOME/Library/Caches/workbench-target}"
+BIN="${KELEUO_BIN:-$TARGET/release/keleuo}"
+
+if [ "$1" = "--relaunch" ]; then
+    # The detached half: quit the old app, wait for it, start the new one in `folder` with
+    # `args` (one string, split again here).
+    folder=$2
+    args=$3
+    shift 3
+    for p in "$@"; do kill "$p" 2>/dev/null; done
+    i=0
+    while [ $i -lt 50 ]; do
+        alive=0
+        for p in "$@"; do kill -0 "$p" 2>/dev/null && alive=1; done
+        [ $alive = 0 ] && break
+        sleep 0.2
+        i=$((i + 1))
+    done
+    for p in "$@"; do kill -9 "$p" 2>/dev/null; done
+    cd "$folder" || cd "$HOME" || exit 1
+    # shellcheck disable=SC2086
+    exec "$REPO/scripts/keleuo" $args
+fi
+
+if [ "$1" != "--no-build" ]; then
+    # The external drive's AppleDouble files (._*) break the build.
+    (cd "$REPO" && find . -name '._*' -type f -not -path './target/*' -delete 2>/dev/null)
+    CARGO_TARGET_DIR="$TARGET" cargo build --manifest-path "$REPO/Cargo.toml" -p keleuo-app --release || exit 1
+fi
+
+# The running app: processes of exactly this binary.
+PIDS=$(ps -axo pid=,command= | awk -v bin="$BIN" '{ pid = $1; $1 = ""; sub(/^ /, ""); if ($0 == bin || index($0, bin " ") == 1) print pid }')
+# Where the first one was started, and with what: it starts again the same way.
+FIRST=$(echo "$PIDS" | head -n 1)
+FOLDER=$PWD
+ARGS=
+if [ -n "$FIRST" ]; then
+    FOLDER=$(lsof -a -p "$FIRST" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -n 1)
+    [ -n "$FOLDER" ] || FOLDER=$PWD
+    ARGS=$(ps -o command= -p "$FIRST" | awk -v bin="$BIN" '{ print substr($0, length(bin) + 2) }')
+    echo "Restarting Keleuo in $FOLDER..."
+else
+    echo "Keleuo isn't running; starting it in $FOLDER."
+fi
+# A new session (setsid), so closing the app's terminals cannot take it down.
+# shellcheck disable=SC2086
+nohup perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV' "$REPO/scripts/restart" --relaunch "$FOLDER" "$ARGS" $PIDS >/dev/null 2>&1 &
