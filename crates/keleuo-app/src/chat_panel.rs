@@ -2,7 +2,7 @@
 //! tool calls as collapsible cards, file edits as diffs, permission prompts with Allow and
 //! Deny, and a one-line status in the header. Every file reference is a link.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -82,6 +82,8 @@ pub struct ChatPanel {
     marked_dark: Option<bool>,
     /// The message box's Markdown styles (made the first time there is something to mark).
     md_marks: Option<TextDecorationCollection<TextareaMode>>,
+    /// A syntax highlighter per language named on a code fence in the message box.
+    md_highlighters: HashMap<String, gpui_kit::component::highlighter::SyntaxHighlighter>,
     /// An image shown full size over the chat.
     preview: Option<PathBuf>,
     /// The known failure whose fixes are being offered.
@@ -208,6 +210,7 @@ impl ChatPanel {
             slash_closed: false,
             marked_dark: None,
             md_marks: None,
+            md_highlighters: HashMap::new(),
             preview: None,
             fixing: None,
             fixed: Default::default(),
@@ -2153,7 +2156,7 @@ impl ChatPanel {
         let (muted, code_bg, link) = (theme.muted_foreground, theme.foreground.opacity(0.07), theme.blue);
         self.marked_dark = Some(theme.is_dark());
         let text = self.input.read(cx).value().to_string();
-        let decorations: Vec<TextDecoration> = marks(&text)
+        let mut decorations: Vec<TextDecoration> = marks(&text)
             .into_iter()
             .map(|(range, mark)| {
                 let style = match mark {
@@ -2170,6 +2173,21 @@ impl ChatPanel {
                 TextDecoration::new(range, style)
             })
             .collect();
+        // A fence naming a language (```ts): its code in the code viewer's colours.
+        let highlight_theme = cx.theme().highlight_theme.clone();
+        for (lang, range) in keleuo_core::markdown_marks::fences(&text) {
+            let highlighter = self
+                .md_highlighters
+                .entry(lang.clone())
+                .or_insert_with(|| gpui_kit::component::highlighter::SyntaxHighlighter::new(&lang));
+            let code = gpui_kit::component::input::Rope::from(&text[range.clone()]);
+            highlighter.update(None, &code, None);
+            for (r, style) in highlighter.styles(&(0..code.len()), &*highlight_theme) {
+                if style != HighlightStyle::default() {
+                    decorations.push(TextDecoration::new(range.start + r.start..range.start + r.end, style));
+                }
+            }
+        }
         match &self.md_marks {
             Some(marks) => marks.set(decorations, cx),
             None => self.md_marks = Some(self.input.update(cx, |s, cx| s.create_decorations_collection(decorations, cx))),

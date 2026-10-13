@@ -70,6 +70,30 @@ pub fn marks(text: &str) -> Vec<(Range<usize>, Mark)> {
     out
 }
 
+/// The fenced code blocks of `text` that name a language (```` ```rust ````): the language
+/// and the byte range of the code between the fences (to the end of the text while the
+/// closing fence is not typed yet).
+pub fn fences(text: &str) -> Vec<(String, Range<usize>)> {
+    let mut out = Vec::new();
+    let mut open: Option<(String, usize)> = None;
+    let mut offset = 0;
+    for line in text.split_inclusive('\n') {
+        let start = offset;
+        offset += line.len();
+        let trimmed = line.trim();
+        let Some(rest) = trimmed.strip_prefix("```").or_else(|| trimmed.strip_prefix("~~~")) else { continue };
+        match open.take() {
+            Some((lang, from)) => out.push((lang, from..start)),
+            None => open = Some((rest.split_whitespace().next().unwrap_or("").to_lowercase(), offset)),
+        }
+    }
+    if let Some((lang, from)) = open {
+        out.push((lang, from..text.len()));
+    }
+    out.retain(|(lang, range)| !lang.is_empty() && !range.is_empty());
+    out
+}
+
 /// The length of a list marker at the start of `line` (`- `, `* `, `+ `, `12. `), if any.
 fn list_marker(line: &str) -> Option<usize> {
     if line.starts_with("- ") || line.starts_with("* ") || line.starts_with("+ ") {
@@ -210,6 +234,15 @@ mod tests {
         assert_eq!(named("(https://a.io)"), [("https://a.io", Mark::Link)]);
         // An address keeps its underscores and stars; nothing inside it is italic.
         assert_eq!(named("https://a.io/x_y_z*w*"), [("https://a.io/x_y_z*w*", Mark::Link)]);
+    }
+
+    #[test]
+    fn fenced_blocks_with_a_language() {
+        let text = "a\n```TypeScript\nconst x = 1;\n```\n```\nplain\n```\n~~~py\nprint(1)";
+        let found = fences(text);
+        assert_eq!(found.len(), 2);
+        assert_eq!((found[0].0.as_str(), &text[found[0].1.clone()]), ("typescript", "const x = 1;\n"));
+        assert_eq!((found[1].0.as_str(), &text[found[1].1.clone()]), ("py", "print(1)"));
     }
 
     #[test]
