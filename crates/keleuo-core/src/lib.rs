@@ -14,10 +14,12 @@
 //! - [`tabs`]: automatic and user-given tab names;
 //! - [`links`]: `path:line` references in text, resolved to project files;
 //! - [`symbols`]: a quick definition index for go to definition and outlines;
-//! - [`web`]: what an address typed in the Web panel means.
+//! - [`web`]: what an address typed in the Web panel means;
+//! - [`compose`]: writing a message (lists that continue on Shift+Enter).
 
 pub mod agent;
 pub mod backends;
+pub mod compose;
 pub mod conversation;
 pub mod diff;
 pub mod files;

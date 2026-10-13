@@ -7,7 +7,7 @@ use std::rc::Rc;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use gpui_kit::component::input::{InlineToken, InlineTokenContext, InputContent, InputEvent, Textarea, TextareaState};
+use gpui_kit::component::input::{Enter, InlineToken, InlineTokenContext, InputContent, InputEvent, Textarea, TextareaState};
 
 use crate::agent_session::{Asking, Spend, View};
 use gpui_kit::component::button::{Button, ButtonVariants};
@@ -23,6 +23,7 @@ use keleuo_core::conversation::{
 use keleuo_core::agent::Issue;
 use keleuo_core::diff::{FileDiff, LineKind};
 use keleuo_core::links::{self, FileIndex};
+use keleuo_core::compose::{self, ListBreak};
 use keleuo_core::paste;
 use keleuo_core::conversation::{one_line, to_markdown};
 
@@ -1926,6 +1927,31 @@ impl Focusable for ChatPanel {
 
 /// A paste's token in the message box: a small raised pill (rounded, lit from above, a soft
 /// shadow) with its size.
+/// Shift+Enter on a list line in the message box: the next item's marker on the new line, or
+/// the marker taken away on an item left empty (ending the list). False when it is a plain new
+/// line. Edits only around the cursor, so paste tokens stay tokens and Undo takes it back.
+fn continue_list(input: &Entity<TextareaState>, window: &mut Window, cx: &mut App) -> bool {
+    let (text, selected) = {
+        let input = input.read(cx);
+        (input.value(), input.selected_range())
+    };
+    if !selected.is_empty() {
+        return false;
+    }
+    let cursor = selected.start;
+    let start = text[..cursor].rfind('\n').map_or(0, |i| i + 1);
+    let end = text[cursor..].find('\n').map_or(text.len(), |i| cursor + i);
+    let Some(step) = compose::list_break(&text[start..end], cursor - start) else { return false };
+    input.update(cx, |s, cx| match step {
+        ListBreak::Continue(marker) => s.insert(format!("\n{marker}"), window, cx),
+        ListBreak::End => {
+            s.set_selected_range(start..end, cx);
+            s.replace("", window, cx);
+        }
+    });
+    true
+}
+
 fn paste_pill(token: &InlineTokenContext, _: &mut Window, cx: &mut App) -> AnyElement {
     let theme = cx.theme();
     let base = theme.secondary;
@@ -2373,6 +2399,12 @@ impl ChatPanel {
                     .shadow_md()
                     .drag_over::<ExternalPaths>(move |d, _, _, _| d.border_color(accent))
                     .on_drop(cx.listener(|p, paths: &ExternalPaths, _, cx| p.attach(paths.paths().to_vec(), cx)))
+                    // Shift+Enter on a list item: before the box puts in its plain new line.
+                    .capture_action(cx.listener(|p, action: &Enter, window, cx| {
+                        if action.shift && !action.secondary && continue_list(&p.input, window, cx) {
+                            cx.stop_propagation();
+                        }
+                    }))
                     .when_some(restarting, |d, why| {
                         // Restarting (a new model or mode): what is typed now waits for it.
                         d.child(
@@ -2536,5 +2568,68 @@ mod shell_command_tests {
         assert_eq!(shell_command("ls -la"), None);
         assert_eq!(shell_command("! a\n! b"), None, "several commands: copy them instead");
         assert_eq!(shell_command("!"), None);
+    }
+}
+
+#[cfg(test)]
+mod list_tests {
+    use gpui_kit::component::input::{Enter, Textarea, TextareaState};
+    use gpui_kit::{AppContext, Context, Entity, Focusable, IntoElement, Render, TestAppContext, Window, div, prelude::*};
+
+    use super::continue_list;
+
+    /// A message box wired as the composer is: Shift+Enter caught before the box's own new line.
+    struct Composer(Entity<TextareaState>);
+    impl Render for Composer {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .size_full()
+                .capture_action(cx.listener(|p, action: &Enter, window, cx| {
+                    if action.shift && !action.secondary && continue_list(&p.0, window, cx) {
+                        cx.stop_propagation();
+                    }
+                }))
+                .child(Textarea::new(&self.0))
+        }
+    }
+
+    #[gpui_kit::test]
+    fn shift_enter_continues_and_ends_a_list(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let mut input = None;
+        let handle = cx
+            .update(|cx| {
+                gpui_kit::open_window(Default::default(), cx, |window, cx| {
+                    let state = cx.new(|cx| TextareaState::new(window, cx).submit_on_enter(true));
+                    window.focus(&state.focus_handle(cx), cx);
+                    input = Some(state.clone());
+                    cx.new(|_| Composer(state))
+                })
+                .unwrap()
+                .0
+            });
+        let input = input.unwrap();
+        let value = |cx: &mut TestAppContext| input.read_with(cx, |s, _| s.value().to_string());
+        cx.update_window(handle, |_, window, cx| {
+            input.update(cx, |s, cx| s.set_value("1. milk", window, cx));
+            input.update(cx, |s, cx| s.set_selected_range(7..7, cx));
+        })
+        .unwrap();
+        cx.simulate_keystrokes(handle, "shift-enter");
+        assert_eq!(value(cx), "1. milk\n2. ");
+        cx.simulate_keystrokes(handle, "shift-enter");
+        assert_eq!(value(cx), "1. milk\n");
+        cx.simulate_keystrokes(handle, "shift-enter");
+        assert_eq!(value(cx), "1. milk\n\n", "after the list, a plain new line");
+        // In the middle of an item: the rest goes to the next item.
+        cx.update_window(handle, |_, window, cx| {
+            input.update(cx, |s, cx| s.set_value("- eggs and ham", window, cx));
+            input.update(cx, |s, cx| s.set_selected_range(6..6, cx));
+        })
+        .unwrap();
+        cx.simulate_keystrokes(handle, "shift-enter");
+        assert_eq!(value(cx), "- eggs\n-  and ham");
+        cx.simulate_keystrokes(handle, "cmd-z");
+        assert_eq!(value(cx), "- eggs and ham", "Undo takes the new item back");
     }
 }
