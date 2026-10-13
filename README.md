@@ -41,6 +41,14 @@ ln -s "$PWD/scripts/keleuo" "$HOME/.local/bin/keleuo"   # any folder on your PAT
 Then `keleuo`, `keleuo ~/code/app`, `keleuo --new .` or `keleuo --ssh dev:/srv/app`.
 `KELEUO_BIN` points it at another binary.
 
+### Restarting onto a new build
+
+`scripts/restart` builds the release binary, quits the running Keleuo and starts the new
+build in the same folder with the same arguments; the open sessions come back. It can run
+from a terminal inside Keleuo (the quit-and-start half is detached, so it outlives the app),
+which is what the Run button on a `! ./scripts/restart` block in the chat does. `--no-build`
+restarts without building; debug test copies are left running.
+
 ## Layout and keys
 
     +-----------+----------------------------------------------------------------+
@@ -50,7 +58,7 @@ Then `keleuo`, `keleuo ~/code/app`, `keleuo --new .` or `keleuo --ssh dev:/srv/a
     | ○ session | [Files][Skills]            |                                     |
     |   ...     | [grip] Agent               |                                     |
     |           | (subagents)                |                                     |
-    |           | [Agent][Terminals]         | [Chat][Terminal]                    |
+    |           | [Agent]                    | [Chat][Terminal]                    |
     +-----------+----------------------------+-------------------------------------+
 
 - **Sessions are the top level**, listed down the left. Each is a whole workspace: a folder
@@ -66,7 +74,18 @@ Then `keleuo`, `keleuo ~/code/app`, `keleuo --new .` or `keleuo --ssh dev:/srv/a
   in another terminal since 10:42", Fork here, Take over when it stops), then recent ones
   (Continue); plus "Start a new session here" (Enter) and "New session in a git worktree"
   (Cmd+Enter). A session already open in the window just shows. Folder discovery runs off the
-  UI thread and only for the rows on screen.
+  UI thread and only for the rows on screen. Any folder opens from the system picker (the
+  folder button beside the path, File > Open Folder…, Cmd+O), a path typed or pasted in the
+  filter (`/…` or `~/…`, then Enter), or a folder dropped in from the Finder. Paths show as
+  `~/…`.
+- **Sessions come back.** The open sessions (folder, agent, conversation, number) and the
+  shown one are saved whenever they change, so a restart or a crash loses nothing. On the
+  next start they open again in their order, each dormant: the conversation shows at once
+  from its file and the agent starts only when needed (a message, or its Terminal shown).
+  Closing a session takes it off the list; quitting does not.
+- **Rename a folder** (File > Rename Folder…, or a session's context menu): its sessions
+  close, the folder is renamed, Claude Code's project folder under `~/.claude/projects`
+  (sessions and memory) moves with it, and the same sessions open again in the new place.
 - **Chat and Terminal views** of one session, the tabs along the bottom of the chat. A
   Claude Code session runs the real `claude` interface once, in a pseudo-terminal, for the
   session's whole life. Terminal shows that terminal; Chat draws the same conversation from
@@ -76,6 +95,8 @@ Then `keleuo`, `keleuo ~/code/app`, `keleuo --new .` or `keleuo --ssh dev:/srv/a
   terminal at the same time; whichever answers first counts. Each session remembers its
   view; "New sessions open in" on the strip sets the default. Hidden for backends without a
   terminal interface, and for SSH folders (those run the structured stream, Chat only).
+  A message whose Enter the interface lost (busy starting on a long conversation, say) is
+  seen still sitting in its input box and Enter is pressed again, with a note in the chat.
 - **Cost or context.** On a subscription plan the session shows how full its context is
   ("22% of context", from the last turn's tokens against the model's window); billed per use
   (an API key or token in the environment, a cloud provider, or an `apiKeyHelper` in Claude
@@ -83,7 +104,7 @@ Then `keleuo`, `keleuo ~/code/app`, `keleuo --new .` or `keleuo --ssh dev:/srv/a
   (cost) or Never (context).
 - **Session ids**: the first 8 characters next to each session in the list and the browser;
   the whole id in the tooltip, a click copies it.
-- **New terminals** (Cmd+T, "+" in Terminals) open as a tab next to the agent's tab.
+- **New terminals** (Cmd+T, or the button in the titlebar) open as a tab next to the agent's tab.
 - **Web pages** (File > Open Web Page…): a tab among the files and terminals showing a page in
   the system web view (WKWebView, the Safari engine; no bundled browser). Back, Forward,
   Reload, the address (Enter loads; `3000` or `localhost:3000` is `http://localhost:3000`, a
@@ -93,6 +114,8 @@ Then `keleuo`, `keleuo ~/code/app`, `keleuo --new .` or `keleuo --ssh dev:/srv/a
   menus, tooltips and notifications cannot draw over it (the folder rename dialog and the
   peeking session list hide it meanwhile). Right-click > Inspect Element opens Web Inspector.
   WebKit runs pages in its own processes; the About window counts them under Web pages.
+  An http or https link in the chat, a Markdown preview or a terminal (Cmd+click) opens here;
+  Cmd+click in the chat or a preview hands it to the default browser instead.
 - **A session open elsewhere is never continued here as it is.** It counts as open when a
   `claude` process names it on its command line (`--resume`, `-r`, `--session-id`; found
   wherever that process runs), when a `claude` without one works in the folder (its folder
@@ -115,6 +138,33 @@ Then `keleuo`, `keleuo ~/code/app`, `keleuo --new .` or `keleuo --ssh dev:/srv/a
   hover. The composer floats at the bottom of the column: the text, images to send as
   thumbnails (paste, drop, or the paperclip; click one to see it full size, x to remove), the
   model, the permission mode and a send button that turns into stop while Claude works.
+  The reply streams as it is written: while Claude works, the text is read off its own
+  terminal and shown as a preview, replaced by the formatted reply from the session file
+  when it is done. The thinking line shows how long the turn has run. Copy conversation
+  (Cmd+Opt+C, the chat's ... menu, File menu) copies the whole thread as Markdown.
+- **Long pastes** (10 lines or 1,000 characters) go into the message box as one pill,
+  "Pasted text · 40 lines", where the cursor is: one unit (the cursor steps over it, one
+  Backspace takes it), with a card above the box to show it in the text field or remove it.
+  Sending puts the whole text back in its place. In the chat a paste folds to a line that
+  opens it, Keleuo's own and Claude Code's (its `<pasted_content>` markers), so older
+  conversations fold too.
+- **Run** on a `!` command in the chat (`! git push`): the command, without the `!`, is
+  typed into a terminal of the session's folder and run, so a password or login prompt has
+  somewhere to be answered.
+- **Tool and agent cards.** A running Bash command's card shows its latest output live;
+  running cards spin and show their elapsed time. A subagent's report (or a teammate's
+  message) is a one-line card that opens to the whole report. When a tool call fails in a
+  known, avoidable way (so far: zsh refusing an unquoted `?`, `*` or `[`, as in a URL), its
+  card says so and offers "Fix so it doesn't happen again": a Claude Code hook, a CLAUDE.md
+  line or a shell setting, each saying what it writes where before anything is written.
+  Keleuo never changes or retries the call itself.
+- **Diffs**: a file the session edited can show everything the session changed in it, as one
+  diff (rebuilt by undoing its edits): Open diff on an edit card, the Edited list, or
+  Cmd+click on a path in a terminal.
+- **Files**: the tree follows the folder as it changes (a file made in a terminal shows at
+  once; git-ignored files stay out). New File… and New Folder… from the buttons in the
+  panel's header (at the project root) or a right-click (in that folder): the name is typed
+  in place, `a/b.rs` makes the folders between, and a new file opens.
 - **Model and permission mode** from the composer. A new model restarts Claude Code on the
   same conversation with `--model` between turns (Claude Code's own `/model` would also save
   it as the default for every new session in the person's settings). The permission mode is
@@ -127,8 +177,8 @@ Then `keleuo`, `keleuo ~/code/app`, `keleuo --new .` or `keleuo --ssh dev:/srv/a
   `[Image #N]` on the terminal screen shows that image. Images in history show as
   thumbnails. They are kept in `~/Library/Caches/keleuo/images/<session>` and removed after
   30 days; nothing is uploaded anywhere else.
-- **Light and dark** follow the macOS appearance, live; View > Appearance sets System, Light
-  or Dark (saved as `appearance`). Both carry the round 4 hierarchy; the terminal has a light
+- **Light and dark** follow the macOS appearance, live; the System | Light | Dark buttons in
+  the titlebar (or View > Appearance) set it (saved as `appearance`). Both carry the round 4 hierarchy; the terminal has a light
   palette too and answers programs that ask for its colours (OSC 10/11), so those that adapt
   can. The accent is the icon's periwinkle (#6084E8); crane yellow marks what wants
   attention. Claude Code draws its own interface with its own theme setting, so in the light
@@ -139,7 +189,7 @@ Then `keleuo`, `keleuo ~/code/app`, `keleuo --new .` or `keleuo --ssh dev:/srv/a
   and branch, and "New session in a git worktree..." first shows what it will make ("Copy of
   proj (main) into ../proj-2, branch keleuo/proj-2") with the name editable.
 - **Panel headers and sheet tabs** (after an earlier app): a tool panel (Files, Skills,
-  Terminals, Agent) has a title bar with a grip to drag it by, its title, its actions and
+  Agent) has a title bar with a grip to drag it by, its title, its actions and
   options on hover; tool panels sharing a spot put their tabs along the bottom, the shown one
   joined to the content above with an accent line. Rows carry icons: files by type and coloured
   by language (folders in one warm tone), skills by kind and coloured by source (green
@@ -149,7 +199,11 @@ Then `keleuo`, `keleuo ~/code/app`, `keleuo --new .` or `keleuo --ssh dev:/srv/a
   split (gpui-component's DockArea under a custom renderer, `dock_skin.rs`); "Reset layout"
   restores the default, and the arrangement is saved per folder.
 - **Subagents** run live: a strip on top of the chat while they run, a list in the Agent
-  panel, and a card per subagent in the chat. A session is one conversation: earlier and
+  panel (finished ones folded under Completed), and a card per subagent in the chat. A
+  restored session shows only the subagents of its loaded part (after the last compaction).
+- **About Keleuo** (the app menu): what it is and what it is built with; its memory (the
+  figure Activity Monitor shows, with a chart of the last minute) apart from the agents' own
+  programs and web pages; and the machine. A session is one conversation: earlier and
   running sessions of a folder are found in the session browser (Cmd+N), not inside a session.
 - When the agent in one session edits a file another session in the same folder has open,
   that file shows "also edited by session ...".
@@ -157,6 +211,7 @@ Then `keleuo`, `keleuo ~/code/app`, `keleuo --new .` or `keleuo --ssh dev:/srv/a
 | Keys | What |
 | --- | --- |
 | Cmd+N / Cmd+Shift+W | New session (the browser) / close the session |
+| Cmd+O | Open a folder (the system picker) |
 | Cmd+Shift+B | Fold or unfold the session list |
 | Ctrl+Tab / Ctrl+Shift+Tab | Next / previous session |
 | Cmd+T | New terminal tab |
@@ -169,6 +224,7 @@ Then `keleuo`, `keleuo ~/code/app`, `keleuo --new .` or `keleuo --ssh dev:/srv/a
 | Cmd+click in code | Go to definition (quick symbol index) |
 | Ctrl+- / Ctrl+Shift+- | Back / forward through jumps |
 | Cmd+L | Focus the message box |
+| Cmd+Opt+C | Copy the conversation as Markdown |
 
 Environment: `KELEUO_MODEL=haiku` picks the model; `KELEUO_PERMISSION_MODE=default`
 starts sessions in that permission mode; `KELEUO_PERF=1` prints timings;
@@ -239,8 +295,9 @@ The hooks:
 
 The chat itself comes from the session file under `~/.claude/projects`, read from where the
 last read stopped every 100 ms: messages, tool calls and results, diffs, subagents and token
-counts. The interface writes whole messages, not a stream, so a reply shows when its block is
-done (the status line says what is running meanwhile). The cost is an estimate, marked `~`,
+counts. The interface writes whole messages, not a stream, so the reply being written is read
+off the agent's terminal meanwhile (`backends/claude/screen.rs`) and shown as a preview until
+the finished one arrives. The cost is an estimate, marked `~`,
 from the token counts and the published per-token prices (`backends/claude/pricing.rs`).
 
 The structured route (`claude -p --output-format stream-json --input-format stream-json
@@ -287,17 +344,15 @@ For reading and navigating code in the editor (not for the Claude panel).
 - Editor: no "save changes?" prompt on close; a file changed on disk while it has unsaved
   edits is not reloaded and not flagged.
 - Claude: images in tool results show as `[image]`.
-- Sessions: the open session tabs are not restored after a restart (each folder's dock
-  layout is); worktree sessions are local only; the shared-folder warning covers edits by
+- Sessions: sessions on other machines (SSH) are not restored after a restart; worktree
+  sessions are local only; the shared-folder warning covers edits by
   Claude, not edits typed in another session's editor.
 - Docking: dock tabs cannot be double-clicked to rename (F2 or the tab menu instead). Tabs
   that do not fit scroll rather than shrink; there is no overflow menu.
-- Session list and browser: the list order and the open sessions are not saved; the browser
-  has no remote recent folders and lists folders only (not files). The live dot sees agents
+- Session list and browser: the browser has no remote recent folders and lists folders only (not files). The live dot sees agents
   on this machine only.
-- Claude Code sessions: the cost is an estimate from token counts; text shows a block at a
-  time (the file has no partial messages); a slash command typed in Chat is pasted as text.
-  A permission answered in the terminal shows as allowed in Chat even when it was refused
+- Claude Code sessions: the cost is an estimate from token counts; the streaming preview is
+  plain text until the reply is done. A permission answered in the terminal shows as allowed in Chat even when it was refused
   there.
 - Terminal: no mouse reporting, no kitty keyboard protocol, no IME composition (dead keys
   and CJK input), no cursor blink, fixed colours and font (Menlo 12.5).
