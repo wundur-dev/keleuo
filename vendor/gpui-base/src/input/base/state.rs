@@ -10709,14 +10709,6 @@ impl InputBaseState<crate::input::TextareaMode> {
         Self::new_in_mode(window, cx)
     }
 
-    /// Style ranges of the text (UTF-8 byte offsets): colour, weight, style, background.
-    /// Any edit clears them, so set them again after each change; they never change the
-    /// text, its layout width aside, nor the cursor.
-    pub fn set_text_decorations(&mut self, decorations: Vec<crate::input::TextDecoration>, cx: &mut Context<Self>) {
-        self.extras.decorations = crate::input::decorations::normalize(&self.text, decorations);
-        cx.notify();
-    }
-
     pub fn set_auto_grow(&mut self, min_rows: usize, max_rows: usize, cx: &mut Context<Self>) {
         self.mode = LayoutMode::auto_grow(min_rows, max_rows.max(min_rows));
         cx.notify();

@@ -7,7 +7,7 @@ use std::rc::Rc;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use gpui_kit::component::input::{Enter, Escape, IndentInline, MoveDown, MoveUp, InlineToken, TextDecoration, InlineTokenContext, Input, InputContent, InputEvent, InputState, Textarea, TextareaState};
+use gpui_kit::component::input::{Enter, Escape, IndentInline, MoveDown, MoveUp, InlineToken, TextDecoration, TextDecorationCollection, TextareaMode, InlineTokenContext, Input, InputContent, InputEvent, InputState, Textarea, TextareaState};
 
 use crate::agent_session::{Asking, Spend, View};
 use gpui_kit::component::button::{Button, ButtonVariants};
@@ -80,6 +80,8 @@ pub struct ChatPanel {
     slash_closed: bool,
     /// The theme the message box's Markdown was coloured for (dark or not).
     marked_dark: Option<bool>,
+    /// The message box's Markdown styles (made the first time there is something to mark).
+    md_marks: Option<TextDecorationCollection<TextareaMode>>,
     /// An image shown full size over the chat.
     preview: Option<PathBuf>,
     /// The known failure whose fixes are being offered.
@@ -205,6 +207,7 @@ impl ChatPanel {
             slash_query: String::new(),
             slash_closed: false,
             marked_dark: None,
+            md_marks: None,
             preview: None,
             fixing: None,
             fixed: Default::default(),
@@ -2143,6 +2146,7 @@ impl ChatPanel {
 
     /// Light Markdown in the message box: code on a faint ground, headings and bold in bold,
     /// italic in italic, quotes and Markdown's own characters quieter. The text is unchanged.
+    /// Marked again on every change (the styles follow edits, but what is Markdown can change).
     fn mark_markdown(&mut self, cx: &mut Context<Self>) {
         use keleuo_core::markdown_marks::{Mark, marks};
         let theme = cx.theme();
@@ -2161,7 +2165,10 @@ impl ChatPanel {
                 TextDecoration::new(range, style)
             })
             .collect();
-        self.input.update(cx, |s, cx| s.set_text_decorations(decorations, cx));
+        match &self.md_marks {
+            Some(marks) => marks.set(decorations, cx),
+            None => self.md_marks = Some(self.input.update(cx, |s, cx| s.create_decorations_collection(decorations, cx))),
+        }
     }
 
     /// The `/` list for what is typed: its matches, when the message is a lone `/word` and the
