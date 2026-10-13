@@ -1,0 +1,790 @@
+//! The chat panel: the conversation rendered natively from the agent's events. Assistant text as markdown,
+//! tool calls as collapsible cards, file edits as diffs, permission prompts with Allow and
+//! Deny, and a one-line status in the header. Every file reference is a link.
+
+use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use gpui_kit::component::input::{Enter, Escape, IndentInline, MoveDown, MoveUp, InlineToken, TextDecoration, TextDecorationCollection, TextareaMode, InlineTokenContext, Input, InputContent, InputEvent, InputState, Textarea, TextareaState};
+
+use crate::agent_session::{Asking, Spend, View};
+use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::menu::DropdownMenu;
+use crate::sheet_tabs::{self, Joined, Palette, StripState};
+use gpui_kit::component::text::TextView;
+use gpui_kit::component::{ActiveTheme, Icon, IconName, Sizable};
+use gpui_kit::prelude::*;
+use gpui_kit::*;
+use keleuo_core::conversation::{
+    AgentStatus, Item, PermissionPrompt, SubAgent, ToolCall,
+};
+use keleuo_core::agent::Issue;
+use keleuo_core::diff::{FileDiff, LineKind};
+use keleuo_core::links::{self, FileIndex};
+use keleuo_core::compose::{self, ListBreak};
+use keleuo_core::paste;
+use keleuo_core::conversation::{one_line, to_markdown};
+
+mod agents;
+mod composer;
+mod items;
+mod tools;
+
+use crate::actions::CopyConversation;
+use crate::agent_session::AgentSession;
+
+pub enum ChatPanelEvent {
+    OpenFile(PathBuf, Option<u32>),
+    /// Open the file as a diff of what the session changed in it.
+    OpenDiff(PathBuf),
+    NewSession,
+    /// The session's tab was closed.
+    Closed,
+    /// Its tab became the shown one.
+    Activated,
+    /// Watch a subagent (by its tool call id) in its own docked panel.
+    OpenAgent(String),
+    /// Show a web page in the Web panel.
+    OpenWeb(String),
+    /// Run a shell command in a terminal tab of the session's folder.
+    RunCommand(String),
+    /// Show the Changes panel.
+    ShowChanges,
+}
+
+pub struct ChatPanel {
+    pub session: Entity<AgentSession>,
+    /// The session's number (saved with the layout).
+    pub number: usize,
+    /// Set when this panel watches one subagent (its tool call id): it shows that subagent's
+    /// items instead of the conversation, with no message box.
+    pub agent: Option<String>,
+    focus: FocusHandle,
+    input: Entity<TextareaState>,
+    /// The conversation as a virtual list: only the items on screen (and a margin) are built
+    /// and laid out; it follows the end while the view is at the bottom.
+    list: ListState,
+    /// How many items the list knows of.
+    list_len: usize,
+    /// Earlier parts being read (by their start in the session file).
+    loading: HashSet<u64>,
+    /// Images to send with the next message.
+    attachments: Vec<PathBuf>,
+    /// Long pastes in the message box, shown there as tokens (`[Pasted text #1 · …]`, see
+    /// [`keleuo_core::paste`]); paste `n` is `pastes[n - 1]`.
+    pastes: Vec<String>,
+    /// "Other model…": a field for a model name in place of the model button.
+    model_input: Option<(Entity<InputState>, Subscription)>,
+    /// What a message starting with `/` can name (skills, commands, the agent's own), read
+    /// when the first `/` is typed.
+    slash_choices: Option<Rc<Vec<keleuo_core::slash::Choice>>>,
+    /// The highlighted one in the `/` list, and the query it was for.
+    slash_ix: usize,
+    slash_query: String,
+    /// Escape closed the list for this query.
+    slash_closed: bool,
+    /// The theme the message box's Markdown was coloured for (dark or not).
+    marked_dark: Option<bool>,
+    /// The message box's Markdown styles (made the first time there is something to mark).
+    md_marks: Option<TextDecorationCollection<TextareaMode>>,
+    /// A syntax highlighter per language named on a code fence in the message box.
+    md_highlighters: HashMap<String, gpui_kit::component::highlighter::SyntaxHighlighter>,
+    /// An image shown full size over the chat.
+    preview: Option<PathBuf>,
+    /// The known failure whose fixes are being offered.
+    fixing: Option<Issue>,
+    /// Kinds of failure fixed from this panel (their notices say so).
+    fixed: std::collections::HashSet<String>,
+    /// Tool cards the user opened (or closed, for diffs which start open).
+    toggled: HashSet<String>,
+    pub index: Arc<FileIndex>,
+    last_revision: u64,
+    /// Redraws once a second while subagents or tool calls run (their elapsed time).
+    ticker: Option<Task<()>>,
+    /// When the agent became busy with the current turn (for the time on the thinking line).
+    busy_since: Option<std::time::Instant>,
+    /// The step the spinners are at: the ticker moves it on while something runs.
+    phase: u32,
+    /// The Chat and Terminal view tabs.
+    views: Rc<StripState>,
+    _subs: Vec<Subscription>,
+}
+
+/// How far beyond the visible area the list builds items, so scrolling shows them at once.
+const OVERDRAW: f32 = 600.;
+/// Items at the end measured again on every change (text streaming in, a result arriving).
+const TAIL: usize = 4;
+
+impl EventEmitter<ChatPanelEvent> for ChatPanel {}
+
+const MONO: &str = "Menlo";
+/// How often the chat redraws while something runs: the spinners' step and the clocks.
+/// Ten a second reads as motion; continuous animation would redraw every frame.
+const TICK: std::time::Duration = std::time::Duration::from_millis(100);
+/// Steps in a spinner's turn (one turn a little over a second at the tick above).
+const SPINNER_STEPS: u32 = 12;
+/// Space below the Chat / Terminal tabs, before the window's bottom edge.
+const VIEW_STRIP_GAP_BELOW: f32 = 6.;
+
+impl ChatPanel {
+    pub fn new(
+        session: Entity<AgentSession>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let placeholder = format!(
+            "Message {} (Enter sends, Shift+Enter new line)",
+            session.read(cx).backend.name()
+        );
+        let input = cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .auto_grow(1, 10)
+                .placeholder(placeholder)
+                .submit_on_enter(true)
+        });
+        let s1 = cx.subscribe_in(
+            &input,
+            window,
+            |panel, _, ev: &InputEvent, window, cx| {
+                match ev {
+                    InputEvent::PressEnter { shift: false, .. } => panel.send_composed(window, cx),
+                    // Any edit clears the box's styles: mark the Markdown again.
+                    InputEvent::Change => panel.mark_markdown(cx),
+                    _ => {}
+                }
+            },
+        );
+        let s2 = cx.observe(&session, |panel, session, cx| {
+            match (session.read(cx).chat.busy, panel.busy_since) {
+                (true, None) => panel.busy_since = Some(std::time::Instant::now()),
+                (false, Some(_)) => panel.busy_since = None,
+                _ => {}
+            }
+            let rev = session.read(cx).chat.revision;
+            if rev != panel.last_revision {
+                panel.last_revision = rev;
+                let len = panel.item_count(cx);
+                panel.sync_list(len);
+                let running = clocks_running(&session.read(cx).chat);
+                if running && panel.ticker.is_none() {
+                    panel.ticker = Some(cx.spawn(
+                        async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+                            loop {
+                                cx.background_executor().timer(TICK).await;
+                                let alive = this.update(cx, |p, cx| {
+                                    let still = clocks_running(&p.session.read(cx).chat);
+                                    p.phase = p.phase.wrapping_add(1);
+                                    cx.notify();
+                                    if !still {
+                                        p.ticker = None;
+                                    }
+                                    still
+                                });
+                                if !matches!(alive, Ok(true)) {
+                                    break;
+                                }
+                            }
+                        },
+                    ));
+                }
+            }
+            // The view (Chat or Terminal) may have changed too.
+            cx.notify();
+        });
+        Self {
+            session,
+            number: 0,
+            agent: None,
+            focus: cx.focus_handle(),
+            input,
+            list: {
+                let list = ListState::new(0, ListAlignment::Top, px(OVERDRAW));
+                list.set_follow_mode(FollowMode::Tail);
+                list
+            },
+            list_len: 0,
+            loading: HashSet::new(),
+            attachments: Vec::new(),
+            pastes: Vec::new(),
+            model_input: None,
+            slash_choices: None,
+            slash_ix: 0,
+            slash_query: String::new(),
+            slash_closed: false,
+            marked_dark: None,
+            md_marks: None,
+            md_highlighters: HashMap::new(),
+            preview: None,
+            fixing: None,
+            fixed: Default::default(),
+            toggled: HashSet::new(),
+            index: Arc::new(FileIndex::default()),
+            last_revision: 0,
+            busy_since: None,
+            phase: 0,
+            ticker: None,
+            views: Rc::new(StripState::default()),
+            _subs: vec![s1, s2],
+        }
+    }
+
+    /// A panel that watches one subagent of the session.
+    pub fn new_for_agent(session: Entity<AgentSession>, tool_use_id: String, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let mut panel = Self::new(session, window, cx);
+        panel.agent = Some(tool_use_id);
+        panel
+    }
+
+    /// The items shown: the conversation, or the watched subagent's.
+    fn item_count(&self, cx: &App) -> usize {
+        let chat = &self.session.read(cx).chat;
+        match &self.agent {
+            Some(id) => chat.agent(id).map_or(0, |a| a.items.len()),
+            None => chat.items.len(),
+        }
+    }
+
+    fn item_at(&self, ix: usize, cx: &App) -> Option<Item> {
+        let chat = &self.session.read(cx).chat;
+        match &self.agent {
+            Some(id) => chat.agent(id)?.items.get(ix).cloned(),
+            None => chat.items.get(ix).cloned(),
+        }
+    }
+
+    /// A spinner at the panel's step: turned by the ticker, a few steps a second, rather
+    /// than animated every frame (an animation redraws the whole chat on every frame).
+    fn spinner(&self, color: Hsla) -> Icon {
+        let turn = (self.phase % SPINNER_STEPS) as f32 / SPINNER_STEPS as f32;
+        Icon::new(IconName::LoaderCircle).text_color(color).transform(Transformation::rotate(percentage(turn)))
+    }
+
+    /// Tests: scroll by `dy` pixels (down is positive). Every item is reachable already.
+    pub fn test_command(&mut self, cmd: &str, dy: f32, cx: &mut Context<Self>) {
+        match cmd {
+            "scroll" => self.list.scroll_by(px(dy)),
+            "top" => self.list.scroll_to(ListOffset { item_ix: 0, offset_in_item: px(0.) }),
+            _ => {}
+        }
+        cx.notify();
+    }
+
+    /// Tell the list what changed: new items at the end, and the last few measured again
+    /// (they may have grown). A shorter conversation (reloaded) starts over.
+    fn sync_list(&mut self, len: usize) {
+        if len < self.list_len {
+            self.list.reset(len);
+        } else {
+            let from = self.list_len.saturating_sub(TAIL);
+            self.list.splice(from..self.list_len, len - from);
+        }
+        self.list_len = len;
+    }
+
+    /// An earlier part came into view: read it off the UI thread, then put its items in its
+    /// place, keeping the view where it was (on the part's last item).
+    fn load_earlier(&mut self, from: u64, to: u64, cx: &mut Context<Self>) {
+        // One part at a time: placeholders are one line each, so at the very top several are
+        // in view together, but only the one the person reaches should be read.
+        if !self.loading.is_empty() {
+            return;
+        }
+        self.loading.insert(from);
+        let Some(load) = self.session.read(cx).earlier_loader() else { return };
+        cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let started = std::time::Instant::now();
+            let items = cx.background_spawn(async move { load(from, to) }).await;
+            let _ = this.update(cx, |p, cx| {
+                p.loading.remove(&from);
+                let Ok(items) = items else { return };
+                if crate::perf::enabled() {
+                    eprintln!("keleuo: earlier part ({} items) read in {:.0} ms", items.len(), started.elapsed().as_secs_f64() * 1000.0);
+                }
+                let at = p.session.read(cx).chat.items.iter().position(|i| matches!(i, Item::Earlier { from: f, .. } if *f == from));
+                let Some(ix) = at else { return };
+                let n = items.len();
+                let rev = p.session.update(cx, |s, _| {
+                    s.chat.items.splice(ix..ix + 1, items);
+                    s.chat.revision += 1;
+                    s.chat.revision
+                });
+                let top = p.list.logical_scroll_top();
+                p.list.splice(ix..ix + 1, n);
+                p.list_len = p.list_len + n - 1;
+                // Reached by scrolling up: carry on from its newest item. Jumped to the very top:
+                // stay at its start.
+                if top.item_ix == ix && ix > 0 && n > 0 {
+                    p.list.scroll_to(ListOffset { item_ix: ix + n - 1, offset_in_item: px(0.) });
+                }
+                p.last_revision = rev;
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// The whole conversation (or the watched subagent's) on the clipboard as Markdown. Parts
+    /// not read yet are read first, off the UI thread, for the copy only: the chat stays as it is.
+    pub fn copy_conversation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let session = self.session.read(cx);
+        let name = session.backend.name();
+        let items = match &self.agent {
+            Some(id) => session.chat.agent(id).map(|a| a.items.clone()).unwrap_or_default(),
+            None => session.chat.items.clone(),
+        };
+        let parts: Vec<_> = items
+            .iter()
+            .enumerate()
+            .filter_map(|(ix, i)| match i {
+                Item::Earlier { from, to, .. } => session.earlier_loader().map(|load| (ix, *from, *to, load)),
+                _ => None,
+            })
+            .collect();
+        cx.spawn_in(window, async move |_, cx| {
+            let read = cx
+                .background_spawn(async move {
+                    parts.into_iter().map(|(ix, from, to, load)| (ix, load(from, to))).collect::<Vec<_>>()
+                })
+                .await;
+            let mut items = items;
+            // From the end, so the places before stay put. A part that could not be read stays a
+            // placeholder line.
+            for (ix, part) in read.into_iter().rev() {
+                if let Ok(part) = part {
+                    items.splice(ix..ix + 1, part);
+                }
+            }
+            let text = to_markdown(&items, name);
+            let _ = cx.update(|window, cx| {
+                cx.write_to_clipboard(ClipboardItem::new_string(text));
+                gpui_kit::component::WindowExt::push_notification(window, "Conversation copied as Markdown", cx);
+            });
+        })
+        .detach();
+    }
+
+    /// One item of the conversation, for the list.
+    fn render_entry(&mut self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
+        let item = self.item_at(ix, cx);
+        let Some(item) = item else { return div().into_any_element() };
+        if let Item::Earlier { from, to, .. } = item {
+            // In view (or about to be): read it.
+            self.load_earlier(from, to, cx);
+        }
+        let last = ix + 1 == self.list_len;
+        // A centred column of comfortable width, the page behind it.
+        div()
+            .w_full()
+            .flex()
+            .justify_center()
+            .px_4()
+            .pt_3()
+            .when(last, |d| d.pb_4())
+            .child(
+                div()
+                    .w_full()
+                    .max_w(px(COLUMN))
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .children(match self.preview_text(ix, &item, cx) {
+                        Some(text) => vec![self.render_preview(text, cx)],
+                        None => self.render_items(std::slice::from_ref(&item), &format!("main{ix}"), cx),
+                    }),
+            )
+            .into_any_element()
+    }
+
+    pub fn focus_input(&self, window: &mut Window, cx: &mut App) {
+        self.input.update(cx, |s, cx| s.focus(window, cx));
+    }
+
+    fn open(&self, path: PathBuf, line: Option<u32>, cx: &mut Context<Self>) {
+        cx.emit(ChatPanelEvent::OpenFile(path, line));
+    }
+
+    fn render_header(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let (muted, hover, border) = (theme.muted_foreground, theme.secondary_hover, theme.border);
+        let session = self.session.read(cx);
+        let chat = &session.chat;
+        let model = chat
+            .model
+            .clone()
+            .or_else(|| session.model.clone())
+            .unwrap_or_else(|| "default model".into());
+        let mut status = vec![model];
+        if let Some(s) = &chat.status {
+            status.push(s.clone());
+        }
+        // Cost when billed per use (or the setting says so), else how full the context is.
+        let setting = cx.global::<crate::AppSettings>().0.borrow().cost_display.clone();
+        let (spend, spend_tip) = match session.spend(cx) {
+            Some(Spend::Cost { total, turn, estimated }) => {
+                // "~": worked out from token counts and published prices.
+                let est = if estimated { "~" } else { "" };
+                let turn = turn.map(|c| format!("turn {est}${c:.4} · ")).unwrap_or_default();
+                let tokens = chat.last_turn_tokens.map(|(i, o)| format!(" · {}k in / {o} out", i / 1000)).unwrap_or_default();
+                (
+                    Some(format!("{turn}total {est}${total:.4}{tokens}")),
+                    if estimated { "Estimated from token counts and published per-token prices" } else { "As the agent reported it" },
+                )
+            }
+            Some(Spend::Context { percent, tokens, window }) => (
+                Some(format!("{percent}% of context")),
+                if tokens > 0 && window > 0 { "Tokens the last turn sent, against the model's context window" } else { "" },
+            ),
+            None => (None, ""),
+        };
+        let spend_tip = format!(
+            "{spend_tip}. Cost shows: {}. Click to change.",
+            match setting.as_str() {
+                "always" => "always",
+                "never" => "never (context instead)",
+                _ => "auto (only when billed per use)",
+            }
+        );
+        let backend_name = session.backend.name();
+        let weak = cx.entity().downgrade();
+        div()
+            .h(px(22.))
+            .flex_none()
+            .px_1()
+            .flex()
+            .items_center()
+            .gap_1()
+            .text_size(px(11.))
+            .text_color(muted)
+            .border_b_1()
+            .border_color(border)
+            .child(Icon::new(IconName::Bot).xsmall())
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .child(status.join(" · ")),
+            )
+            .when_some(spend, |d, spend| {
+                d.child(
+                    div()
+                        .id("spend")
+                        .flex_none()
+                        .px_1()
+                        .rounded_sm()
+                        .cursor_pointer()
+                        .hover(|d| d.bg(hover))
+                        .child(spend)
+                        .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(spend_tip.clone()).build(w, cx))
+                        .on_click(|_, window, cx| {
+                            // Auto, then always, then never.
+                            let settings = cx.global::<crate::AppSettings>().0.clone();
+                            let next = match settings.borrow().cost_display.as_str() {
+                                "always" => "never",
+                                "never" => "auto",
+                                _ => "always",
+                            };
+                            settings.borrow_mut().cost_display = next.into();
+                            let _ = settings.borrow().save();
+                            window.refresh();
+                        }),
+                )
+            })
+            .child(
+                div()
+                    .id("new-chat")
+                    .px_1()
+                    .rounded_sm()
+                    .cursor_pointer()
+                    .hover(|d| d.bg(hover))
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .child(Icon::new(IconName::Plus).xsmall())
+                    .child("New session")
+                    .tooltip(move |w, cx| {
+                        gpui_kit::component::tooltip::Tooltip::new(format!("New {backend_name} session (Cmd+N)"))
+                            .build(w, cx)
+                    })
+                    .on_click(cx.listener(|_, _, _, cx| cx.emit(ChatPanelEvent::NewSession))),
+            )
+            .child(
+                Button::new("chat-options")
+                    .icon(IconName::Ellipsis)
+                    .xsmall()
+                    .ghost()
+                    .tab_stop(false)
+                    .dropdown_menu(move |menu, _, _| {
+                        let weak = weak.clone();
+                        menu.item(
+                            gpui_kit::component::menu::PopupMenuItem::new("Copy conversation (Cmd+Alt+C)").on_click(
+                                move |_, window, cx| {
+                                    let _ = weak.update(cx, |p, cx| p.copy_conversation(window, cx));
+                                },
+                            ),
+                        )
+                    }),
+            )
+            .into_any_element()
+    }
+}
+
+impl ChatPanel {
+    /// The Chat and Terminal tabs along the bottom, for backends with a terminal interface.
+    fn render_views(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let session = self.session.read(cx);
+        if !session.backend.capabilities().terminal_view {
+            return None;
+        }
+        let theme = cx.theme();
+        let ground = theme.sidebar;
+        let content = theme.background;
+        let palette = Palette::new(ground, theme.foreground, content, theme.foreground, theme.border, theme.ring);
+        let shown = match session.view {
+            View::Chat => 0,
+            View::Terminal => 1,
+        };
+        let default_terminal = cx.global::<crate::AppSettings>().0.borrow().view_for(None) == "terminal";
+        let muted = theme.muted_foreground;
+        let weak = self.session.downgrade();
+        let input = self.input.clone();
+        let strip = sheet_tabs::simple_strip(
+            &self.views,
+            "session-view",
+            &["Chat".into(), "Terminal".into()],
+            shown,
+            Joined::Top,
+            palette,
+            24.,
+            Rc::new(move |ix, window, cx| {
+                let view = if ix == 0 { View::Chat } else { View::Terminal };
+                let _ = weak.update(cx, |s, cx| s.set_view(view, cx));
+                // Typing goes where the view is: the terminal, or the message box.
+                let term = weak.upgrade().and_then(|s| s.read(cx).terminal_view());
+                match (view, term) {
+                    (View::Terminal, Some(t)) => {
+                        let f = t.read(cx).focus.clone();
+                        window.focus(&f, cx)
+                    }
+                    _ => input.update(cx, |i, cx| i.focus(window, cx)),
+                }
+            }),
+        );
+        // Some room below the tabs, so they don't sit on the window's bottom edge.
+        Some(
+            div().flex_none().bg(ground).pb(px(VIEW_STRIP_GAP_BELOW)).child(
+            strip
+                .child(
+                    div()
+                        .id("default-view")
+                        .px_2()
+                        .text_size(px(10.5))
+                        .text_color(muted)
+                        .cursor_pointer()
+                        .hover(|d| d.text_color(theme.foreground))
+                        .child(if default_terminal { "New sessions open in Terminal" } else { "New sessions open in Chat" })
+                        .tooltip(|w, cx| {
+                            gpui_kit::component::tooltip::Tooltip::new("Click to change which view new sessions open in").build(w, cx)
+                        })
+                        .on_click(move |_, window, cx| {
+                            let settings = cx.global::<crate::AppSettings>().0.clone();
+                            let next = if default_terminal { "chat" } else { "terminal" };
+                            settings.borrow_mut().default_view = next.into();
+                            let _ = settings.borrow().save();
+                            window.refresh();
+                        }),
+                ),
+            )
+            .into_any_element(),
+        )
+    }
+
+    /// In the terminal view, the files the agent changed this session, as links to their diffs.
+    fn render_edits(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let chat = &self.session.read(cx).chat;
+        let mut seen: Vec<(PathBuf, usize, usize)> = Vec::new();
+        for item in chat.items.iter().rev() {
+            if let Item::Tool(t) = item
+                && let Some(d) = &t.diff
+                && t.done()
+                && !t.is_error
+                && !seen.iter().any(|(p, ..)| *p == d.path)
+            {
+                seen.push((d.path.clone(), d.added(), d.removed()));
+            }
+            if seen.len() >= 6 {
+                break;
+            }
+        }
+        if seen.is_empty() {
+            return None;
+        }
+        let theme = cx.theme();
+        let (muted, link, green, red, border) = (theme.muted_foreground, theme.blue, theme.green, theme.red, theme.border);
+        let root = PathBuf::from(&chat.cwd);
+        let mut row = div()
+            .flex_none()
+            .h(px(22.))
+            .px_2()
+            .flex()
+            .items_center()
+            .gap_3()
+            .border_t_1()
+            .border_color(border)
+            .text_size(px(11.))
+            .text_color(muted)
+            .child("Edited:");
+        for (i, (path, added, removed)) in seen.into_iter().enumerate() {
+            let name = path.strip_prefix(&root).unwrap_or(&path).display().to_string();
+            row = row.child(
+                div()
+                    .id(("edited", i))
+                    .flex()
+                    .gap_1()
+                    .cursor_pointer()
+                    .child(div().text_color(link).child(name))
+                    .child(div().text_color(green).child(format!("+{added}")))
+                    .child(div().text_color(red).child(format!("-{removed}")))
+                    .on_click(cx.listener(move |_, _, _, cx| cx.emit(ChatPanelEvent::OpenDiff(path.clone())))),
+            );
+        }
+        Some(row.into_any_element())
+    }
+}
+
+impl Focusable for ChatPanel {
+    fn focus_handle(&self, _: &App) -> FocusHandle {
+        self.focus.clone()
+    }
+}
+
+impl Render for ChatPanel {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(id) = self.agent.clone() {
+            return self.render_agent_view(&id, cx);
+        }
+        // Light and dark changed: the Markdown colours follow.
+        let dark = cx.theme().is_dark();
+        if self.marked_dark != Some(dark) {
+            self.mark_markdown(cx);
+        }
+        let started = std::time::Instant::now();
+        if crate::perf::enabled() {
+            // Build, layout and paint: from here to the frame being on screen.
+            window.on_next_frame(move |_, _| crate::perf::record("chat frame (render to frame)", started.elapsed()));
+        }
+        let theme = cx.theme();
+        let (fg, muted, red, user_bg, _border) = (
+            theme.foreground,
+            theme.muted_foreground,
+            theme.red,
+            theme.secondary,
+            theme.border,
+        );
+        let backend_name = self.session.read(cx).backend.name();
+        let len = self.item_count(cx);
+        if self.list_len != len {
+            self.sync_list(len);
+        }
+        let empty = self.list_len == 0;
+        let _ = (fg, red, user_bg);
+        let terminal = {
+            let s = self.session.read(cx);
+            (s.view == View::Terminal).then(|| s.terminal_view()).flatten()
+        };
+        crate::perf::record("chat build (elements)", started.elapsed());
+        crate::perf::switch_shown(window);
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .bg(cx.theme().background)
+            .track_focus(&self.focus)
+            .on_action(cx.listener(|p, _: &CopyConversation, window, cx| p.copy_conversation(window, cx)))
+            .child(self.render_header(cx))
+            .children(self.render_agent_strip(cx))
+            .when_some(terminal.clone(), |d, term| {
+                d.child(div().flex_1().min_h_0().relative().child(term))
+                    .children(self.render_edits(cx))
+            })
+            .when(terminal.is_none(), |d| d.child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .when(empty, |d| d.p_2().child(
+                        div()
+                            .text_xs()
+                            .text_color(muted)
+                            .child(format!("{backend_name} runs in this folder. Ask for something; tool calls, diffs and permission prompts show here.")),
+                    ))
+                    .when(!empty, |d| d.child(
+                        list(self.list.clone(), cx.processor(|this, ix, _window, cx| this.render_entry(ix, cx)))
+                            .size_full(),
+                    )),
+            )
+            .children(self.render_asking(cx))
+            .children(self.render_thinking(cx))
+            .child({
+                let slash = self.render_slash(cx);
+                self.render_composer(slash, window, cx)
+            }))
+            .children(self.render_views(cx))
+            .children(self.render_fix(cx))
+            .children(self.preview.clone().map(|path| {
+                div()
+                    .id("image-preview")
+                    .absolute()
+                    .inset_0()
+                    .bg(gpui_kit::black().opacity(0.8))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .p_6()
+                    .cursor_pointer()
+                    .child(img(path).max_w_full().max_h_full().object_fit(ObjectFit::Contain))
+                    .on_click(cx.listener(|p, _, _, cx| {
+                        p.preview = None;
+                        cx.notify();
+                    }))
+            }))
+            .relative()
+    }
+}
+
+/// The column's widest.
+const COLUMN: f32 = 760.;
+
+/// Something with a live clock runs: a subagent or a tool call.
+fn clocks_running(chat: &keleuo_core::conversation::Conversation) -> bool {
+    chat.busy || chat.running_agents().next().is_some() || chat.running_tools().next().is_some()
+}
+
+/// `42s`, `3m 05s`, `2h 05m 09s`, `1d 3h 05m 09s`.
+fn format_elapsed(d: std::time::Duration) -> String {
+    let s = d.as_secs();
+    let (days, h, m, sec) = (s / 86_400, s / 3600 % 24, s / 60 % 60, s % 60);
+    match (days, h, m) {
+        (0, 0, 0) => format!("{sec}s"),
+        (0, 0, _) => format!("{m}m {sec:02}s"),
+        (0, _, _) => format!("{h}h {m:02}m {sec:02}s"),
+        _ => format!("{days}d {h}h {m:02}m {sec:02}s"),
+    }
+}
+
+#[cfg(test)]
+mod elapsed_tests {
+    use super::format_elapsed;
+    use std::time::Duration;
+
+    #[test]
+    fn reads_from_seconds_to_days() {
+        let t = |s| format_elapsed(Duration::from_secs(s));
+        assert_eq!(t(42), "42s");
+        assert_eq!(t(185), "3m 05s");
+        assert_eq!(t(2 * 3600 + 5 * 60 + 9), "2h 05m 09s");
+        assert_eq!(t(86_400 + 3 * 3600 + 5 * 60 + 9), "1d 3h 05m 09s");
+    }
+}
+
