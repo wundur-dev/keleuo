@@ -15,6 +15,8 @@ pub enum Mark {
     Italic,
     /// A `>` quote's text.
     Quote,
+    /// A link's text (`[text](url)`), or a bare web address.
+    Link,
     /// Markdown's own characters: `**`, backticks, `#`, list markers, `>`.
     Syntax,
 }
@@ -82,6 +84,29 @@ fn inline(line: &str, at: usize, out: &mut Vec<(Range<usize>, Mark)>) {
     let b = line.as_bytes();
     let mut i = 0;
     while i < b.len() {
+        // [text](url): the text as a link, the brackets and address quieter
+        if b[i] == b'['
+            && let Some(close) = line[i + 1..].find("](").map(|e| i + 1 + e)
+            && close > i + 1
+            && let Some(end) = line[close + 2..].find(')').map(|e| close + 2 + e)
+            && !line[close + 2..end].contains(char::is_whitespace)
+        {
+            out.push((at + i..at + i + 1, Mark::Syntax));
+            out.push((at + i + 1..at + close, Mark::Link));
+            out.push((at + close..at + end + 1, Mark::Syntax));
+            i = end + 1;
+            continue;
+        }
+        // A bare address, starting a word; trailing punctuation is the sentence's.
+        if (i == 0 || !b[i - 1].is_ascii_alphanumeric())
+            && (line[i..].starts_with("https://") || line[i..].starts_with("http://"))
+        {
+            let len = line[i..].find(|c: char| c.is_whitespace() || c == '>').unwrap_or(line.len() - i);
+            let url = line[i..i + len].trim_end_matches(['.', ',', ';', ':', '!', '?', ')', '"', '\'']);
+            out.push((at + i..at + i + url.len(), Mark::Link));
+            i += url.len().max(1);
+            continue;
+        }
         // `code`
         if b[i] == b'`'
             && let Some(end) = line[i + 1..].find('`').map(|e| i + 1 + e)
@@ -169,6 +194,22 @@ mod tests {
                 ("```", Mark::Syntax),
             ]
         );
+    }
+
+    #[test]
+    fn links_and_bare_addresses() {
+        assert_eq!(
+            named("see [the docs](https://x.dev/a_b) and https://example.com/p?q=1."),
+            [
+                ("[", Mark::Syntax),
+                ("the docs", Mark::Link),
+                ("](https://x.dev/a_b)", Mark::Syntax),
+                ("https://example.com/p?q=1", Mark::Link),
+            ]
+        );
+        assert_eq!(named("(https://a.io)"), [("https://a.io", Mark::Link)]);
+        // An address keeps its underscores and stars; nothing inside it is italic.
+        assert_eq!(named("https://a.io/x_y_z*w*"), [("https://a.io/x_y_z*w*", Mark::Link)]);
     }
 
     #[test]

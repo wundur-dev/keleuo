@@ -2150,7 +2150,7 @@ impl ChatPanel {
     fn mark_markdown(&mut self, cx: &mut Context<Self>) {
         use keleuo_core::markdown_marks::{Mark, marks};
         let theme = cx.theme();
-        let (muted, code_bg) = (theme.muted_foreground, theme.foreground.opacity(0.07));
+        let (muted, code_bg, link) = (theme.muted_foreground, theme.foreground.opacity(0.07), theme.blue);
         self.marked_dark = Some(theme.is_dark());
         let text = self.input.read(cx).value().to_string();
         let decorations: Vec<TextDecoration> = marks(&text)
@@ -2161,6 +2161,11 @@ impl ChatPanel {
                     Mark::Heading | Mark::Bold => HighlightStyle { font_weight: Some(FontWeight::BOLD), ..Default::default() },
                     Mark::Italic => HighlightStyle { font_style: Some(FontStyle::Italic), ..Default::default() },
                     Mark::Quote | Mark::Syntax => HighlightStyle { color: Some(muted), ..Default::default() },
+                    Mark::Link => HighlightStyle {
+                        color: Some(link),
+                        underline: Some(UnderlineStyle { thickness: px(1.), color: Some(link.opacity(0.5)), wavy: false }),
+                        ..Default::default()
+                    },
                 };
                 TextDecoration::new(range, style)
             })
