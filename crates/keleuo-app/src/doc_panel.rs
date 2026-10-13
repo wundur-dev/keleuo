@@ -512,11 +512,12 @@ impl DocPanel {
     /// The whole file with the session's changes marked, one row per line.
     fn render_diff(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
-        let (fg, muted, green, red) = (
+        let (fg, muted, green, red, page) = (
             theme.foreground,
             theme.muted_foreground,
             theme.green,
             theme.red,
+            theme.background,
         );
         let font = theme.mono_font_family.clone();
         let Some(view) = &self.diff else {
@@ -543,8 +544,15 @@ impl DocPanel {
             .unwrap_or(1);
         // Room for the longest line number in each column.
         let number_w = px(8. + 7. * last.to_string().len() as f32);
+        // The list is as wide as its widest row, measured from the longest line, and scrolls
+        // sideways.
+        let longest = rows.iter().enumerate().max_by_key(|(_, r)| r.text.chars().count() + r.text.matches('\t').count() * 3).map(|(i, _)| i);
+        let gutter_w = number_w * 2. + px(16.);
         let id = cx.entity().entity_id().as_u64() as usize;
+        let scroll = view.scroll.clone();
         uniform_list(("diff", id), rows.len(), move |range, _window, _cx| {
+            // The line numbers stay put while the text scrolls sideways under them.
+            let pin = -scroll.0.borrow().base_handle.offset().x;
             range
                 .map(|ix| {
                     let row = &rows[ix];
@@ -562,27 +570,44 @@ impl DocPanel {
                             .text_color(muted.opacity(0.7))
                             .child(n.map(|n| n.to_string()).unwrap_or_default())
                     };
+                    let gutter = div()
+                        .absolute()
+                        .top_0()
+                        .left(pin)
+                        .h_full()
+                        .w(gutter_w)
+                        .bg(page)
+                        .child(
+                            div()
+                                .size_full()
+                                .flex()
+                                .items_center()
+                                .bg(bg)
+                                .child(number(row.old))
+                                .child(number(row.new))
+                                .child(
+                                    div()
+                                        .w(px(16.))
+                                        .flex_none()
+                                        .text_center()
+                                        .text_color(sign_fg)
+                                        .child(sign),
+                                ),
+                        );
+                    // At least the visible width, so a change's colour reaches the edge.
                     div()
+                        .relative()
                         .h(px(18.))
+                        .min_w_full()
                         .flex()
                         .items_center()
                         .bg(bg)
-                        .child(number(row.old))
-                        .child(number(row.new))
+                        .child(div().w(gutter_w).flex_none())
                         .child(
                             div()
-                                .w(px(16.))
                                 .flex_none()
-                                .text_center()
-                                .text_color(sign_fg)
-                                .child(sign),
-                        )
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
+                                .pr_4()
                                 .whitespace_nowrap()
-                                .overflow_hidden()
                                 .text_color(if row.kind == LineKind::Context {
                                     fg
                                 } else {
@@ -590,9 +615,12 @@ impl DocPanel {
                                 })
                                 .child(row.text.replace('\t', "    ")),
                         )
+                        .child(gutter)
                 })
                 .collect()
         })
+        .with_horizontal_sizing_behavior(ListHorizontalSizingBehavior::Unconstrained)
+        .with_width_from_item(longest)
         .track_scroll(&view.scroll)
         .size_full()
         .font_family(font)
