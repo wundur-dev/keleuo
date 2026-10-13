@@ -5,7 +5,7 @@
 //! A file the agent changed this session can also show as a diff: the whole file now, with the
 //! lines the session added and removed marked (read-only, switched from the header).
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -549,8 +549,9 @@ impl DocPanel {
         let longest = rows.iter().enumerate().max_by_key(|(_, r)| r.text.chars().count() + r.text.matches('\t').count() * 3).map(|(i, _)| i);
         let gutter_w = number_w * 2. + px(16.);
         let id = cx.entity().entity_id().as_u64() as usize;
+        let overview = self.render_overview(view, cx);
         let scroll = view.scroll.clone();
-        uniform_list(("diff", id), rows.len(), move |range, _window, _cx| {
+        let list = uniform_list(("diff", id), rows.len(), move |range, _window, _cx| {
             // The line numbers stay put while the text scrolls sideways under them.
             let pin = -scroll.0.borrow().base_handle.offset().x;
             range
@@ -624,8 +625,92 @@ impl DocPanel {
         .track_scroll(&view.scroll)
         .size_full()
         .font_family(font)
-        .text_size(px(12.))
-        .into_any_element()
+        .text_size(px(12.));
+        div()
+            .size_full()
+            .flex()
+            .child(overview)
+            .child(div().flex_1().min_w_0().h_full().child(list))
+            .into_any_element()
+    }
+
+    /// A thin strip beside the diff mapping the whole file: red where lines went, green where
+    /// they came, and a faint box for what is on screen. A click jumps there.
+    fn render_overview(&self, view: &DiffView, cx: &mut Context<Self>) -> AnyElement {
+        const ROW: f32 = 18.;
+        let theme = cx.theme();
+        let (green, red, frame, ground) = (theme.green, theme.red, theme.muted_foreground, theme.secondary);
+        let rows = view.rows.clone();
+        let scroll = view.scroll.clone();
+        let bounds = Rc::new(Cell::new(Bounds::default()));
+        let (paint_bounds, n) = (bounds.clone(), rows.len().max(1));
+        div()
+            .id("diff-overview")
+            .w(px(14.))
+            .flex_none()
+            .h_full()
+            .border_r_1()
+            .border_color(theme.border)
+            .cursor_pointer()
+            .child(
+                canvas(
+                    |_, _, _| (),
+                    move |b, _, window, _| {
+                        paint_bounds.set(b);
+                        window.paint_quad(fill(b, ground));
+                        let h = f32::from(b.size.height);
+                        let y_of = |ix: usize| f32::from(b.origin.y) + h * ix as f32 / n as f32;
+                        // Runs of the same kind paint as one mark, at least 3 px tall.
+                        let mut ix = 0;
+                        while ix < rows.len() {
+                            let kind = rows[ix].kind;
+                            let end = rows[ix..].iter().position(|r| r.kind != kind).map_or(rows.len(), |p| ix + p);
+                            let color = match kind {
+                                LineKind::Added => Some(green),
+                                LineKind::Removed => Some(red),
+                                LineKind::Context => None,
+                            };
+                            if let Some(color) = color {
+                                let (top, bottom) = (y_of(ix), y_of(end).max(y_of(ix) + 3.));
+                                window.paint_quad(fill(
+                                    Bounds::new(point(b.origin.x + px(3.), px(top)), size(b.size.width - px(6.), px(bottom - top))),
+                                    color,
+                                ));
+                            }
+                            ix = end;
+                        }
+                        // What is on screen.
+                        let state = scroll.0.borrow();
+                        let shown = state.base_handle.bounds().size.height;
+                        let total = ROW * n as f32;
+                        if f32::from(shown) > 0. && f32::from(shown) < total {
+                            let from = -f32::from(state.base_handle.offset().y) / total;
+                            let len = f32::from(shown) / total;
+                            let top = f32::from(b.origin.y) + h * from;
+                            window.paint_quad(
+                                outline(Bounds::new(point(b.origin.x, px(top)), size(b.size.width, px(h * len))), frame.opacity(0.5), BorderStyle::Solid),
+                            );
+                        }
+                    },
+                )
+                .size_full(),
+            )
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |doc, e: &MouseDownEvent, _, cx| {
+                    let b = bounds.get();
+                    if b.size.height <= px(0.) {
+                        return;
+                    }
+                    let at = (f32::from(e.position.y - b.origin.y) / f32::from(b.size.height)).clamp(0., 1.);
+                    if let Some(view) = &doc.diff {
+                        let ix = ((at * view.rows.len() as f32) as usize).min(view.rows.len().saturating_sub(1));
+                        view.scroll.scroll_to_item(ix, ScrollStrategy::Center);
+                        cx.notify();
+                    }
+                }),
+            )
+            .into_any_element()
     }
 
     /// The path row above the content, with the markdown switch.
