@@ -129,6 +129,15 @@ pub trait Host: Send + Sync {
         let head = self.read_to_string(&root.join(".git/HEAD")).ok()?;
         branch_from_head(&head)
     }
+    /// What `git <args>` prints, run in `dir` without taking git's optional locks (the agent
+    /// may be running git itself); `None` when it fails or there is no git.
+    fn git(&self, dir: &Path, args: &[&str]) -> Option<Vec<u8>>;
+}
+
+/// The shell script running `git <args>` in `dir` (how a remote host runs it).
+pub fn git_script(dir: &Path, args: &[&str]) -> String {
+    let args: Vec<String> = args.iter().map(|a| shell_quote(a)).collect();
+    format!("cd {} && GIT_OPTIONAL_LOCKS=0 exec git {}", q(dir), args.join(" "))
 }
 
 /// `ref: refs/heads/main` gives `main`; a detached head gives its short hash.
@@ -146,6 +155,17 @@ pub fn branch_from_head(head: &str) -> Option<String> {
 pub struct LocalHost;
 
 impl Host for LocalHost {
+    fn git(&self, dir: &Path, args: &[&str]) -> Option<Vec<u8>> {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .env("GIT_OPTIONAL_LOCKS", "0")
+            .output()
+            .ok()?;
+        out.status.success().then_some(out.stdout)
+    }
+
     fn label(&self) -> String {
         "local".into()
     }
@@ -402,6 +422,10 @@ fn q(path: &Path) -> String {
 impl Host for SshHost {
     fn label(&self) -> String {
         self.destination.clone()
+    }
+
+    fn git(&self, dir: &Path, args: &[&str]) -> Option<Vec<u8>> {
+        self.run(&git_script(dir, args), None).ok()
     }
 
     fn is_remote(&self) -> bool {

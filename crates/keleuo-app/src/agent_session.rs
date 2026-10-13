@@ -882,20 +882,20 @@ impl AgentSession {
     }
 
     /// When a turn has just begun, read the git working tree (in the background) to find later
-    /// what commands changed in it. Not over SSH, and not for turns read back from a file.
+    /// what commands changed in it (here or over SSH). Not for turns read back from a file.
     fn watch_turn(&mut self, cx: &mut Context<Self>) {
         let turn = self.chat.turn_start();
-        if self.host.is_remote()
-            || !self.chat.busy
+        if !self.chat.busy
             || !matches!(self.chat.items.get(turn), Some(keleuo_core::conversation::Item::User(_)))
             || self.git_turn.as_ref().is_some_and(|(t, _)| *t == turn)
         {
             return;
         }
         self.git_turn = Some((turn, None));
-        let cwd = self.cwd.clone();
+        let (host, cwd) = (self.host.clone(), self.cwd.clone());
         cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
-            let base = cx.background_executor().spawn(async move { keleuo_core::command_changes::baseline(&cwd) }).await;
+            let base =
+                cx.background_executor().spawn(async move { keleuo_core::command_changes::baseline(host.as_ref(), &cwd) }).await;
             let _ = this.update(cx, |s, _| {
                 if let Some((t, b)) = &mut s.git_turn
                     && *t == turn
@@ -911,9 +911,10 @@ impl AgentSession {
     fn find_command_changes(&mut self, cx: &mut Context<Self>) {
         let turn = self.chat.turn_start();
         let Some((_, Some(base))) = self.git_turn.take_if(|(t, b)| *t == turn && b.is_some()) else { return };
-        let skip = self.chat.edited_in_turn(turn);
+        let (host, skip) = (self.host.clone(), self.chat.edited_in_turn(turn));
         cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
-            let found = cx.background_executor().spawn(async move { keleuo_core::command_changes::since(&base, &skip) }).await;
+            let found =
+                cx.background_executor().spawn(async move { keleuo_core::command_changes::since(host.as_ref(), &base, &skip) }).await;
             let _ = this.update(cx, |s, cx| {
                 s.chat.add_command_changes(turn, found);
                 cx.notify();
