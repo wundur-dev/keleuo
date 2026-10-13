@@ -918,6 +918,11 @@ impl Workspace {
 
     /// A new terminal tab next to the agent's tab (in its tab group), wherever that group is;
     /// it can be dragged anywhere from there.
+    /// Open files with unsaved changes.
+    pub fn unsaved_docs(&self, cx: &App) -> Vec<Entity<DocPanel>> {
+        self.docs.iter().filter(|d| d.read(cx).dirty).cloned().collect()
+    }
+
     /// Terminals running a command (anything but their shell at its prompt).
     pub fn busy_terminals(&self, cx: &App) -> usize {
         self.terminals
@@ -1201,7 +1206,10 @@ impl Workspace {
             .find(|d| d.read(cx).focus.contains_focused(window, cx))
             .cloned()
         {
-            self.dock.update(cx, |a, cx| a.remove_panel(d, window, cx));
+            // Unsaved changes: asked about first.
+            let dock = self.dock.clone();
+            let view: AnyView = d.clone().into();
+            crate::closing::close_tab(view, move |window, cx| dock.update(cx, |a, cx| a.remove_panel(d, window, cx)), window, cx);
         } else if let Some(t) = self
             .current_terminal(window, cx)
             .filter(|t| t.read(cx).focus.contains_focused(window, cx))

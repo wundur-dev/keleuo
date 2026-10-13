@@ -124,6 +124,17 @@ pub struct Shell {
 impl Shell {
     pub fn new(start: Start, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let folded = cx.global::<AppSettings>().0.borrow().sessions_folded;
+        // The window's close button: with something to lose, ask (as quitting does) and keep
+        // the window until the answer.
+        let weak = cx.entity().downgrade();
+        window.on_window_should_close(cx, move |window, cx| {
+            let Some(shell) = weak.upgrade() else { return true };
+            if shell.read(cx).nothing_to_lose(cx) {
+                return true;
+            }
+            shell.update(cx, |s, cx| s.confirm_quit(window, cx));
+            false
+        });
         let mut this = Self {
             tabs: Vec::new(),
             active: 0,
@@ -256,6 +267,7 @@ impl Shell {
     /// Quitting: when sessions are working, ask whether they should carry on when Keleuo starts
     /// again (or not quit at all); otherwise quit.
     pub fn confirm_quit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let unsaved: Vec<_> = self.tabs.iter().flat_map(|t| t.ws.read(cx).unsaved_docs(cx)).collect();
         let working: Vec<(String, String)> = (0..self.tabs.len())
             .filter_map(|ix| {
                 let s = self.tabs[ix].ws.read(cx).session.read(cx);
@@ -264,54 +276,104 @@ impl Shell {
             })
             .collect();
         let commands: usize = self.tabs.iter().map(|t| t.ws.read(cx).busy_terminals(cx)).sum();
-        if working.is_empty() && commands == 0 {
+        if unsaved.is_empty() && working.is_empty() && commands == 0 {
             crate::quit_now(cx);
             return;
         }
-        let plural = |n: usize, one: &str, many: &str| if n == 1 { format!("1 {one}") } else { format!("{n} {many}") };
-        let sessions = plural(working.len(), "session is working", "sessions are working");
-        let terminals = plural(commands, "terminal is running a command", "terminals are running a command");
-        let what = match (working.len(), commands) {
-            (_, 0) => sessions,
-            (0, _) => terminals,
-            _ => format!("{sessions} and {terminals}"),
-        };
-        let names: Vec<&str> = working.iter().map(|(_, n)| n.as_str()).collect();
-        let (message, detail, answers) = if working.is_empty() {
-            // Only commands: they stop with Keleuo, and there is nothing to carry on.
-            (format!("{what}. Quit anyway?"), "The command stops when Keleuo quits.".to_string(), vec![
-                PromptButton::Ok("Quit".into()),
-                PromptButton::Cancel("Cancel".into()),
-            ])
-        } else {
-            let them = if names.len() > 1 { "them" } else { "it" };
-            (
-                format!("{what}. Continue {them} when Keleuo starts again?"),
-                {
-                    let (they, carry, wait) = if names.len() > 1 { ("they", "carry", "wait") } else { ("it", "carries", "waits") };
-                    format!(
-                        "{}\n\nYes: {they} {carry} on when Keleuo starts again.\nNo: quit; {they} {wait} for your next message.",
-                        names.join("\n"),
-                    )
-                },
-                vec![PromptButton::Ok("Yes".into()), PromptButton::Other("No".into()), PromptButton::Cancel("Cancel".into())],
-            )
-        };
-        let cancel = answers.len() - 1;
-        let answer = window.prompt(PromptLevel::Info, &message, Some(&detail), &answers, cx);
+        let what = crate::closing::busy_summary(working.len(), commands);
+        let names: Vec<String> = working.iter().map(|(_, n)| n.clone()).collect();
         let ids: Vec<String> = working.into_iter().map(|(id, _)| id).collect();
-        let yes_continues = cancel == 2;
+        let handle = window.window_handle();
         cx.spawn(async move |_, cx| {
-            let Ok(answer) = answer.await else { return };
-            cx.update(|cx| {
-                if answer == cancel {
-                    return;
+            // Unsaved files first, as any app asks; then what is still running.
+            if !crate::closing::save_or_drop(unsaved, handle, cx).await {
+                return;
+            }
+            let mut carry_on = Vec::new();
+            if !names.is_empty() || commands > 0 {
+                let (message, detail, answers) = if names.is_empty() {
+                    // Only commands: they stop with Keleuo, and there is nothing to carry on.
+                    (format!("{what}. Quit anyway?"), "The command stops when Keleuo quits.".to_string(), vec![
+                        PromptButton::Ok("Quit".into()),
+                        PromptButton::Cancel("Cancel".into()),
+                    ])
+                } else {
+                    let (them, they, carry, wait) =
+                        if names.len() > 1 { ("them", "they", "carry", "wait") } else { ("it", "it", "carries", "waits") };
+                    (
+                        format!("{what}. Continue {them} when Keleuo starts again?"),
+                        format!(
+                            "{}\n\nYes: {they} {carry} on when Keleuo starts again.\nNo: quit; {they} {wait} for your next message.",
+                            names.join("\n"),
+                        ),
+                        vec![PromptButton::Ok("Yes".into()), PromptButton::Other("No".into()), PromptButton::Cancel("Cancel".into())],
+                    )
+                };
+                let cancel = answers.len() - 1;
+                let continues = !names.is_empty();
+                match crate::closing::ask(handle, PromptLevel::Info, message, detail, answers, cx).await {
+                    Some(a) if a == cancel => return,
+                    None => return,
+                    Some(0) if continues => carry_on = ids,
+                    Some(_) => {}
                 }
-                let answer = if yes_continues { answer } else { 1 };
+            }
+            cx.update(|cx| {
                 let settings = cx.global::<AppSettings>().0.clone();
-                settings.borrow_mut().continue_on_start = if answer == 0 { ids } else { Vec::new() };
+                settings.borrow_mut().continue_on_start = carry_on;
                 let _ = settings.borrow().save();
                 crate::quit_now(cx);
+            });
+        })
+        .detach();
+    }
+
+    /// Nothing open would be lost by closing the window: no unsaved file, no session working,
+    /// no terminal running a command.
+    fn nothing_to_lose(&self, cx: &App) -> bool {
+        self.tabs.iter().all(|t| {
+            let w = t.ws.read(cx);
+            w.unsaved_docs(cx).is_empty() && !w.session.read(cx).chat.busy && w.busy_terminals(cx) == 0
+        })
+    }
+
+    /// Close the session `ix`, asking first when that loses something: its unsaved files, its
+    /// turn in progress, its terminals' commands.
+    pub fn request_close(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(tab) = self.tabs.get(ix) else { return };
+        let number = tab.number;
+        let w = tab.ws.read(cx);
+        let unsaved = w.unsaved_docs(cx);
+        let working = w.session.read(cx).chat.busy;
+        let commands = w.busy_terminals(cx);
+        if unsaved.is_empty() && !working && commands == 0 {
+            self.close(ix, window, cx);
+            return;
+        }
+        let name = self.name(ix, cx);
+        let handle = window.window_handle();
+        cx.spawn(async move |this, cx| {
+            if !crate::closing::save_or_drop(unsaved, handle, cx).await {
+                return;
+            }
+            if working || commands > 0 {
+                let message = if working {
+                    format!("\u{201c}{name}\u{201d} is working. Close it anyway?")
+                } else {
+                    format!("{}. Close \u{201c}{name}\u{201d} anyway?", crate::closing::busy_summary(0, commands))
+                };
+                let detail = if working { "Its agent stops in the middle of its turn." } else { "The command stops with the session." };
+                let answers = vec![PromptButton::Ok("Close".into()), PromptButton::Cancel("Cancel".into())];
+                if crate::closing::ask(handle, PromptLevel::Warning, message, detail.into(), answers, cx).await != Some(0) {
+                    return;
+                }
+            }
+            let _ = handle.update(cx, |_, window, cx| {
+                let _ = this.update(cx, |s, cx| {
+                    if let Some(ix) = s.tabs.iter().position(|t| t.number == number) {
+                        s.close(ix, window, cx);
+                    }
+                });
             });
         })
         .detach();
@@ -1313,7 +1375,7 @@ impl Shell {
                         .item(PopupMenuItem::new("Close session").on_click(move |_, window, cx| {
                             let _ = w1.update(cx, |s, cx| {
                                 if let Some(ix) = s.tabs.iter().position(|t| t.number == number) {
-                                    s.close(ix, window, cx)
+                                    s.request_close(ix, window, cx)
                                 }
                             });
                         }))
@@ -1805,7 +1867,7 @@ impl Render for Shell {
             .on_action(cx.listener(|s, _: &ToggleSessions, _, cx| s.toggle_folded(cx)))
             .on_action(cx.listener(|s, _: &CloseSession, w, cx| {
                 let ix = s.active;
-                s.close(ix, w, cx)
+                s.request_close(ix, w, cx)
             }))
             .on_action(cx.listener(|s, _: &NextSession, w, cx| {
                 let ix = (s.active + 1) % s.tabs.len().max(1);

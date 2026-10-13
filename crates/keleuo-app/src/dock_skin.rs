@@ -290,7 +290,8 @@ impl SheetGroup {
                                             move |_, window, cx| {
                                                 if let Some(p) = close_group.active_panel() {
                                                     let id = p.panel_id(cx);
-                                                    close_group.close(id, window, cx);
+                                                    let group = close_group.clone();
+                                                    crate::closing::close_tab(p.view(), move |w, cx| group.close(id, w, cx), window, cx);
                                                 }
                                             },
                                         ),
@@ -346,6 +347,7 @@ impl SheetGroup {
             let closable = documents && group.is_panel_closable(panel.panel_id(cx), cx);
             let (select, close, drop_on, middle) = (group.clone(), group.clone(), group.clone(), group.clone());
             let id = panel.panel_id(cx);
+            let (view, middle_view) = (panel.view(), panel.view());
             let tab = sheet_tabs::tab_box(&self.strip, ("sheet-tab", id.as_u64() as usize), ix, n, joined)
                 .group("sheet-tab")
                 .max_w(px(220.))
@@ -368,7 +370,8 @@ impl SheetGroup {
                             .child(Icon::new(IconName::Close).xsmall())
                             .on_click(move |_, window, cx| {
                                 cx.stop_propagation();
-                                close.close(id, window, cx);
+                                let close = close.clone();
+                                crate::closing::close_tab(view.clone(), move |w, cx| close.close(id, w, cx), window, cx);
                             }),
                     )
                 })
@@ -376,7 +379,8 @@ impl SheetGroup {
                 .when(closable, |d| {
                     d.on_mouse_down(MouseButton::Middle, move |_, window, cx| {
                         cx.stop_propagation();
-                        middle.close(id, window, cx);
+                        let middle = middle.clone();
+                        crate::closing::close_tab(middle_view.clone(), move |w, cx| middle.close(id, w, cx), window, cx);
                     })
                 })
                 .when(group.is_droppable() && !collapsed, |d| {
@@ -457,7 +461,8 @@ impl SheetGroup {
                                         move |_, window, cx| {
                                             if let Some(p) = close_group.active_panel() {
                                                 let id = p.panel_id(cx);
-                                                close_group.close(id, window, cx);
+                                                let group = close_group.clone();
+                                                crate::closing::close_tab(p.view(), move |w, cx| group.close(id, w, cx), window, cx);
                                             }
                                         },
                                     ))

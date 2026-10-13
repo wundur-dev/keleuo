@@ -285,6 +285,23 @@ impl DocPanel {
         }
     }
 
+    /// The unsaved text and where it goes, when there are changes to save.
+    pub fn unsaved(&self, cx: &App) -> Option<(std::sync::Arc<dyn keleuo_core::host::Host>, std::path::PathBuf, String)> {
+        if !self.dirty || self.read_only {
+            return None;
+        }
+        let Body::Text(editor) = &self.body else { return None };
+        Some((self.ctx.host.clone(), self.path.clone(), editor.read(cx).value().to_string()))
+    }
+
+    /// `text` was written: it is what is saved now.
+    pub fn mark_saved(&mut self, text: String, cx: &mut Context<Self>) {
+        self.saved = text;
+        self.dirty = false;
+        cx.emit(DocEvent::Changed);
+        cx.notify();
+    }
+
     pub fn save(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.read_only {
             window.push_notification("This file belongs to a plugin and is read-only.", cx);

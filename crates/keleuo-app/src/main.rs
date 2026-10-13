@@ -25,6 +25,7 @@ mod attention;
 mod browser;
 mod backends;
 mod chat_panel;
+mod closing;
 mod agent_session;
 mod agent_side;
 mod control;

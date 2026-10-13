@@ -50,10 +50,15 @@ which is what the Run button on a `! ./scripts/restart` block in the chat does. 
 restarts without building; debug test copies are left running. Keleuo is asked to quit
 (`keleuo --quit`), not stopped, so the quit question below applies.
 
-### Quitting while sessions work
+### Closing with work in it
 
-Quitting (Cmd+Q, the menu, or a restart) while a session is mid-turn asks first, with how many
-sessions are working and how many terminals are running a command: **Yes** quits and has each
+Closing asks first only when something would be lost, like any Mac app. A file with unsaved
+changes asks Save, Don't Save or Cancel when its tab closes (Cmd+W, its ×, a middle click) or
+when Keleuo quits (Save All for several). Closing a session (Cmd+Shift+W, its menu) that is
+mid-turn, or whose terminals run a command, asks Close or Cancel.
+
+Quitting (Cmd+Q, the menu, the window's close button, or a restart) while a session is mid-turn
+asks, with how many sessions are working and how many terminals are running a command: **Yes** quits and has each
 working session told to carry on when Keleuo starts again (it is sent a short message saying
 so, once); **No** just quits; **Cancel** keeps Keleuo open. With only terminal commands
 running it asks whether to quit anyway.
@@ -350,8 +355,7 @@ For reading and navigating code in the editor (not for the Claude panel).
   command each) but untested, since no SSH host was available. No remote file watching.
 - Code intelligence: definitions come from line patterns, not tree-sitter queries or LSP. No
   hover, no find references, no outline view yet.
-- Editor: no "save changes?" prompt on close; a file changed on disk while it has unsaved
-  edits is not reloaded and not flagged.
+- Editor: a file changed on disk while it has unsaved edits is not reloaded and not flagged.
 - Claude: images in tool results show as `[image]`.
 - Sessions: sessions on other machines (SSH) are not restored after a restart; worktree
   sessions are local only; the shared-folder warning covers edits by
