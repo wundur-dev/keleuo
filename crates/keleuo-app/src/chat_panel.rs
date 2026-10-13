@@ -397,16 +397,6 @@ impl ChatPanel {
         Icon::new(IconName::LoaderCircle).text_color(color).transform(Transformation::rotate(percentage(turn)))
     }
 
-    /// Keyboard focus is in this session (its message box or the panel).
-    pub fn contains_focus(&self, window: &Window, cx: &App) -> bool {
-        self.focus.contains_focused(window, cx)
-            || self
-                .input
-                .read(cx)
-                .focus_handle(cx)
-                .contains_focused(window, cx)
-    }
-
     /// Tests: scroll by `dy` pixels (down is positive). Every item is reachable already.
     pub fn test_command(&mut self, cmd: &str, dy: f32, cx: &mut Context<Self>) {
         match cmd {
@@ -2143,8 +2133,6 @@ impl Render for ChatPanel {
             // Build, layout and paint: from here to the frame being on screen.
             window.on_next_frame(move |_, _| crate::perf::record("chat frame (render to frame)", started.elapsed()));
         }
-        let focused = self.contains_focus(window, cx);
-        let ring = cx.theme().ring;
         let theme = cx.theme();
         let (fg, muted, red, user_bg, _border) = (
             theme.foreground,
@@ -2173,8 +2161,6 @@ impl Render for ChatPanel {
             .bg(cx.theme().background)
             .track_focus(&self.focus)
             .on_action(cx.listener(|p, _: &CopyConversation, window, cx| p.copy_conversation(window, cx)))
-            .border_t_2()
-            .border_color(if focused { ring } else { transparent_black() })
             .child(self.render_header(cx))
             .children(self.render_agent_strip(cx))
             .when_some(terminal.clone(), |d, term| {

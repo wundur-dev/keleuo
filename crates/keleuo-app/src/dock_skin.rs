@@ -317,7 +317,9 @@ impl SheetGroup {
         cx: &mut App,
     ) -> AnyElement {
         let theme = cx.theme();
-        let accent = if focused(group, window, cx) { theme.ring } else { sheet_tabs::mix(theme.ring, ground, 0.45) };
+        // Where typing goes: the shown tab's accent is blue in the focused group, a quiet grey in
+        // the others.
+        let accent = if focused(group, window, cx) { theme.ring } else { theme.border };
         let palette = Palette::new(ground, theme.foreground, content, theme.foreground, theme.border, accent);
         let documents = joined == Joined::Bottom;
         let shown = shown_ix(group, cx);

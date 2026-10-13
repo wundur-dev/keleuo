@@ -729,10 +729,9 @@ impl Focusable for DocPanel {
 }
 
 impl Render for DocPanel {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let focused = self.focus.contains_focused(window, cx);
-        let (bg, accent) = (theme.background, theme.ring);
+        let bg = theme.background;
         div()
             .size_full()
             .flex()
@@ -740,8 +739,6 @@ impl Render for DocPanel {
             .bg(bg)
             .track_focus(&self.focus)
             .key_context("Doc")
-            .border_t_2()
-            .border_color(if focused { accent } else { transparent_black() })
             .child(self.render_header(cx))
             .child(div().flex_1().min_h_0().child(self.render_body(cx)))
     }

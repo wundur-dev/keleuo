@@ -719,13 +719,10 @@ impl Render for TerminalView {
         let bounds_cell = self.bounds.clone();
         let cell_cell = self.cell.clone();
         let cell_paint = self.cell.clone();
-        let ring = gpui_kit::component::ActiveTheme::theme(&**cx).ring;
         let base = div()
             .id("terminal")
             .size_full()
             .bg(hsla(palette::background()))
-            .border_t_2()
-            .border_color(if focused { ring } else { transparent_black() })
             .track_focus(&self.focus)
             .key_context("Terminal")
             .on_key_down(cx.listener(Self::on_key))
