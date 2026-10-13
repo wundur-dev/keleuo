@@ -70,6 +70,14 @@ pub fn marks(text: &str) -> Vec<(Range<usize>, Mark)> {
     out
 }
 
+/// Whether `text` has a code fence (a line starting with ``` or ~~~).
+pub fn has_fence(text: &str) -> bool {
+    text.lines().any(|l| {
+        let t = l.trim_start();
+        t.starts_with("```") || t.starts_with("~~~")
+    })
+}
+
 /// The fenced code blocks of `text` that name a language (```` ```rust ````): the language
 /// and the byte range of the code between the fences (to the end of the text while the
 /// closing fence is not typed yet).
@@ -234,6 +242,13 @@ mod tests {
         assert_eq!(named("(https://a.io)"), [("https://a.io", Mark::Link)]);
         // An address keeps its underscores and stars; nothing inside it is italic.
         assert_eq!(named("https://a.io/x_y_z*w*"), [("https://a.io/x_y_z*w*", Mark::Link)]);
+    }
+
+    #[test]
+    fn a_fence_is_a_line_of_its_own() {
+        assert!(has_fence("look:\n```\nx\n```"));
+        assert!(has_fence("  ~~~py"));
+        assert!(!has_fence("inline `code` only, and a ``` in a sentence"));
     }
 
     #[test]

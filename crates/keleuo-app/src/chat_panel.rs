@@ -2468,6 +2468,8 @@ impl ChatPanel {
         let model = session.chat.model.clone().or_else(|| session.model.clone()).unwrap_or_else(|| "default model".into());
         let mode = session.live_mode.clone().or_else(|| session.permission_mode.clone()).unwrap_or_else(|| "default".into());
         let has_text = !self.input.read(cx).value().trim().is_empty() || !self.attachments.is_empty();
+        let mono = !cx.global::<crate::AppSettings>().0.borrow().always_proportional
+            && keleuo_core::markdown_marks::has_fence(&self.input.read(cx).value());
         let restarting = session.restarting.clone();
         let queued = session.queued_count();
         let name = session.backend.name();
@@ -2767,6 +2769,8 @@ impl ChatPanel {
                         Textarea::new(&self.input)
                             .appearance(false)
                             .text_sm()
+                            // A message holding a code block is written in the code font (View menu).
+                            .when(mono, |t| t.font_family(cx.theme().mono_font_family.clone()))
                             .token(paste_pill)
                             .on_paste(move |item, window, cx| {
                                 // An image (or image files) on the clipboard: attach it.

@@ -34,6 +34,7 @@ actions!(
         AppearanceDark,
         ToggleNotifyWaiting,
         ToggleNotifyFinished,
+        ToggleCodeFont,
         CopyConversation,
         OpenWebPage,
         // In a web page (see web_panel.rs).
@@ -83,6 +84,7 @@ pub fn bind_keys(cx: &mut App) {
 
 /// The menu bar; its checked items follow the settings (set it again when they change).
 pub fn menus(cx: &App) -> Vec<Menu> {
+    let always_proportional = cx.global::<crate::AppSettings>().0.borrow().always_proportional;
     let notify = cx.global::<crate::AppSettings>().0.borrow().notify.clone();
     vec![
         Menu::new("Keleuo").items([
@@ -117,6 +119,8 @@ pub fn menus(cx: &App) -> Vec<Menu> {
             MenuItem::action("Appearance: System", AppearanceSystem),
             MenuItem::action("Appearance: Light", AppearanceLight),
             MenuItem::action("Appearance: Dark", AppearanceDark),
+            MenuItem::separator(),
+            MenuItem::action("Monospace When a Message Has Code", ToggleCodeFont).checked(!always_proportional),
             MenuItem::separator(),
             MenuItem::action("Zoom Files and Terminals", FocusRight),
             MenuItem::action("Zoom Claude", FocusClaude),

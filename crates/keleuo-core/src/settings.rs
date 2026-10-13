@@ -107,6 +107,9 @@ pub struct Settings {
     pub appearance: String,
     /// Model names typed in beyond a backend's own list, most recent first.
     pub recent_models: Vec<String>,
+    /// The message box keeps its proportional font even with a code block in it (by default
+    /// it turns monospace while a message holds a ``` fence).
+    pub always_proportional: bool,
     /// When to tell the person a session needs them.
     pub notify: Notify,
     /// Conversations that were working when Keleuo quit, to be told to carry on when it starts

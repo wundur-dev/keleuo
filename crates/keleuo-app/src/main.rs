@@ -254,6 +254,15 @@ fn main() {
             cx.set_menus(menus(cx));
             cx.on_action(|_: &ToggleNotifyWaiting, cx| toggle_notify(cx, |n| &mut n.waiting));
             cx.on_action(|_: &ToggleNotifyFinished, cx| toggle_notify(cx, |n| &mut n.finished));
+            cx.on_action(|_: &ToggleCodeFont, cx| {
+                cx.update_global::<AppSettings, _>(|settings, _| {
+                    let mut s = settings.0.borrow_mut();
+                    s.always_proportional = !s.always_proportional;
+                    let _ = s.save();
+                });
+                cx.set_menus(menus(cx));
+                cx.refresh_windows();
+            });
             cx.on_action(|_: &Quit, cx| request_quit(cx));
             cx.on_window_closed(|cx, _| {
                 if cx.windows().is_empty() {
