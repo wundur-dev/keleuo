@@ -109,6 +109,9 @@ pub struct Settings {
     pub recent_models: Vec<String>,
     /// When to tell the person a session needs them.
     pub notify: Notify,
+    /// Conversations that were working when Keleuo quit, to be told to carry on when it starts
+    /// again (the person asked for it on quitting).
+    pub continue_on_start: Vec<String>,
     #[serde(skip)]
     path: Option<PathBuf>,
 }

@@ -47,7 +47,16 @@ Then `keleuo`, `keleuo ~/code/app`, `keleuo --new .` or `keleuo --ssh dev:/srv/a
 build in the same folder with the same arguments; the open sessions come back. It can run
 from a terminal inside Keleuo (the quit-and-start half is detached, so it outlives the app),
 which is what the Run button on a `! ./scripts/restart` block in the chat does. `--no-build`
-restarts without building; debug test copies are left running.
+restarts without building; debug test copies are left running. Keleuo is asked to quit
+(`keleuo --quit`), not stopped, so the quit question below applies.
+
+### Quitting while sessions work
+
+Quitting (Cmd+Q, the menu, or a restart) while a session is mid-turn asks first, with how many
+sessions are working and how many terminals are running a command: **Yes** quits and has each
+working session told to carry on when Keleuo starts again (it is sent a short message saying
+so, once); **No** just quits; **Cancel** keeps Keleuo open. With only terminal commands
+running it asks whether to quit anyway.
 
 ## Layout and keys
 

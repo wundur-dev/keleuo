@@ -32,6 +32,8 @@ use crate::workspace::{Workspace, WorkspaceEvent};
 
 const LIST_WIDTH: f32 = 250.;
 const RAIL_WIDTH: f32 = 44.;
+/// What a session that was working when Keleuo quit is told when it starts again.
+const CONTINUE_MESSAGE: &str = "Keleuo was restarted while you were working. Continue where you left off.";
 /// The rail's layout, shared with the list that peeks out over it, so the session under the
 /// pointer stays under it when the list comes out: the "+" row, then a row per session.
 const RAIL_NEW: f32 = 30.;
@@ -228,6 +230,88 @@ impl Shell {
                 }
                 shell.handle_start(start, window, cx);
                 shell.save_open(cx);
+                shell.continue_working(cx);
+            });
+        })
+        .detach();
+    }
+
+    /// Sessions that were working when Keleuo quit, and the person asked to carry on: each is
+    /// told to (its agent starts for it, and takes the message once it is up).
+    fn continue_working(&mut self, cx: &mut Context<Self>) {
+        let settings = cx.global::<AppSettings>().0.clone();
+        let ids = std::mem::take(&mut settings.borrow_mut().continue_on_start);
+        if ids.is_empty() {
+            return;
+        }
+        let _ = settings.borrow().save();
+        for tab in &self.tabs {
+            let session = tab.ws.read(cx).session.clone();
+            if session.read(cx).chat.session_id.as_ref().is_some_and(|id| ids.contains(id)) {
+                session.update(cx, |s, cx| s.send(CONTINUE_MESSAGE, cx));
+            }
+        }
+    }
+
+    /// Quitting: when sessions are working, ask whether they should carry on when Keleuo starts
+    /// again (or not quit at all); otherwise quit.
+    pub fn confirm_quit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let working: Vec<(String, String)> = (0..self.tabs.len())
+            .filter_map(|ix| {
+                let s = self.tabs[ix].ws.read(cx).session.read(cx);
+                let id = s.chat.session_id.clone().filter(|_| s.chat.busy)?;
+                Some((id, self.name(ix, cx)))
+            })
+            .collect();
+        let commands: usize = self.tabs.iter().map(|t| t.ws.read(cx).busy_terminals(cx)).sum();
+        if working.is_empty() && commands == 0 {
+            crate::quit_now(cx);
+            return;
+        }
+        let plural = |n: usize, one: &str, many: &str| if n == 1 { format!("1 {one}") } else { format!("{n} {many}") };
+        let sessions = plural(working.len(), "session is working", "sessions are working");
+        let terminals = plural(commands, "terminal is running a command", "terminals are running a command");
+        let what = match (working.len(), commands) {
+            (_, 0) => sessions,
+            (0, _) => terminals,
+            _ => format!("{sessions} and {terminals}"),
+        };
+        let names: Vec<&str> = working.iter().map(|(_, n)| n.as_str()).collect();
+        let (message, detail, answers) = if working.is_empty() {
+            // Only commands: they stop with Keleuo, and there is nothing to carry on.
+            (format!("{what}. Quit anyway?"), "The command stops when Keleuo quits.".to_string(), vec![
+                PromptButton::Ok("Quit".into()),
+                PromptButton::Cancel("Cancel".into()),
+            ])
+        } else {
+            let them = if names.len() > 1 { "them" } else { "it" };
+            (
+                format!("{what}. Continue {them} when Keleuo starts again?"),
+                {
+                    let (they, carry, wait) = if names.len() > 1 { ("they", "carry", "wait") } else { ("it", "carries", "waits") };
+                    format!(
+                        "{}\n\nYes: {they} {carry} on when Keleuo starts again.\nNo: quit; {they} {wait} for your next message.",
+                        names.join("\n"),
+                    )
+                },
+                vec![PromptButton::Ok("Yes".into()), PromptButton::Other("No".into()), PromptButton::Cancel("Cancel".into())],
+            )
+        };
+        let cancel = answers.len() - 1;
+        let answer = window.prompt(PromptLevel::Info, &message, Some(&detail), &answers, cx);
+        let ids: Vec<String> = working.into_iter().map(|(id, _)| id).collect();
+        let yes_continues = cancel == 2;
+        cx.spawn(async move |_, cx| {
+            let Ok(answer) = answer.await else { return };
+            cx.update(|cx| {
+                if answer == cancel {
+                    return;
+                }
+                let answer = if yes_continues { answer } else { 1 };
+                let settings = cx.global::<AppSettings>().0.clone();
+                settings.borrow_mut().continue_on_start = if answer == 0 { ids } else { Vec::new() };
+                let _ = settings.borrow().save();
+                crate::quit_now(cx);
             });
         })
         .detach();

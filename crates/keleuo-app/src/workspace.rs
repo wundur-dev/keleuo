@@ -918,6 +918,15 @@ impl Workspace {
 
     /// A new terminal tab next to the agent's tab (in its tab group), wherever that group is;
     /// it can be dragged anywhere from there.
+    /// Terminals running a command (anything but their shell at its prompt).
+    pub fn busy_terminals(&self, cx: &App) -> usize {
+        self.terminals
+            .borrow()
+            .iter()
+            .filter(|t| t.read(cx).pty.as_ref().and_then(|p| p.foreground_program()).is_some_and(|n| !is_shell(&n)))
+            .count()
+    }
+
     pub fn new_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let anchor = self.any_session_panel(cx).or_else(|| self.recent_code_panel(cx));
         let beside = None;

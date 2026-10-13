@@ -60,30 +60,57 @@ impl Global for AppSettings {}
 fn parse_args() -> anyhow::Result<(instance::Request, Option<String>)> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let new = args.iter().any(|a| a == "--new");
+    if args.iter().any(|a| a == "--quit") {
+        return Ok((instance::Request { ssh: String::new(), path: PathBuf::new(), new: false, quit: true }, None));
+    }
     if let Some(pos) = args.iter().position(|a| a == "--ssh") {
         let target = args.get(pos + 1).ok_or_else(|| anyhow::anyhow!("--ssh needs host:/path"))?;
         let (dest, path) = target.split_once(':').ok_or_else(|| anyhow::anyhow!("--ssh needs host:/path"))?;
-        return Ok((instance::Request { ssh: dest.into(), path: PathBuf::from(path), new }, None));
+        return Ok((instance::Request { ssh: dest.into(), path: PathBuf::from(path), new, quit: false }, None));
     }
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
     let Some(arg) = args.iter().find(|a| !a.starts_with("--")) else {
         // Like `code .`: the folder the command was run from. Started from the Finder (the
         // root folder), the browser opens at the last folder instead.
         let path = if cwd == Path::new("/") { PathBuf::new() } else { cwd };
-        return Ok((instance::Request { ssh: String::new(), path, new }, None));
+        return Ok((instance::Request { ssh: String::new(), path, new, quit: false }, None));
     };
     match cwd.join(arg).canonicalize() {
-        Ok(p) if p.is_dir() => Ok((instance::Request { ssh: String::new(), path: p, new }, None)),
+        Ok(p) if p.is_dir() => Ok((instance::Request { ssh: String::new(), path: p, new, quit: false }, None)),
         _ => Ok((
-            instance::Request { ssh: String::new(), path: PathBuf::new(), new: false },
+            instance::Request { ssh: String::new(), path: PathBuf::new(), new: false, quit: false },
             Some(format!("{arg} is not a folder that exists.")),
         )),
     }
 }
 
+/// Quit, asking first when a session is working (see `Shell::confirm_quit`).
+fn request_quit(cx: &mut App) {
+    let target = cx.global::<control::ControlTargets>().workspace.clone();
+    let asked = target.is_some_and(|(handle, shell)| {
+        handle
+            .update(cx, |_, window, cx| shell.update(cx, |s, cx| s.confirm_quit(window, cx)).is_ok())
+            .unwrap_or(false)
+    });
+    if !asked {
+        quit_now(cx);
+    }
+}
+
+/// Quit now: the window's socket and hook settings go first.
+pub fn quit_now(cx: &mut App) {
+    instance::stop_listening();
+    hooks::cleanup(cx);
+    cx.quit();
+}
+
 /// Carry out a request in a window: open one, or use the open one.
 fn carry_out(request: instance::Request, note: Option<String>, cx: &mut App) {
-    let instance::Request { ssh, path, new } = request;
+    let instance::Request { ssh, path, new, quit } = request;
+    if quit {
+        request_quit(cx);
+        return;
+    }
     if ssh.is_empty() {
         let path = if path.as_os_str().is_empty() { shell::default_folder(cx) } else { path };
         show(Arc::new(LocalHost), path, new, note, cx);
@@ -185,6 +212,10 @@ fn main() {
     if note.is_none() && perf::step("hand over", || instance::hand_over(&request)) {
         return;
     }
+    // `--quit` with no window that takes it (none open, or one too old to know it).
+    if request.quit {
+        std::process::exit(1);
+    }
     gpui_kit::application()
         .with_assets(icons::AppAssets)
         .run(move |cx: &mut App| {
@@ -222,10 +253,7 @@ fn main() {
             cx.set_menus(menus(cx));
             cx.on_action(|_: &ToggleNotifyWaiting, cx| toggle_notify(cx, |n| &mut n.waiting));
             cx.on_action(|_: &ToggleNotifyFinished, cx| toggle_notify(cx, |n| &mut n.finished));
-            cx.on_action(|_: &Quit, cx| {
-                hooks::cleanup(cx);
-                cx.quit()
-            });
+            cx.on_action(|_: &Quit, cx| request_quit(cx));
             cx.on_window_closed(|cx, _| {
                 if cx.windows().is_empty() {
                     instance::stop_listening();

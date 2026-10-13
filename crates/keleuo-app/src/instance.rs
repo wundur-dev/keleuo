@@ -18,20 +18,28 @@ pub struct Request {
     pub path: PathBuf,
     /// `--new`: start a session there instead of showing the browser.
     pub new: bool,
+    /// `--quit`: quit the open window (asking first if a session is working).
+    pub quit: bool,
 }
 
 impl Request {
     fn line(&self) -> String {
+        if self.quit {
+            return "quit\n".into();
+        }
         format!("browse\t{}\t{}\t{}\n", self.ssh, self.path.display(), u8::from(self.new))
     }
 
     fn parse(line: &str) -> Option<Self> {
+        if line.trim_end() == "quit" {
+            return Some(Self { ssh: String::new(), path: PathBuf::new(), new: false, quit: true });
+        }
         let mut parts = line.trim_end_matches('\n').split('\t');
         (parts.next()? == "browse").then_some(())?;
         let ssh = parts.next()?.to_string();
         let path = PathBuf::from(parts.next()?);
         let new = parts.next() == Some("1");
-        Some(Self { ssh, path, new })
+        Some(Self { ssh, path, new, quit: false })
     }
 }
 
@@ -91,7 +99,9 @@ mod tests {
 
     #[::core::prelude::v1::test]
     fn requests_round_trip() {
-        let r = Request { ssh: "dev".into(), path: "/srv/my app".into(), new: true };
+        let q = Request { ssh: String::new(), path: PathBuf::new(), new: false, quit: true };
+        assert_eq!(Request::parse(&q.line()), Some(q));
+        let r = Request { ssh: "dev".into(), path: "/srv/my app".into(), new: true, quit: false };
         assert_eq!(Request::parse(&r.line()), Some(r));
         assert_eq!(Request::parse("other\tx"), None);
     }

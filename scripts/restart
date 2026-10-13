@@ -1,9 +1,10 @@
 #!/bin/sh
 # restart [--no-build]
 #
-# Build the release binary, find the running Keleuo, quit it and start the new build in the
-# same folder with the same arguments. The sessions that were open come back (Keleuo saves
-# them as they change). Safe to run from a terminal inside Keleuo: after the
+# Build the release binary, find the running Keleuo, ask it to quit and start the new build in
+# the same folder with the same arguments. The sessions that were open come back (Keleuo saves
+# them as they change). A session still working makes Keleuo ask first: quit and have it carry
+# on after the restart, quit, or cancel (then nothing restarts). Safe to run from a terminal inside Keleuo: after the
 # build, quitting and starting again is done by a detached process that outlives the app.
 # Test copies of the debug build are left running. KELEUO_BIN overrides the binary, as in
 # scripts/keleuo.
@@ -13,21 +14,27 @@ TARGET="${CARGO_TARGET_DIR:-$HOME/Library/Caches/workbench-target}"
 BIN="${KELEUO_BIN:-$TARGET/release/keleuo}"
 
 if [ "$1" = "--relaunch" ]; then
-    # The detached half: quit the old app, wait for it, start the new one in `folder` with
-    # `args` (one string, split again here).
+    # The detached half: ask the old app to quit (it may ask the person first), wait for it,
+    # start the new one in `folder` with `args` (one string, split again here).
     folder=$2
     args=$3
     shift 3
-    for p in "$@"; do kill "$p" 2>/dev/null; done
-    i=0
-    while [ $i -lt 50 ]; do
-        alive=0
-        for p in "$@"; do kill -0 "$p" 2>/dev/null && alive=1; done
-        [ $alive = 0 ] && break
-        sleep 0.2
-        i=$((i + 1))
-    done
-    for p in "$@"; do kill -9 "$p" 2>/dev/null; done
+    alive() {
+        for p in "$@"; do kill -0 "$p" 2>/dev/null && return 0; done
+        return 1
+    }
+    if [ $# -gt 0 ] && "$BIN" --quit; then
+        # Up to five minutes for an answer; still running then means Cancel: no restart.
+        i=0
+        while alive "$@" && [ $i -lt 1500 ]; do sleep 0.2; i=$((i + 1)); done
+        alive "$@" && exit 0
+    else
+        # A Keleuo from before --quit: stop it.
+        for p in "$@"; do kill "$p" 2>/dev/null; done
+        i=0
+        while alive "$@" && [ $i -lt 50 ]; do sleep 0.2; i=$((i + 1)); done
+        for p in "$@"; do kill -9 "$p" 2>/dev/null; done
+    fi
     cd "$folder" || cd "$HOME" || exit 1
     # shellcheck disable=SC2086
     exec "$REPO/scripts/keleuo" $args
