@@ -424,6 +424,13 @@ impl BasePanel for TerminalView {
     fn panel_name(&self) -> &'static str {
         "Terminal"
     }
+    fn dump(&self, _: &App) -> PanelState {
+        let mut s = PanelState::new(self.panel_name());
+        if let Some(id) = &self.history {
+            s.info = PanelInfo::panel(serde_json::json!({ "history": id }));
+        }
+        s
+    }
     fn on_removed(&mut self, _: &mut Window, cx: &mut Context<Self>) {
         cx.emit(TerminalEvent::Closed);
     }

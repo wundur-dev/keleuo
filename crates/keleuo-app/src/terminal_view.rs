@@ -93,6 +93,10 @@ pub struct TerminalView {
     pub folder: std::path::PathBuf,
     pub branch: Option<String>,
     _events: Option<Task<()>>,
+    /// Kept across restarts under this id (shell terminals; not an agent's own interface).
+    pub history: Option<String>,
+    /// Writing what it shows, a moment after its output stops.
+    save: Option<Task<()>>,
 }
 
 /// Keeps a pasted image (its bytes and file extension).
@@ -147,6 +151,20 @@ impl EventEmitter<TerminalEvent> for TerminalView {}
 
 impl TerminalView {
     pub fn new(spec: keleuo_core::host::CommandSpec, cx: &mut Context<Self>) -> Self {
+        Self::start(spec, None, cx)
+    }
+
+    /// A shell terminal kept across restarts as `id`: what it showed last time comes first.
+    pub fn kept(spec: keleuo_core::host::CommandSpec, id: String, cx: &mut Context<Self>) -> Self {
+        Self::start(spec, Some(id), cx)
+    }
+
+    fn start(spec: keleuo_core::host::CommandSpec, history: Option<String>, cx: &mut Context<Self>) -> Self {
+        let preface = history
+            .as_deref()
+            .and_then(keleuo_core::term_history::path)
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .and_then(|kept| keleuo_core::term_history::preface(&kept));
         let focus = cx.focus_handle();
         // Until it is first drawn (an agent's interface may start in a hidden view).
         let initial = GridSize {
@@ -155,7 +173,7 @@ impl TerminalView {
             cell_w: 8,
             cell_h: 16,
         };
-        let (pty, error, events) = match Pty::spawn(&spec, initial) {
+        let (pty, error, events) = match Pty::spawn(&spec, initial, preface.as_deref()) {
             Ok((pty, rx)) => {
                 let task = cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
                     while let Ok(first) = rx.recv().await {
@@ -170,6 +188,7 @@ impl TerminalView {
                                     PtyEvent::Wakeup => {
                                         crate::perf::pty_output();
                                         view.unseen = true;
+                                        view.schedule_save(cx);
                                         if !view.drawn && !view.screen_text().trim().is_empty() {
                                             view.drawn = true;
                                             crate::perf::switch_step("terminal drew its first screen");
@@ -215,7 +234,80 @@ impl TerminalView {
             folder: std::path::PathBuf::new(),
             branch: None,
             _events: events,
+            history,
+            save: None,
         }
+    }
+
+    /// Keep what it shows, two seconds after its output stops (a running program writing
+    /// steadily is saved at most every two seconds).
+    fn schedule_save(&mut self, cx: &mut Context<Self>) {
+        if self.history.is_none() || self.save.is_some() {
+            return;
+        }
+        self.save = Some(cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            cx.background_executor().timer(std::time::Duration::from_secs(2)).await;
+            let Ok(Some((path, text))) = this.update(cx, |view, _| {
+                view.save = None;
+                let path = view.history.as_deref().and_then(keleuo_core::term_history::path)?;
+                Some((path, view.kept_text()?))
+            }) else {
+                return;
+            };
+            // Detached: this task's handle was just let go, which would cancel an await here.
+            cx.background_spawn(async move {
+                if let Some(dir) = path.parent() {
+                    let _ = std::fs::create_dir_all(dir);
+                }
+                let _ = std::fs::write(path, text);
+            })
+            .detach();
+        }));
+    }
+
+    /// The scrollback (its last 3,000 lines) and screen as text with colour codes; `None`
+    /// while a full-screen program (an editor, a pager) has the screen, so what was kept
+    /// before stays.
+    fn kept_text(&self) -> Option<String> {
+        use keleuo_core::term_history::{Ink, Style, to_ansi};
+        use alacritty_terminal::vte::ansi::Color;
+        let pty = self.pty.as_ref()?;
+        let term = pty.term.lock();
+        if term.mode().contains(TermMode::ALT_SCREEN) {
+            return None;
+        }
+        let grid = term.grid();
+        let ink = |c: Color| match c {
+            Color::Named(n) if (n as usize) < 16 => Ink::Named(n as u8),
+            Color::Named(_) => Ink::Default,
+            Color::Indexed(n) => Ink::Indexed(n),
+            Color::Spec(rgb) => Ink::Rgb(rgb.r, rgb.g, rgb.b),
+        };
+        let cols = grid.columns();
+        let first = -(grid.history_size().min(3000) as i32);
+        let rows = (first..grid.screen_lines() as i32).map(|l| {
+            let row = &grid[Line(l)];
+            let cells = (0..cols)
+                .map(|c| &row[Column(c)])
+                .filter(|cell| !cell.flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER))
+                .map(|cell| {
+                    let f = cell.flags;
+                    let style = Style {
+                        fg: ink(cell.fg),
+                        bg: ink(cell.bg),
+                        bold: f.contains(Flags::BOLD),
+                        dim: f.contains(Flags::DIM),
+                        italic: f.contains(Flags::ITALIC),
+                        underline: f.intersects(Flags::ALL_UNDERLINES),
+                        inverse: f.contains(Flags::INVERSE),
+                    };
+                    // A tab is kept as the space it takes, so columns line up when replayed.
+                    (if cell.c == '\t' { ' ' } else { cell.c }, style)
+                })
+                .collect::<Vec<_>>();
+            (cells, row[Column(cols - 1)].flags.contains(Flags::WRAPLINE))
+        });
+        Some(to_ansi(rows.collect::<Vec<_>>()))
     }
 
     fn mode(&self) -> TermMode {
@@ -340,7 +432,16 @@ impl TerminalView {
                     cx.stop_propagation();
                 }
                 "k" => {
+                    // Clear, as in Terminal.app: the scrollback goes too (and so does what is
+                    // kept of it), then the shell redraws its prompt at the top.
+                    if let Some(pty) = &self.pty {
+                        // Screen and scrollback cleared here first: cleared by the shell alone,
+                        // the screen would be pushed into the scrollback.
+                        let mut parser: alacritty_terminal::vte::ansi::Processor = alacritty_terminal::vte::ansi::Processor::new();
+                        parser.advance(&mut *pty.term.lock(), b"\x1b[H\x1b[2J\x1b[3J");
+                    }
                     self.write_str("\x0c");
+                    self.schedule_save(cx);
                     cx.stop_propagation();
                 }
                 _ => {}

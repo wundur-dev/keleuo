@@ -103,9 +103,15 @@ pub fn register_panels(cx: &mut App) {
     });
     register_panel(cx, "Terminal", |ctx, _window, cx| {
         let f = factory(&ctx, cx).expect("a workspace for this dock");
-        // A saved terminal comes back as a fresh shell in the same place.
+        // A saved terminal comes back as a fresh shell in the same place, under what it
+        // showed before.
         let spec = f.shell.clone();
-        let view = cx.new(|cx| TerminalView::new(spec, cx));
+        let id = match ctx.info() {
+            PanelInfo::Panel(v) => v.get("history").and_then(|h| h.as_str()).map(str::to_string),
+            _ => None,
+        };
+        let id = id.unwrap_or_else(keleuo_core::term_history::new_id);
+        let view = cx.new(|cx| TerminalView::kept(spec, id, cx));
         f.made.borrow_mut().push(Made::Terminal(view.clone()));
         panel_handle(view)
     });
@@ -864,7 +870,8 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> Entity<TerminalView> {
         let spec = self.host.shell_command(&self.root);
-        let view = cx.new(|cx| TerminalView::new(spec, cx));
+        let id = keleuo_core::term_history::new_id();
+        let view = cx.new(|cx| TerminalView::kept(spec, id, cx));
         self.adopt_terminal(view.clone(), window, cx);
         view
     }

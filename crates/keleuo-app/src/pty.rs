@@ -110,9 +110,12 @@ pub struct Pty {
 }
 
 impl Pty {
+    /// Start `spec` in a new terminal of `size`. `preface` is shown first, as if the program
+    /// had written it (a kept terminal's earlier output).
     pub fn spawn(
         spec: &CommandSpec,
         size: GridSize,
+        preface: Option<&[u8]>,
     ) -> anyhow::Result<(Self, async_channel::Receiver<PtyEvent>)> {
         let (tx, rx) = async_channel::unbounded();
         let writer = Arc::new(FairMutex::new(None));
@@ -125,6 +128,10 @@ impl Pty {
             ..Config::default()
         };
         let term = Arc::new(FairMutex::new(Term::new(config, &size, listener.clone())));
+        if let Some(bytes) = preface {
+            let mut parser: alacritty_terminal::vte::ansi::Processor = alacritty_terminal::vte::ansi::Processor::new();
+            parser.advance(&mut *term.lock(), bytes);
+        }
         let mut env = std::collections::HashMap::new();
         env.insert("TERM".to_string(), "xterm-256color".to_string());
         env.insert("COLORTERM".to_string(), "truecolor".to_string());

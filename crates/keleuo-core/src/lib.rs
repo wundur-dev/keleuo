@@ -32,6 +32,7 @@ pub mod settings;
 pub mod skills;
 pub mod symbols;
 pub mod tabs;
+pub mod term_history;
 pub mod web;
 
 /// An environment setting `KELEUO_<name>`, or one of the app's earlier names

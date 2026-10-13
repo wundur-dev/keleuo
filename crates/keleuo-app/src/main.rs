@@ -198,10 +198,11 @@ fn main() {
             control::start(cx);
             hooks::init(cx);
             app_icon::set();
-            // Cached images older than 30 days go (off the UI thread).
+            // Cached images and kept terminals older than 30 days go (off the UI thread).
             std::thread::spawn(|| {
                 if let Some(root) = keleuo_core::images::root() {
                     keleuo_core::images::clean_old(&root, std::time::SystemTime::now());
+                    keleuo_core::term_history::clean_old(std::time::SystemTime::now());
                 }
             });
             bind_keys(cx);
