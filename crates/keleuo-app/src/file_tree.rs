@@ -60,6 +60,12 @@ pub struct FileTree {
     creating: Option<Creating>,
     /// Select this path once the next listing comes in (one just made).
     reveal_after: Option<PathBuf>,
+    /// Every path listed, to tell a new file from a changed one.
+    known: HashSet<PathBuf>,
+    /// Paths that changed while not listed, waiting for the listing they asked for.
+    asked: Vec<PathBuf>,
+    /// Changed paths the listing leaves out (ignored by git): no re-listing for them again.
+    unlisted: HashSet<PathBuf>,
     scroll: UniformListScrollHandle,
     _task: Option<Task<()>>,
 }
@@ -79,6 +85,9 @@ impl FileTree {
             loading: true,
             creating: None,
             reveal_after: None,
+            known: HashSet::new(),
+            asked: Vec::new(),
+            unlisted: HashSet::new(),
             scroll: UniformListScrollHandle::new(),
             _task: None,
         };
@@ -92,15 +101,22 @@ impl FileTree {
         let root = self.root.clone();
         self._task = Some(
             cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
-                let (nodes, index) = cx
+                let (nodes, index, known) = cx
                     .background_spawn(async move {
                         let list = host.list_files(&root, files::MAX_ENTRIES);
                         let index = FileIndex::new(&root, &list);
-                        (files::tree_from_list(&root, list), index)
+                        let known: HashSet<PathBuf> = list.iter().map(|(rel, _)| root.join(rel)).collect();
+                        (files::tree_from_list(&root, list), index, known)
                     })
                     .await;
                 let _ = this.update(cx, |tree, cx| {
                     tree.nodes = nodes;
+                    for p in std::mem::take(&mut tree.asked) {
+                        if !known.contains(&p) {
+                            tree.unlisted.insert(p);
+                        }
+                    }
+                    tree.known = known;
                     tree.loading = false;
                     tree.rebuild_rows();
                     if let Some(path) = tree.reveal_after.take() {
@@ -146,6 +162,22 @@ impl FileTree {
             rows.insert(at, row(RowKind::Name));
         }
         self.rows = Arc::new(rows);
+    }
+
+    /// Whether these changed paths change the tree: one gone, or one there but not listed
+    /// (new). A path still left out after the listing it asked for is not asked about again.
+    pub fn changes_listing(&mut self, paths: &[PathBuf]) -> bool {
+        let mut changes = false;
+        for p in paths {
+            let listed = self.known.contains(p);
+            if listed != p.exists() && !self.unlisted.contains(p) {
+                changes = true;
+                if !listed {
+                    self.asked.push(p.clone());
+                }
+            }
+        }
+        changes
     }
 
     pub fn root(&self) -> &std::path::Path {

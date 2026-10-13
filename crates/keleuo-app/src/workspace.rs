@@ -1040,12 +1040,10 @@ impl Workspace {
         cx.spawn_in(window, async move |this, cx| {
             while let Ok(paths) = arx.recv().await {
                 let ok = this.update_in(cx, |ws, window, cx| {
-                    let mut structure = false;
                     for p in &paths {
                         ws.file_changed(p, window, cx);
-                        structure |= !p.exists() || p.is_dir();
                     }
-                    if structure || paths.len() > 3 {
+                    if ws.files.update(cx, |t, _| t.changes_listing(&paths)) {
                         ws.files.update(cx, |t, cx| t.refresh(cx));
                     }
                 });
