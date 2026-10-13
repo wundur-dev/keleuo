@@ -32,6 +32,13 @@ use crate::workspace::{Workspace, WorkspaceEvent};
 
 const LIST_WIDTH: f32 = 250.;
 const RAIL_WIDTH: f32 = 44.;
+/// The rail's layout, shared with the list that peeks out over it, so the session under the
+/// pointer stays under it when the list comes out: the "+" row, then a row per session.
+const RAIL_NEW: f32 = 30.;
+const RAIL_ROW: f32 = 32.;
+const RAIL_GAP: f32 = 4.;
+/// How wide the list that peeks out over the rail is.
+const PEEK_WIDTH: f32 = 260.;
 /// How long the pointer rests on the rail before the whole list peeks out.
 const PEEK_DELAY_MS: u64 = 250;
 
@@ -88,6 +95,9 @@ pub struct Shell {
     peek: bool,
     /// The pointer is over the rail (the list peeks out after a moment).
     rail_hover: bool,
+    /// A press on the rail: no list peeks out until the pointer leaves it (the click goes to
+    /// the session pressed).
+    peek_held: bool,
     /// The folder being renamed, asked for its new name.
     folder_rename: Option<FolderRename>,
     /// Sessions from the last run are being opened again: the saved list is not touched.
@@ -119,6 +129,7 @@ impl Shell {
             browser: None,
             folded,
             peek: false,
+            peek_held: false,
             rail_hover: false,
             folder_rename: None,
             restoring: false,
@@ -948,6 +959,12 @@ impl Shell {
                 self.resume(host, root, backend, s.id, fork, wait, false, window, cx);
                 "ok".into()
             }
+            "peek" => {
+                // Tests: the folded list peeks out (`peek off` puts it back).
+                self.peek = arg != "off" && self.folded;
+                cx.notify();
+                format!("peek={}", self.peek)
+            }
             "fold-sessions" => {
                 self.toggle_folded(cx);
                 format!("folded={}", self.folded)
@@ -1276,15 +1293,17 @@ impl Shell {
             .flex()
             .flex_col()
             .items_center()
-            .gap_1()
-            .py_1()
+            .gap(px(RAIL_GAP))
+            .py(px(RAIL_GAP))
             .bg(bg)
             .border_r_1()
             .border_color(border)
+            // A press here is meant for what is under it: the list does not come out over it.
+            .on_mouse_down(MouseButton::Left, cx.listener(|s, _, _, _| s.peek_held = true))
             .child(
                 div()
                     .id("rail-new")
-                    .size(px(30.))
+                    .size(px(RAIL_NEW))
                     .flex()
                     .items_center()
                     .justify_center()
@@ -1297,11 +1316,14 @@ impl Shell {
             // Resting on the rail shows the whole list over the content; leaving it hides it.
             .on_hover(cx.listener(|s, hovered: &bool, _, cx| {
                 s.rail_hover = *hovered;
+                if !*hovered {
+                    s.peek_held = false;
+                }
                 if *hovered {
                     cx.spawn(async move |this, cx| {
                         cx.background_executor().timer(std::time::Duration::from_millis(PEEK_DELAY_MS)).await;
                         let _ = this.update(cx, |s, cx| {
-                            if s.rail_hover && s.folded && !s.peek {
+                            if s.rail_hover && s.folded && !s.peek && !s.peek_held {
                                 s.peek = true;
                                 cx.notify();
                             }
@@ -1326,7 +1348,7 @@ impl Shell {
                 div()
                     .id(("rail-session", number))
                     .relative()
-                    .size(px(32.))
+                    .size(px(RAIL_ROW))
                     .flex()
                     .items_center()
                     .justify_center()
@@ -1341,6 +1363,101 @@ impl Shell {
                         div().absolute().top(px(2.)).right(px(2.)).size(px(8.)).rounded_full().border_1().border_color(bg).bg(c)
                     }))
                     .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(w, cx))
+                    .on_click(cx.listener(move |s, _, window, cx| {
+                        if let Some(ix) = s.tabs.iter().position(|t| t.number == number) {
+                            s.activate(ix, window, cx);
+                        }
+                    })),
+            );
+        }
+        col.into_any_element()
+    }
+
+    /// The list that peeks out over the rail: the rail made wide. Each session keeps its row
+    /// (the same height, its two letters in the same place) with its name and what it last did
+    /// beside them, so what the pointer was over is what it is over now.
+    fn render_peek(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let (fg, muted, border, hover, ring, bg, sel) =
+            (theme.foreground, theme.muted_foreground, theme.border, theme.secondary_hover, theme.ring, theme.sidebar, theme.secondary);
+        // The rail centres its items: the left edge they start from.
+        let inset = |w: f32| px((RAIL_WIDTH - w) / 2.);
+        let mut col = div()
+            .id("session-peek-list")
+            .w(px(PEEK_WIDTH))
+            .h_full()
+            .flex()
+            .flex_col()
+            .gap(px(RAIL_GAP))
+            .py(px(RAIL_GAP))
+            .bg(bg)
+            .border_r_1()
+            .border_color(border)
+            .child(
+                div()
+                    .id("peek-new")
+                    .h(px(RAIL_NEW))
+                    .mx(px(4.))
+                    .pl(inset(RAIL_NEW) - px(4.))
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .rounded_md()
+                    .text_sm()
+                    .text_color(muted)
+                    .hover(|d| d.bg(hover))
+                    .child(div().size(px(RAIL_NEW)).flex().items_center().justify_center().child(Icon::new(IconName::Plus).small()))
+                    .child("New session")
+                    .on_click(cx.listener(|s, _, window, cx| s.new_session(window, cx))),
+            );
+        for ix in 0..self.tabs.len() {
+            let active = ix == self.active && self.browser.is_none();
+            let number = self.tabs[ix].number;
+            let name = self.name(ix, cx);
+            let w = self.tabs[ix].ws.read(cx);
+            let folder = w.root().file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+            let detail = w.session.read(cx).chat.last_activity(80).unwrap_or(folder);
+            let dot = self.dot(ix, cx);
+            col = col.child(
+                div()
+                    .id(("peek-session", number))
+                    .h(px(RAIL_ROW))
+                    .mx(px(4.))
+                    .pl(inset(RAIL_ROW) - px(4.))
+                    .pr_2()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .rounded_md()
+                    .when(active, |d| d.bg(sel))
+                    .when(!active, |d| d.hover(|d| d.bg(hover)))
+                    .child(
+                        div()
+                            .relative()
+                            .flex_none()
+                            .size(px(RAIL_ROW))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_md()
+                            .text_xs()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(if active { fg } else { muted })
+                            .when(active, |d| d.border_1().border_color(ring))
+                            .child(initials(&name))
+                            .children(dot.map(|(c, _)| {
+                                div().absolute().top(px(2.)).right(px(2.)).size(px(8.)).rounded_full().border_1().border_color(bg).bg(c)
+                            })),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .child(div().truncate().text_size(px(12.5)).line_height(px(15.)).text_color(fg).child(name))
+                            .child(div().truncate().text_size(px(10.5)).line_height(px(13.)).text_color(muted).child(detail)),
+                    )
                     .on_click(cx.listener(move |s, _, window, cx| {
                         if let Some(ix) = s.tabs.iter().position(|t| t.number == number) {
                             s.activate(ix, window, cx);
@@ -1590,7 +1707,7 @@ impl Render for Shell {
                 .h_full()
                 .occlude()
                 .shadow_lg()
-                .child(self.render_list(cx))
+                .child(self.render_peek(cx))
         });
         div()
             .size_full()
