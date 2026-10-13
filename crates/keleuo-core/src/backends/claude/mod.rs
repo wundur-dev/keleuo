@@ -178,6 +178,26 @@ impl Backend for ClaudeBackend {
         Some(vec![0x16])
     }
 
+    fn builtin_commands(&self) -> &'static [(&'static str, &'static str)] {
+        // Not /clear, /resume or /exit (they would leave the conversation Keleuo follows), nor
+        // /model (the model menu does that, without changing the default for every session).
+        &[
+            ("compact", "Summarize the conversation so far to free up context"),
+            ("context", "Show how the context window is used"),
+            ("init", "Write a CLAUDE.md for this project"),
+            ("review", "Review a pull request"),
+            ("memory", "Edit Claude's memory files"),
+            ("agents", "Manage subagents"),
+            ("mcp", "Manage MCP servers"),
+            ("permissions", "Allow and deny rules for tools"),
+            ("hooks", "Hooks on tool calls and events"),
+            ("status", "Version, model, account and connections"),
+            ("usage", "Plan usage and limits"),
+            ("doctor", "Check the installation"),
+            ("help", "Claude Code's commands"),
+        ]
+    }
+
     fn model_command(&self, model: &str) -> Option<String> {
         Some(format!("/model {model}"))
     }

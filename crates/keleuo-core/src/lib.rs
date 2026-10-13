@@ -30,6 +30,7 @@ pub mod links;
 pub mod paste;
 pub mod settings;
 pub mod skills;
+pub mod slash;
 pub mod symbols;
 pub mod tabs;
 pub mod term_history;

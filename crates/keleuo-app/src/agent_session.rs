@@ -878,6 +878,11 @@ impl AgentSession {
     // ----- what the window asks -----
 
     /// Send a user turn, starting the agent when needed.
+    /// Where the session's folder is (this machine, or over SSH).
+    pub fn host(&self) -> Arc<dyn Host> {
+        self.host.clone()
+    }
+
     pub fn send(&mut self, text: &str, cx: &mut Context<Self>) {
         self.send_with(text, Vec::new(), cx);
     }

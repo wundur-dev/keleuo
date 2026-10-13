@@ -7,7 +7,7 @@ use std::rc::Rc;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use gpui_kit::component::input::{Enter, InlineToken, InlineTokenContext, Input, InputContent, InputEvent, InputState, Textarea, TextareaState};
+use gpui_kit::component::input::{Enter, Escape, IndentInline, MoveDown, MoveUp, InlineToken, InlineTokenContext, Input, InputContent, InputEvent, InputState, Textarea, TextareaState};
 
 use crate::agent_session::{Asking, Spend, View};
 use gpui_kit::component::button::{Button, ButtonVariants};
@@ -70,6 +70,14 @@ pub struct ChatPanel {
     pastes: Vec<String>,
     /// "Other model…": a field for a model name in place of the model button.
     model_input: Option<(Entity<InputState>, Subscription)>,
+    /// What a message starting with `/` can name (skills, commands, the agent's own), read
+    /// when the first `/` is typed.
+    slash_choices: Option<Rc<Vec<keleuo_core::slash::Choice>>>,
+    /// The highlighted one in the `/` list, and the query it was for.
+    slash_ix: usize,
+    slash_query: String,
+    /// Escape closed the list for this query.
+    slash_closed: bool,
     /// An image shown full size over the chat.
     preview: Option<PathBuf>,
     /// The known failure whose fixes are being offered.
@@ -187,6 +195,10 @@ impl ChatPanel {
             attachments: Vec::new(),
             pastes: Vec::new(),
             model_input: None,
+            slash_choices: None,
+            slash_ix: 0,
+            slash_query: String::new(),
+            slash_closed: false,
             preview: None,
             fixing: None,
             fixed: Default::default(),
@@ -2074,7 +2086,10 @@ impl Render for ChatPanel {
             )
             .children(self.render_asking(cx))
             .children(self.render_thinking(cx))
-            .child(self.render_composer(window, cx)))
+            .child({
+                let slash = self.render_slash(cx);
+                self.render_composer(slash, window, cx)
+            }))
             .children(self.render_views(cx))
             .children(self.render_fix(cx))
             .children(self.preview.clone().map(|path| {
@@ -2113,6 +2128,133 @@ impl ChatPanel {
         } else {
             self.input.update(cx, |s, cx| s.insert(text, window, cx));
         }
+    }
+
+    /// The `/` list for what is typed: its matches, when the message is a lone `/word` and the
+    /// list was not closed. Reads the skills the first time.
+    fn slash_matches(&mut self, cx: &mut Context<Self>) -> Vec<keleuo_core::slash::Choice> {
+        let value = self.input.read(cx).value().to_string();
+        let Some(query) = keleuo_core::slash::typed(&value).map(str::to_string) else {
+            self.slash_closed = false;
+            return Vec::new();
+        };
+        if query != self.slash_query {
+            self.slash_query = query.clone();
+            self.slash_ix = 0;
+            self.slash_closed = false;
+        }
+        let Some(choices) = self.slash_choices.clone() else {
+            self.load_slash_choices(cx);
+            return Vec::new();
+        };
+        if self.slash_closed {
+            return Vec::new();
+        }
+        keleuo_core::slash::matching(&choices, &query, 8).into_iter().cloned().collect()
+    }
+
+    fn load_slash_choices(&mut self, cx: &mut Context<Self>) {
+        self.slash_choices = Some(Rc::new(Vec::new()));
+        let s = self.session.read(cx);
+        let (backend, host, root) = (s.backend.clone(), s.host(), s.cwd.clone());
+        cx.spawn(async move |this, cx| {
+            let found = cx
+                .background_spawn(async move {
+                    let catalog = backend.skills(host.as_ref(), &root);
+                    keleuo_core::slash::choices(&catalog, backend.builtin_commands(), backend.name())
+                })
+                .await;
+            let _ = this.update(cx, |p, cx| {
+                p.slash_choices = Some(Rc::new(found));
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Put the highlighted `/` choice in the message box, replacing what was typed after the `/`.
+    fn accept_slash(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let typed = 1 + self.slash_query.len();
+        let text = format!("/{name} ");
+        self.input.update(cx, |s, cx| {
+            s.set_selected_range(0..typed, cx);
+            s.replace(text, window, cx);
+        });
+        self.slash_closed = true;
+        cx.notify();
+    }
+
+    /// Keys while the `/` list is up: Up and Down move, Tab (or Enter on a name not yet typed in
+    /// full) takes the highlighted one, Escape closes the list. True when the key was used.
+    fn slash_key(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let found = self.slash_matches(cx);
+        if found.is_empty() {
+            return false;
+        }
+        match key {
+            "up" => self.slash_ix = self.slash_ix.checked_sub(1).unwrap_or(found.len() - 1),
+            "down" => self.slash_ix = (self.slash_ix + 1) % found.len(),
+            "escape" => self.slash_closed = true,
+            "tab" | "enter" => {
+                let pick = &found[self.slash_ix.min(found.len() - 1)];
+                // Typed in full already: Enter sends it.
+                if key == "enter" && pick.name == self.slash_query {
+                    return false;
+                }
+                let name = pick.name.clone();
+                self.accept_slash(&name, window, cx);
+            }
+            _ => return false,
+        }
+        cx.notify();
+        true
+    }
+
+    /// The `/` list over the message box.
+    fn render_slash(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let found = self.slash_matches(cx);
+        if found.is_empty() {
+            return None;
+        }
+        let ix = self.slash_ix.min(found.len() - 1);
+        let theme = cx.theme();
+        let (fg, muted, sel, border, bg) = (theme.foreground, theme.muted_foreground, theme.secondary, theme.border, theme.popover);
+        let mut list = div()
+            .id("slash-list")
+            .w_full()
+            .mb_1()
+            .p_1()
+            .rounded(px(12.))
+            .border_1()
+            .border_color(border)
+            .bg(bg)
+            .shadow_md()
+            .flex()
+            .flex_col();
+        for (n, choice) in found.into_iter().enumerate() {
+            let name = choice.name.clone();
+            list = list.child(
+                div()
+                    .id(("slash", n))
+                    .px_2()
+                    .py(px(5.))
+                    .rounded(px(8.))
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .cursor_pointer()
+                    .when(n == ix, |d| d.bg(sel))
+                    .hover(|d| d.bg(sel))
+                    .child(div().flex_none().text_sm().font_family("monospace").text_color(fg).child(format!("/{}", choice.name)))
+                    .child(div().flex_1().min_w_0().truncate().text_xs().text_color(muted).child(choice.description))
+                    .child(div().flex_none().text_xs().text_color(muted).child(choice.from))
+                    .on_click(cx.listener(move |p, _, window, cx| {
+                        p.accept_slash(&name, window, cx);
+                        p.input.update(cx, |s, cx| s.focus(window, cx));
+                    })),
+            );
+        }
+        Some(list.into_any_element())
     }
 
     /// "Other model…": a field for any model name the backend takes; Enter switches to it and
@@ -2252,7 +2394,7 @@ impl ChatPanel {
 
     /// The composer: a rounded box floating at the bottom of the column, with the images to
     /// send, the text, and the session's controls (attach, model, permission mode, send/stop).
-    fn render_composer(&self, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    fn render_composer(&self, slash: Option<AnyElement>, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
         let (border, muted, fg, field, accent) = (theme.border, theme.muted_foreground, theme.foreground, theme.secondary, theme.ring);
         let session = self.session.read(cx);
@@ -2483,10 +2625,13 @@ impl ChatPanel {
             .flex_none()
             .w_full()
             .flex()
-            .justify_center()
+            .flex_col()
+            .items_center()
             .px_4()
             .pb_3()
             .pt_1()
+            // The `/` list, just above the box it completes.
+            .children(slash.map(|s| div().w_full().max_w(px(COLUMN)).child(s)))
             .child(
                 div()
                     .id("composer")
@@ -2506,8 +2651,33 @@ impl ChatPanel {
                     .drag_over::<ExternalPaths>(move |d, _, _, _| d.border_color(accent))
                     .on_drop(cx.listener(|p, paths: &ExternalPaths, _, cx| p.attach(paths.paths().to_vec(), cx)))
                     // Shift+Enter on a list item: before the box puts in its plain new line.
+                    // Enter with the `/` list up takes the highlighted name.
                     .capture_action(cx.listener(|p, action: &Enter, window, cx| {
-                        if action.shift && !action.secondary && continue_list(&p.input, window, cx) {
+                        let used = !action.secondary
+                            && if action.shift { continue_list(&p.input, window, cx) } else { p.slash_key("enter", window, cx) };
+                        if used {
+                            cx.stop_propagation();
+                        }
+                    }))
+                    // Up, Down, Tab and Escape steer the `/` list while it is up (they are the
+                    // box's own actions, so they are caught before it moves its cursor).
+                    .capture_action(cx.listener(|p, _: &MoveUp, window, cx| {
+                        if p.slash_key("up", window, cx) {
+                            cx.stop_propagation();
+                        }
+                    }))
+                    .capture_action(cx.listener(|p, _: &MoveDown, window, cx| {
+                        if p.slash_key("down", window, cx) {
+                            cx.stop_propagation();
+                        }
+                    }))
+                    .capture_action(cx.listener(|p, _: &IndentInline, window, cx| {
+                        if p.slash_key("tab", window, cx) {
+                            cx.stop_propagation();
+                        }
+                    }))
+                    .capture_action(cx.listener(|p, _: &Escape, window, cx| {
+                        if p.slash_key("escape", window, cx) {
                             cx.stop_propagation();
                         }
                     }))

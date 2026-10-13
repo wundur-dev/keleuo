@@ -344,6 +344,10 @@ pub trait Backend: Send + Sync {
     fn terminal_paste_image(&self) -> Option<Vec<u8>> {
         None
     }
+    /// The agent's own `/` commands worth offering in the message box (name, what it does).
+    fn builtin_commands(&self) -> &'static [(&'static str, &'static str)] {
+        &[]
+    }
     /// The command that switches the model (`/model <name>`), when there is one.
     fn model_command(&self, _model: &str) -> Option<String> {
         None
