@@ -308,18 +308,20 @@ impl Shell {
                     self.activate(ix, window, cx);
                 }
             }
-            BrowserEvent::New { host, root, backend, worktree } => {
+            BrowserEvent::New { host, root, backend, worktree, name } => {
                 let worktree = worktree.clone();
                 if !self.opening.choose() {
                     return;
                 }
-                if let Some(name) = worktree {
-                    if let Err(e) = self.new_session_in_worktree(root.clone(), Some(name), backend.clone(), window, cx) {
+                if let Some(folder) = worktree {
+                    if let Err(e) = self.new_session_in_worktree(root.clone(), Some(folder), backend.clone(), window, cx) {
                         window.push_notification(format!("Could not make a worktree: {e}"), cx);
+                        return;
                     }
                 } else {
                     self.new_session_in(host.clone(), root.clone(), backend.clone(), window, cx);
                 }
+                self.name_shown(name.as_deref().unwrap_or(""), window, cx);
             }
             BrowserEvent::Resume { host, root, backend, id, fork, wait_for } => {
                 if !self.opening.choose() {
@@ -743,6 +745,14 @@ impl Shell {
         panels::tab_label(&self.key(ix), self.list_name(ix, cx), cx)
     }
 
+    /// Give the shown session a name, as a rename does (empty: named after its first message).
+    fn name_shown(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(key) = (self.active < self.tabs.len()).then(|| self.key(self.active)) else { return };
+        let _ = cx.global::<panels::Names>().0.borrow_mut().set(&key, name);
+        window.set_window_title(&format!("{} - Keleuo", self.name(self.active, cx)));
+        cx.notify();
+    }
+
     fn toggle_folded(&mut self, cx: &mut Context<Self>) {
         self.folded = !self.folded;
         self.peek = false;
@@ -850,6 +860,16 @@ impl Shell {
                 match self.browser.clone() {
                     Some(b) => {
                         b.update(cx, |b, cx| b.ask_worktree(window, cx));
+                        "ok".into()
+                    }
+                    None => "no browser".into(),
+                }
+            }
+            "browser-name" => {
+                // Tests: type a name for the new session in the browser.
+                match self.browser.clone() {
+                    Some(b) => {
+                        b.update(cx, |b, cx| b.test_name(arg, window, cx));
                         "ok".into()
                     }
                     None => "no browser".into(),

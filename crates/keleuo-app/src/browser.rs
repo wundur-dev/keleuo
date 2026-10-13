@@ -22,8 +22,9 @@ use keleuo_core::host::Host;
 
 /// What the person chose.
 pub enum BrowserEvent {
-    /// A new session in `root`, or (`worktree`: its name) in a new git worktree of its repository.
-    New { host: Arc<dyn Host>, root: PathBuf, backend: Arc<dyn Backend>, worktree: Option<String> },
+    /// A new session in `root`, or (`worktree`: its name) in a new git worktree of its repository;
+    /// `name`: the session's name, when one was given up front.
+    New { host: Arc<dyn Host>, root: PathBuf, backend: Arc<dyn Backend>, worktree: Option<String>, name: Option<String> },
     Resume { host: Arc<dyn Host>, root: PathBuf, backend: Arc<dyn Backend>, id: String, fork: bool, wait_for: Option<u32> },
     /// A session already open in this window.
     Switch(String),
@@ -68,6 +69,8 @@ pub struct Browser {
     subfolders: Vec<PathBuf>,
     recent: Vec<PathBuf>,
     filter: Entity<InputState>,
+    /// The new session's name (optional; empty means named after its first message).
+    name: Entity<InputState>,
     /// The worktree form: its name field, while shown.
     worktree: Option<(Entity<InputState>, Subscription)>,
     rows: Vec<Row>,
@@ -108,6 +111,12 @@ impl Browser {
             _ => {}
         });
         filter.update(cx, |f, cx| f.focus(window, cx));
+        let name = cx.new(|cx| InputState::new(window, cx).placeholder("Session name (optional)"));
+        let name_sub = cx.subscribe_in(&name, window, |b, _, ev: &InputEvent, window, cx| {
+            if let InputEvent::PressEnter { secondary, .. } = ev {
+                b.open_default(*secondary, window, cx);
+            }
+        });
         let backend = backends[0].clone();
         let mut this = Self {
             host,
@@ -117,6 +126,7 @@ impl Browser {
             subfolders: Vec::new(),
             recent,
             filter,
+            name,
             worktree: None,
             rows: Vec::new(),
             selected: None,
@@ -130,7 +140,7 @@ impl Browser {
             scroll: UniformListScrollHandle::new(),
             focus: cx.focus_handle(),
             _tasks: Vec::new(),
-            _subs: vec![sub],
+            _subs: vec![sub, name_sub],
         };
         // This folder and the recent ones show at once; the folders here fill in when listed.
         this.rebuild_rows(cx);
@@ -367,7 +377,8 @@ impl Browser {
                 // Never at once: first show what would be made, with a name to change.
                 self.ask_worktree(window, cx);
             } else if !worktree {
-                cx.emit(BrowserEvent::New { host: self.host.clone(), root, backend: self.backend.clone(), worktree: None });
+                let name = self.given_name(cx);
+                cx.emit(BrowserEvent::New { host: self.host.clone(), root, backend: self.backend.clone(), worktree: None, name });
             }
         }
     }
@@ -393,7 +404,21 @@ impl Browser {
         if name.is_empty() {
             return;
         }
-        cx.emit(BrowserEvent::New { host: self.host.clone(), root, backend: self.backend.clone(), worktree: Some(name) });
+        let given = self.given_name(cx);
+        cx.emit(BrowserEvent::New { host: self.host.clone(), root, backend: self.backend.clone(), worktree: Some(name), name: given });
+    }
+
+    /// The name typed for the new session, if any.
+    fn given_name(&self, cx: &App) -> Option<String> {
+        Some(self.name.read(cx).value().trim().to_string()).filter(|n| !n.is_empty())
+    }
+
+    /// Tests: type a name for the new session and put the cursor in its field.
+    pub fn test_name(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.name.update(cx, |n, cx| {
+            n.set_value(text.to_string(), window, cx);
+            n.focus(window, cx);
+        });
     }
 
     /// Every agent process on this machine, every few seconds (for the live dots).
@@ -574,14 +599,15 @@ impl Browser {
             .child(div().text_lg().text_color(fg).child(heading))
             .child(div().text_xs().text_color(muted).truncate().child(short_path(&folder)));
         let (h1, b1, f1) = (host.clone(), backend.clone(), folder.clone());
-        let mut actions = div().flex().gap_2().child(
+        let mut actions = div().flex().items_center().gap_2().child(div().w(px(200.)).child(Input::new(&self.name).small())).child(
             Button::new("start-new")
                 .small()
                 .primary()
                 .label("Start a new session here")
                 .tooltip("Enter")
-                .on_click(cx.listener(move |_, _, _, cx| {
-                    cx.emit(BrowserEvent::New { host: h1.clone(), root: f1.clone(), backend: b1.clone(), worktree: None })
+                .on_click(cx.listener(move |b, _, _, cx| {
+                    let name = b.given_name(cx);
+                    cx.emit(BrowserEvent::New { host: h1.clone(), root: f1.clone(), backend: b1.clone(), worktree: None, name })
                 })),
         );
         if d.is_git && self.worktree.is_none() {
