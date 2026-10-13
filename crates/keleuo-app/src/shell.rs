@@ -24,7 +24,8 @@ use keleuo_core::host::{Host, LocalHost};
 use crate::AppSettings;
 use keleuo_core::settings::SavedSession;
 use crate::actions::*;
-use crate::agent_session::AgentSession;
+use crate::agent_session::{AgentSession, SessionEvent};
+use crate::attention::{self, Action, Need};
 use crate::browser::{Browser, BrowserEvent, OpenSession};
 use crate::panels::{self, start_tab_rename};
 use crate::workspace::{Workspace, WorkspaceEvent};
@@ -33,6 +34,11 @@ const LIST_WIDTH: f32 = 250.;
 const RAIL_WIDTH: f32 = 44.;
 /// How long the pointer rests on the rail before the whole list peeks out.
 const PEEK_DELAY_MS: u64 = 250;
+
+/// No notifications, Dock bounces or badge: in tests, and in the background (test) mode.
+fn silent() -> bool {
+    cfg!(test) || crate::background()
+}
 
 struct Tab {
     number: usize,
@@ -96,6 +102,11 @@ pub struct Shell {
     opening: OpenGuard,
     /// The last `earlier` listing (control channel).
     earlier: Vec<(keleuo_core::agent::SessionInfo, Option<u32>)>,
+    /// What each session waits on the person for, to tell them once (see `attention`).
+    attention: attention::Tracker,
+    /// The count on the Dock icon.
+    badge: usize,
+    _attention: Vec<Subscription>,
 }
 
 impl Shell {
@@ -117,6 +128,13 @@ impl Shell {
             _browser_sub: None,
             opening: OpenGuard::default(),
             earlier: Vec::new(),
+            attention: attention::Tracker::default(),
+            badge: 0,
+            _attention: vec![
+                // Looking at the window again, or away; a notification setting changed.
+                cx.observe_window_activation(window, |s, window, cx| s.attend(window, cx)),
+                cx.observe_global_in::<AppSettings>(window, |s, window, cx| s.attend(window, cx)),
+            ],
         };
         let (saved, shown) = {
             let settings = cx.global::<AppSettings>().0.borrow();
@@ -660,9 +678,15 @@ impl Shell {
             // The row's name, dot, activity and cost follow the session; its conversation id,
             // once it has one, is kept for the next run.
             cx.observe(&ws, |_, _, cx| cx.notify()),
-            cx.observe(&session, |s, _, cx| {
+            cx.observe_in(&session, window, |s, _, window, cx| {
                 s.save_open(cx);
+                s.attend(window, cx);
                 cx.notify()
+            }),
+            cx.subscribe_in(&session, window, |s, session, ev: &SessionEvent, window, cx| {
+                if let SessionEvent::TurnEnded = ev {
+                    s.turn_ended(session.clone(), window, cx);
+                }
             }),
         ];
         let number = self.next;
@@ -694,6 +718,7 @@ impl Shell {
         self.save_open(cx);
         let title = format!("{} - Keleuo", self.name(ix, cx));
         window.set_window_title(&title);
+        self.attend(window, cx);
         cx.notify();
     }
 
@@ -703,6 +728,9 @@ impl Shell {
         }
         let tab = self.tabs.remove(ix);
         tab.ws.update(cx, |w, cx| w.session.update(cx, |s, cx| s.stop(cx)));
+        let key = tab.ws.read(cx).session.entity_id().as_u64();
+        self.attention.forget(key);
+        self.set_badge(cx);
         self.subs.remove(&tab.ws.entity_id());
         // Closed on purpose: not opened again next time.
         self.save_open(cx);
@@ -964,6 +992,87 @@ impl Shell {
             _ => return None,
         })
     }
+
+    // ----- telling the person (see `attention`) -----
+
+    /// The session `ix` is in front of the person: shown, in the focused window.
+    fn looking_at(&self, ix: usize, window: &Window) -> bool {
+        window.is_window_active() && ix == self.active && self.browser.is_none()
+    }
+
+    /// Tell the person about sessions that came to wait on them (a permission prompt, a
+    /// question in the terminal) while they look elsewhere, and take back what they have seen.
+    fn attend(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if silent() {
+            return;
+        }
+        let now = std::time::Instant::now();
+        for ix in 0..self.tabs.len() {
+            let session = self.tabs[ix].ws.read(cx).session.clone();
+            let s = session.read(cx);
+            let live = if let Some(p) = s.chat.pending_permissions().next() {
+                Some(Need::Permission { tool: p.tool_name.clone(), summary: p.summary.clone() })
+            } else {
+                s.asking.map(|_| Need::Asking)
+            };
+            let looking = self.looking_at(ix, window);
+            let action = self.attention.update(session.entity_id().as_u64(), live, looking, now);
+            self.act(action, cx);
+        }
+        self.set_badge(cx);
+    }
+
+    /// A session's turn ended: once its reply is in (its last words may still be on their way
+    /// from the session file), tell the person if they look elsewhere.
+    fn turn_ended(&mut self, session: Entity<AgentSession>, window: &mut Window, cx: &mut Context<Self>) {
+        if silent() {
+            return;
+        }
+        cx.spawn_in(window, async move |this, cx| {
+            cx.background_executor().timer(std::time::Duration::from_millis(1500)).await;
+            let _ = this.update_in(cx, |s, window, cx| {
+                let Some(ix) = s.tabs.iter().position(|t| t.ws.read(cx).session == session) else { return };
+                let chat = &session.read(cx).chat;
+                // Working again, or waiting on a question (told about on its own).
+                if chat.busy || chat.needs_input() || session.read(cx).asking.is_some() {
+                    return;
+                }
+                let need = Need::Finished(chat.last_activity(100));
+                let looking = s.looking_at(ix, window);
+                let action = s.attention.update(session.entity_id().as_u64(), Some(need), looking, std::time::Instant::now());
+                s.act(action, cx);
+                s.set_badge(cx);
+            });
+        })
+        .detach();
+    }
+
+    /// Carry out what the tracker decided, as the settings allow.
+    fn act(&self, action: Action, cx: &App) {
+        match action {
+            Action::Announce(need) => {
+                let notify = &cx.global::<AppSettings>().0.borrow().notify;
+                if if need.is_question() { notify.waiting } else { notify.finished } {
+                    attention::bounce();
+                }
+            }
+            // Seen: nothing to take back while there are no banners.
+            Action::Withdraw | Action::Nothing => {}
+        }
+    }
+
+    /// The Dock icon's count: sessions waiting on the person, of the kinds turned on.
+    fn set_badge(&mut self, cx: &App) {
+        let count = {
+            let notify = &cx.global::<AppSettings>().0.borrow().notify;
+            self.attention.count(notify.waiting, notify.finished)
+        };
+        if count != self.badge && !silent() {
+            self.badge = count;
+            attention::set_badge(count);
+        }
+    }
+
 
     // ----- rendering -----
 

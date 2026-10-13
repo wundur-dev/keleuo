@@ -32,6 +32,8 @@ actions!(
         AppearanceSystem,
         AppearanceLight,
         AppearanceDark,
+        ToggleNotifyWaiting,
+        ToggleNotifyFinished,
         CopyConversation,
         OpenWebPage,
         // In a web page (see web_panel.rs).
@@ -79,10 +81,15 @@ pub fn bind_keys(cx: &mut App) {
     ]);
 }
 
-pub fn menus() -> Vec<Menu> {
+/// The menu bar; its checked items follow the settings (set it again when they change).
+pub fn menus(cx: &App) -> Vec<Menu> {
+    let notify = cx.global::<crate::AppSettings>().0.borrow().notify.clone();
     vec![
         Menu::new("Keleuo").items([
             MenuItem::action("About Keleuo", ShowAbout),
+            MenuItem::separator(),
+            MenuItem::action("Alert When a Session Asks", ToggleNotifyWaiting).checked(notify.waiting),
+            MenuItem::action("Alert When a Turn Finishes", ToggleNotifyFinished).checked(notify.finished),
             MenuItem::separator(),
             MenuItem::action("Quit Keleuo", Quit),
         ]),

@@ -21,6 +21,7 @@ use keleuo_core::settings::Settings;
 mod about;
 mod actions;
 mod app_icon;
+mod attention;
 mod browser;
 mod backends;
 mod chat_panel;
@@ -126,6 +127,18 @@ fn show(host: Arc<dyn Host>, path: PathBuf, new: bool, note: Option<String>, cx:
 
 /// Run in the background (tests): windows open without taking keyboard focus and the app
 /// does not activate itself.
+/// Turn one kind of alert on or off (see `attention`); the menu's check and the Dock badge
+/// follow.
+fn toggle_notify(cx: &mut App, which: fn(&mut keleuo_core::settings::Notify) -> &mut bool) {
+    cx.update_global::<AppSettings, _>(|settings, _| {
+        let mut s = settings.0.borrow_mut();
+        let on = which(&mut s.notify);
+        *on = !*on;
+        let _ = s.save();
+    });
+    cx.set_menus(menus(cx));
+}
+
 fn background() -> bool {
     keleuo_core::env_var("BACKGROUND").is_ok_and(|v| v != "0")
 }
@@ -206,7 +219,9 @@ fn main() {
                 }
             });
             bind_keys(cx);
-            cx.set_menus(menus());
+            cx.set_menus(menus(cx));
+            cx.on_action(|_: &ToggleNotifyWaiting, cx| toggle_notify(cx, |n| &mut n.waiting));
+            cx.on_action(|_: &ToggleNotifyFinished, cx| toggle_notify(cx, |n| &mut n.finished));
             cx.on_action(|_: &Quit, cx| {
                 hooks::cleanup(cx);
                 cx.quit()

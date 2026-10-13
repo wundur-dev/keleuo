@@ -52,6 +52,23 @@ impl Default for Layout {
     }
 }
 
+/// When to tell the person through the Dock (a bounce, a count on its icon) that a session
+/// needs them. Both on by default.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Notify {
+    /// It waits for a permission answer, or asks something in its terminal.
+    pub waiting: bool,
+    /// Its turn finished: it waits for the next message.
+    pub finished: bool,
+}
+
+impl Default for Notify {
+    fn default() -> Self {
+        Self { waiting: true, finished: true }
+    }
+}
+
 /// A session open in the window, opened again on the next start (closing it removes it;
 /// quitting does not).
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -90,6 +107,8 @@ pub struct Settings {
     pub appearance: String,
     /// Model names typed in beyond a backend's own list, most recent first.
     pub recent_models: Vec<String>,
+    /// When to tell the person a session needs them.
+    pub notify: Notify,
     #[serde(skip)]
     path: Option<PathBuf>,
 }
@@ -221,6 +240,14 @@ mod tests {
         let _ = std::fs::remove_dir_all(base);
     }
     use super::*;
+
+    #[test]
+    fn notifications_are_on_unless_turned_off() {
+        let s: Settings = serde_json::from_str("{}").unwrap();
+        assert_eq!(s.notify, Notify { waiting: true, finished: true });
+        let s: Settings = serde_json::from_str(r#"{"notify":{"finished":false}}"#).unwrap();
+        assert_eq!(s.notify, Notify { waiting: true, finished: false });
+    }
 
     #[test]
     fn recent_and_layout_round_trip() {
