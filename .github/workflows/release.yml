@@ -1,7 +1,7 @@
 name: Release
 
-# Builds Keleuo.app for Apple silicon, signs it with the Developer ID cert, notarizes it and
-# staples the ticket. A pushed tag (v0.1.0, ...) also publishes the zip as a GitHub release.
+# Builds Keleuo.app (universal: Apple silicon and Intel), signs it with the Developer ID cert,
+# notarizes it and staples the ticket. A pushed tag (v0.1.0, ...) also publishes the zip as a GitHub release.
 # Run by hand from the Actions tab to test the pipeline without publishing anything.
 
 on:
@@ -80,20 +80,25 @@ jobs:
           # Fails the job if Apple rejects it. The log is then at: xcrun notarytool log <id> (same key flags).
           xcrun notarytool submit "$RUNNER_TEMP/Keleuo-notarize.zip" \
             --key "$KEY" --key-id "$APPLE_API_KEY_ID" --issuer "$APPLE_API_ISSUER_ID" --wait
-          xcrun stapler staple "$APP"
-          xcrun stapler validate "$APP"
+          # Stapling fetches the ticket from Apple, which now and then drops the connection: retry.
+          for attempt in 1 2 3 4 5; do
+            if xcrun stapler staple "$APP" && xcrun stapler validate "$APP"; then break; fi
+            [ "$attempt" = 5 ] && exit 1
+            echo "Stapling failed (attempt $attempt); retrying in 30 s"
+            sleep 30
+          done
           rm -f "$KEY"
 
       - name: Package
         run: |
           mkdir -p dist
-          ditto -c -k --keepParent "$RUNNER_TEMP/bundle/Keleuo.app" "dist/Keleuo-${VERSION}-arm64.zip"
+          ditto -c -k --keepParent "$RUNNER_TEMP/bundle/Keleuo.app" "dist/Keleuo-${VERSION}-universal.zip"
           spctl --assess --type execute --verbose=2 "$RUNNER_TEMP/bundle/Keleuo.app"
 
       - name: Upload the build
         uses: actions/upload-artifact@v4
         with:
-          name: Keleuo-${{ env.VERSION }}-arm64
+          name: Keleuo-${{ env.VERSION }}-universal
           path: dist/*.zip
 
       - name: Publish the release
