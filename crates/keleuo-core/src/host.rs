@@ -124,6 +124,13 @@ pub trait Host: Send + Sync {
     fn shell_command(&self, cwd: &Path) -> CommandSpec;
     /// An agent program (any backend's), started in `spec.cwd`.
     fn program_command(&self, spec: &ProgramSpec) -> CommandSpec;
+    /// An agent's own terminal interface, started in `spec.cwd`. On another machine `files`
+    /// (path there, text) are written there first and removed when the program ends, and
+    /// `forward` carries a socket there (first) to one here (second) for as long as it runs.
+    /// Here: as [`Host::program_command`], the files and the forward being for elsewhere.
+    fn terminal_program_command(&self, spec: &ProgramSpec, _files: &[(PathBuf, String)], _forward: Option<(&Path, &Path)>) -> CommandSpec {
+        self.program_command(spec)
+    }
     /// The current git branch of the repository at `root`, if any.
     fn git_branch(&self, root: &Path) -> Option<String> {
         let head = self.read_to_string(&root.join(".git/HEAD")).ok()?;
@@ -432,6 +439,19 @@ fn control_dir() -> PathBuf {
     std::env::temp_dir()
 }
 
+/// `spec`'s program with its arguments and environment, as one shell command line.
+fn program_line(spec: &ProgramSpec) -> String {
+    let args: Vec<String> = spec.args.iter().map(|a| shell_quote(a)).collect();
+    let env: Vec<String> = spec.env.iter().map(|(k, v)| shell_quote(&format!("{k}={v}"))).collect();
+    let unset: Vec<String> = spec.unset.iter().map(|v| format!("-u {}", shell_quote(v))).collect();
+    let env = if env.is_empty() && unset.is_empty() {
+        String::new()
+    } else {
+        format!("env {} ", unset.into_iter().chain(env).collect::<Vec<_>>().join(" "))
+    };
+    format!("{env}{} {}", shell_quote(&spec.program), args.join(" "))
+}
+
 /// Quote a string for a POSIX shell.
 pub fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
@@ -531,20 +551,46 @@ impl Host for SshHost {
     }
 
     fn program_command(&self, spec: &ProgramSpec) -> CommandSpec {
-        let args: Vec<String> = spec.args.iter().map(|a| shell_quote(a)).collect();
-        let env: Vec<String> = spec.env.iter().map(|(k, v)| shell_quote(&format!("{k}={v}"))).collect();
-        let unset: Vec<String> = spec.unset.iter().map(|v| format!("-u {}", shell_quote(v))).collect();
-        let env = if env.is_empty() && unset.is_empty() {
-            String::new()
-        } else {
-            format!("env {} ", unset.into_iter().chain(env).collect::<Vec<_>>().join(" "))
-        };
         // A login shell, so the remote PATH finds the program.
-        let inner = format!("cd {} && exec {env}{} {}", q(&spec.cwd), shell_quote(&spec.program), args.join(" "));
+        let inner = format!("cd {} && exec {}", q(&spec.cwd), program_line(spec));
         self.ssh_spec(
             &format!("exec \"$SHELL\" -lc {}", shell_quote(&inner)),
             false,
         )
+    }
+
+    fn terminal_program_command(&self, spec: &ProgramSpec, files: &[(PathBuf, String)], forward: Option<(&Path, &Path)>) -> CommandSpec {
+        // The files first (a here-document each: they are text), then the program, not
+        // `exec`ed, so they and the forwarded socket go when it ends: on its own, or with
+        // the connection (a hang-up, which ends the program too).
+        let mut script = String::new();
+        let mut leftovers: Vec<String> = Vec::new();
+        for (path, text) in files {
+            if let Some(dir) = path.parent() {
+                script += &format!("mkdir -p {}\n", q(dir));
+            }
+            let end = if text.ends_with('\n') { "" } else { "\n" };
+            script += &format!("cat > {} <<'KELEUO_END'\n{text}{end}KELEUO_END\n", q(path));
+            leftovers.push(q(path));
+        }
+        leftovers.extend(forward.map(|(there, _)| q(there)));
+        let tidy = if leftovers.is_empty() {
+            String::new()
+        } else {
+            let rm = shell_quote(&format!("rm -f {}", leftovers.join(" ")));
+            format!("trap {rm} EXIT; trap 'exit 129' HUP; trap 'exit 143' TERM; ")
+        };
+        // `exit` after it, or a shell may run the program in its own place, traps and all.
+        let inner = format!("{tidy}cd {} && {}; exit $?", q(&spec.cwd), program_line(spec));
+        script += &format!("exec \"$SHELL\" -lc {}", shell_quote(&inner));
+        // A connection of its own (not the shared one): a forward asked for through the
+        // shared connection would outlive this program.
+        let mut args: Vec<String> = vec!["-S".into(), "none".into(), "-t".into()];
+        if let Some((there, here)) = forward {
+            args.extend(["-R".into(), format!("{}:{}", there.display(), here.display())]);
+        }
+        args.extend([self.destination.clone(), script]);
+        CommandSpec { program: "ssh".into(), args, cwd: None, env: Vec::new() }
     }
 }
 
@@ -649,6 +695,34 @@ mod tests {
         assert!(script.contains("agent"));
         assert!(script.contains("env -u"));
         assert_eq!(shell_quote("it's"), r"'it'\''s'");
+    }
+
+    #[test]
+    fn a_terminal_program_elsewhere_writes_its_files_runs_and_tidies_up() {
+        let host = SshHost { destination: "dev".into(), home: None };
+        let dir = std::env::temp_dir().join(format!("keleuo-tpc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (helper, sock) = (dir.join("files/hook.py"), dir.join("s.sock"));
+        let spec = ProgramSpec {
+            program: "sh".into(),
+            args: vec!["-c".into(), "cat files/hook.py; pwd > ran".into()],
+            env: Vec::new(),
+            unset: Vec::new(),
+            cwd: dir.clone(),
+        };
+        let cmd = host.terminal_program_command(&spec, &[(helper.clone(), "it's 'quoted'\n$HOME".into())], Some((&sock, Path::new("/here.sock"))));
+        let a = &cmd.args;
+        assert_eq!(a[..3], ["-S", "none", "-t"]);
+        assert_eq!(a[3..5], ["-R".to_string(), format!("{}:/here.sock", sock.display())]);
+        assert_eq!(a[5], "dev");
+        // What ssh would run there, run here by a shell.
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(&sock, "").unwrap();
+        let out = Command::new("sh").arg("-c").arg(&a[6]).env("SHELL", "/bin/sh").env("HOME", &dir).output().unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "it's 'quoted'\n$HOME\n");
+        assert_eq!(std::fs::read_to_string(dir.join("ran")).unwrap().trim(), dir.to_string_lossy());
+        assert!(!helper.exists() && !sock.exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

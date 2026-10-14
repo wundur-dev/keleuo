@@ -234,9 +234,10 @@ impl AgentSession {
     }
 
     /// Whether the agent's own terminal interface drives this session (Chat is then a view of
-    /// its session file). Local folders only: its hooks reach the window over a local socket.
+    /// its session file). On another machine too: its hooks reach the window through a socket
+    /// its ssh connection forwards.
     pub fn interactive(&self) -> bool {
-        self.backend.capabilities().terminal_view && !self.host.is_remote()
+        self.backend.capabilities().terminal_view
     }
 
     /// Start the session: its agent's interface (unless it waits for another process), in the
@@ -406,25 +407,43 @@ impl AgentSession {
             (Launch::New, None) => (new_session_id(), true),
             (_, id) => (id.unwrap_or_else(new_session_id), false),
         };
+        // On another machine the hooks' helper and settings are written there, by the same
+        // connection, with a socket of this launch's own that it forwards to the window's.
+        let remote = self.host.is_remote().then(|| {
+            static LAUNCHES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let n = LAUNCHES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let (hooks, home) = (self.hooks.as_ref()?, self.host.home_dir()?);
+            let socket = PathBuf::from(format!("/tmp/keleuo-{}-{n}.sock", hooks.token()));
+            hooks.remote(self.backend.as_ref(), &home.join(".cache/keleuo"), &socket).map(|r| (r, socket))
+        }).flatten();
+        let settings = match &remote {
+            Some((r, _)) => Some(r.settings.clone()),
+            None if self.host.is_remote() => None,
+            None => self.hooks.as_ref().map(|h| h.settings.clone()),
+        };
         let options = StartOptions {
             cwd: self.cwd.clone(),
             model: self.model.clone(),
             permission_mode: self.permission_mode.clone(),
             resume: None,
             fork,
-            settings: self.hooks.as_ref().map(|h| h.settings.clone()),
+            settings,
         };
         let Some(spec) = self.backend.terminal_program(&options, &id, new) else { return };
         if crate::perf::enabled() || keleuo_core::env_var("LOG_LAUNCH").is_ok() {
             eprintln!("keleuo: launch {} {}", spec.program, spec.args.iter().filter(|a| !a.ends_with(".json")).cloned().collect::<Vec<_>>().join(" "));
         }
-        let command = self.host.program_command(&spec);
+        let command = match &remote {
+            Some((r, socket)) => self.host.terminal_program_command(&spec, &r.files, Some((socket, &r.here))),
+            None => self.host.terminal_program_command(&spec, &[], None),
+        };
         let placeholder = Placeholder {
             lines: last_lines(&self.chat, 12),
             label: format!("Starting {}...", self.backend.name()),
         };
         let weak = cx.entity().downgrade();
-        let images = self.backend.terminal_paste_image().map(|paste_key| {
+        // A pasted image is kept here, where the agent on another machine cannot read it.
+        let images = self.backend.terminal_paste_image().filter(|_| !self.host.is_remote()).map(|paste_key| {
             let (w1, w2) = (weak.clone(), weak.clone());
             ImageSupport {
                 paste_key,
@@ -528,11 +547,27 @@ impl AgentSession {
             self.type_message(&text, cx);
             return;
         }
+        if self.host.is_remote() {
+            // The agent reads the files where it runs: copy them there first.
+            let (host, local) = (self.host.clone(), images.clone());
+            cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+                let there = cx.background_spawn(async move { copy_images_to(host.as_ref(), &local) }).await;
+                let _ = this.update(cx, |s, cx| s.paste_images(text, there, images, cx));
+            })
+            .detach();
+            return;
+        }
+        self.paste_images(text, images.clone(), images, cx);
+    }
+
+    /// Paste `paths` (the images where the agent runs), then type `text`; `shown` are the same
+    /// images here, for Chat.
+    fn paste_images(&mut self, text: String, paths: Vec<PathBuf>, shown: Vec<PathBuf>, cx: &mut Context<Self>) {
         let Some(view) = self.terminal_view() else { return };
         let Some(pty) = view.read(cx).pty.clone() else { return };
         let bracketed = view.read(cx).bracketed_paste();
-        let pieces: Vec<Vec<u8>> = images.iter().filter_map(|p| self.backend.terminal_attach(p, bracketed)).collect();
-        self.pasted_images.extend(images.iter().cloned());
+        let pieces: Vec<Vec<u8>> = paths.iter().filter_map(|p| self.backend.terminal_attach(p, bracketed)).collect();
+        self.pasted_images.extend(shown);
         cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
             for piece in pieces {
                 pty.write(piece);
@@ -1167,4 +1202,21 @@ impl Drop for AgentSession {
     fn drop(&mut self) {
         self.release();
     }
+}
+
+/// Copy `images` (here) into a folder of Keleuo's on `host`, giving their paths there; one that
+/// cannot be copied is left out.
+fn copy_images_to(host: &dyn keleuo_core::host::Host, images: &[PathBuf]) -> Vec<PathBuf> {
+    let Some(dir) = host.home_dir().map(|h| h.join(".cache/keleuo/images")) else { return Vec::new() };
+    if host.create_dir_all(&dir).is_err() {
+        return Vec::new();
+    }
+    images
+        .iter()
+        .filter_map(|p| {
+            let there = dir.join(p.file_name()?);
+            host.write(&there, &std::fs::read(p).ok()?).ok()?;
+            Some(there)
+        })
+        .collect()
 }

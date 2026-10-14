@@ -613,7 +613,8 @@ pub fn follow(host: &dyn Host, path: &Path, cwd: &str, sink: &crate::agent::Sink
             }
         }
         round += 1;
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        // Over ssh each look is a round trip: less often.
+        std::thread::sleep(std::time::Duration::from_millis(if host.is_remote() { 300 } else { 100 }));
     }
 }
 

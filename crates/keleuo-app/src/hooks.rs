@@ -160,6 +160,44 @@ fn route(call: Call, cx: &mut App) {
 /// the window has no hook socket or the backend no hooks.
 pub struct Registration {
     pub settings: PathBuf,
+    token: String,
+    /// The window's socket.
+    socket: PathBuf,
+}
+
+/// `keleuo-hook` for an agent on another machine (see the file).
+const REMOTE_HELPER: &str = include_str!("bin/keleuo-hook.py");
+
+impl Registration {
+    pub fn token(&self) -> &str {
+        &self.token
+    }
+
+    /// For an agent on another machine, which has no `keleuo-hook`: the settings file to start
+    /// it with and the files to write there first (in `dir`: the Python helper, and settings
+    /// naming `socket`, a socket there that its connection forwards to the window's). Also
+    /// the window's socket, the far end of that forward.
+    pub fn remote(&self, backend: &dyn keleuo_core::agent::Backend, dir: &Path, socket: &Path) -> Option<RemoteHooks> {
+        // Each launch its own copy of both: they go when it ends, and other sessions may
+        // still be running.
+        let name = socket.file_stem().map_or_else(|| self.token.clone(), |s| s.to_string_lossy().into_owned());
+        let (helper, settings) = (dir.join(format!("{name}.py")), dir.join(format!("{name}.json")));
+        let quote = |p: &Path| keleuo_core::host::shell_quote(&p.to_string_lossy());
+        let command = |event: &str| format!("python3 {} {} {} {event}", quote(&helper), quote(socket), self.token);
+        let text = backend.hook_settings(&command)?;
+        Some(RemoteHooks {
+            settings: settings.clone(),
+            files: vec![(helper, REMOTE_HELPER.to_string()), (settings, text)],
+            here: self.socket.clone(),
+        })
+    }
+}
+
+/// What [`Registration::remote`] gives.
+pub struct RemoteHooks {
+    pub settings: PathBuf,
+    pub files: Vec<(PathBuf, String)>,
+    pub here: PathBuf,
 }
 
 impl Drop for Registration {
@@ -190,7 +228,7 @@ pub fn register(
     let settings = state.dir.join(format!("{token}.json"));
     std::fs::write(&settings, text).ok()?;
     state.sessions.insert(token.clone(), session);
-    Some(Registration { settings })
+    Some(Registration { settings, token, socket })
 }
 
 #[cfg(all(test, unix))]
