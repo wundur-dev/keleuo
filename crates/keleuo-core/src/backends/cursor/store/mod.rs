@@ -4,8 +4,10 @@
 //! read by the reader for its `schemaVersion`, else by each reader in turn, newest first. When
 //! none can read it, the caller falls back to showing no earlier messages.
 //!
-//! The database is copied (with its write-ahead log, if Cursor has one open) and the copy
-//! opened read-only: Cursor's own files are never opened for writing or locked.
+//! On this machine the database is opened in place, read-only (Cursor's files are never
+//! written; only the records needed are read, so a chat of hundreds of megabytes, mostly file
+//! snapshots, reads at once). On another machine it is copied here with its write-ahead log,
+//! up to [`REMOTE_MAX`]; a larger one is not read.
 
 mod v1;
 
@@ -51,23 +53,35 @@ pub fn chat_dir(host: &dyn Host, project: &Path, id: &str) -> Option<PathBuf> {
 /// Chat `id` of `project`, read from Cursor's database. An error when it is not there or no
 /// reader could make sense of it.
 pub fn load(host: &dyn Host, project: &Path, id: &str) -> anyhow::Result<Conversation> {
+    let events = read(host, project, id)?;
+    Ok(conversation(&project.to_string_lossy(), id, events))
+}
+
+/// Chat `id` of `project` as neutral events, from Cursor's database.
+pub fn read(host: &dyn Host, project: &Path, id: &str) -> anyhow::Result<Vec<Event>> {
     let dir = chat_dir(host, project, id).ok_or_else(|| anyhow::anyhow!("Cursor has no chat {id}"))?;
     let schema = host
         .read_to_string(&dir.join("meta.json"))
         .ok()
         .and_then(|t| serde_json::from_str::<Value>(&t).ok())
         .and_then(|m| m.get("schemaVersion")?.as_u64());
-    let copy = Copy::of(host, &dir)?;
-    let db = rusqlite::Connection::open_with_flags(&copy.db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let (db, _copy) = open(host, &dir)?;
     let cwd = project.to_string_lossy();
     let mut failures = Vec::new();
     for reader in ordered(schema) {
         match reader.events(&db, &cwd).and_then(check) {
-            Ok(events) => return Ok(conversation(&cwd, id, events)),
+            Ok(events) => return Ok(events),
             Err(e) => failures.push(format!("reader v{} (built against {}): {e}", reader.schema(), reader.built_against())),
         }
     }
     anyhow::bail!("could not read Cursor chat {id} (schemaVersion {schema:?}): {}", failures.join("; "))
+}
+
+/// How far along chat `id`'s database is (its size and its write-ahead log's): what changes
+/// when Cursor writes a turn. `None` while it has none.
+pub fn written(host: &dyn Host, project: &Path, id: &str) -> Option<(u64, u64)> {
+    let dir = chat_dir(host, project, id)?;
+    Some((host.len(&dir.join("store.db")).ok()?, host.len(&dir.join("store.db-wal")).unwrap_or(0)))
 }
 
 /// The readers to try for `schema`: its own first, then the rest, newest first.
@@ -97,6 +111,27 @@ pub fn conversation(cwd: &str, id: &str, events: Vec<Event>) -> Conversation {
     chat.status = None;
     chat.replaying = false;
     chat
+}
+
+/// The largest database copied from another machine to be read (bytes).
+pub const REMOTE_MAX: u64 = 64 << 20;
+
+/// Chat folder `dir`'s database, read-only: in place here, else a copy (kept while it is read).
+fn open(host: &dyn Host, dir: &Path) -> anyhow::Result<(rusqlite::Connection, Option<Copy>)> {
+    use rusqlite::OpenFlags;
+    let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+    if !host.is_remote() {
+        let path = dir.join("store.db");
+        let db = rusqlite::Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
+        // Cursor may be writing a turn: wait for it rather than fail.
+        db.busy_timeout(std::time::Duration::from_secs(2))?;
+        return Ok((db, None));
+    }
+    let size = host.len(&dir.join("store.db"))?;
+    anyhow::ensure!(size <= REMOTE_MAX, "its record is {} MB, too large to fetch from the other machine", size >> 20);
+    let copy = Copy::of(host, dir)?;
+    let db = rusqlite::Connection::open_with_flags(&copy.db, flags)?;
+    Ok((db, Some(copy)))
 }
 
 /// The database copied into a folder of its own, removed when dropped.
