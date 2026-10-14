@@ -3,10 +3,14 @@
 //! session lands in the open window instead of a second app.
 //!
 //! The socket is named after the config folder, so test runs (`KELEUO_CONFIG_DIR`) never
-//! reach a person's own window.
+//! reach a person's own window. Not on Windows yet (no Unix sockets in Rust's standard library
+//! there): each command opens its own window.
 
+#[cfg(unix)]
 use std::hash::{DefaultHasher, Hash, Hasher};
+#[cfg(unix)]
 use std::io::{BufRead, BufReader, Write};
+#[cfg(unix)]
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 
@@ -22,6 +26,7 @@ pub struct Request {
     pub quit: bool,
 }
 
+#[cfg_attr(not(unix), allow(dead_code))]
 impl Request {
     fn line(&self) -> String {
         if self.quit {
@@ -44,6 +49,7 @@ impl Request {
 }
 
 /// The socket path: short (sockets allow about 100 bytes), per user and config folder.
+#[cfg(unix)]
 pub fn socket_path() -> PathBuf {
     let mut h = DefaultHasher::new();
     keleuo_core::settings::config_dir().hash(&mut h);
@@ -52,6 +58,20 @@ pub fn socket_path() -> PathBuf {
 }
 
 /// Hand `request` to a window that is already open. True when one took it.
+#[cfg(not(unix))]
+pub fn hand_over(_request: &Request) -> bool {
+    false
+}
+
+/// Listen for later commands (not on Windows yet).
+#[cfg(not(unix))]
+pub fn listen(_on_request: impl Fn(Request) + Send + 'static) {}
+
+#[cfg(not(unix))]
+pub fn stop_listening() {}
+
+/// Hand `request` to a window that is already open. True when one took it.
+#[cfg(unix)]
 pub fn hand_over(request: &Request) -> bool {
     let Ok(mut stream) = UnixStream::connect(socket_path()) else {
         return false;
@@ -65,6 +85,7 @@ pub fn hand_over(request: &Request) -> bool {
 }
 
 /// Listen for later commands; each request goes to `on_request` (on a background thread).
+#[cfg(unix)]
 pub fn listen(on_request: impl Fn(Request) + Send + 'static) {
     let path = socket_path();
     // A socket left by a window that crashed: nobody answers it, so it can go.
@@ -89,6 +110,7 @@ pub fn listen(on_request: impl Fn(Request) + Send + 'static) {
 }
 
 /// Remove the socket when the window closes.
+#[cfg(unix)]
 pub fn stop_listening() {
     let _ = std::fs::remove_file(socket_path());
 }

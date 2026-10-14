@@ -116,13 +116,20 @@ impl LiveOutputs {
     }
 }
 
-/// `/tmp/claude-<uid>/<project>/<session>/tasks` for a session file.
+/// `/tmp/claude-<uid>/<project>/<session>/tasks` for a session file. Not known on Windows (no
+/// running commands' output there yet).
+#[cfg(unix)]
 fn tasks_dir(session: &Path) -> Option<PathBuf> {
     use std::os::unix::fs::MetadataExt;
     let uid = std::fs::metadata(session).ok()?.uid();
     let project = session.parent()?.file_name()?;
     let id = session.file_stem()?;
     Some(PathBuf::from(format!("/tmp/claude-{uid}")).join(project).join(id).join("tasks"))
+}
+
+#[cfg(not(unix))]
+fn tasks_dir(_session: &Path) -> Option<PathBuf> {
+    None
 }
 
 /// Output as a terminal would leave it on screen: colour codes dropped, and a line redrawn

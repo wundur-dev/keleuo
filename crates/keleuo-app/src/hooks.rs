@@ -9,6 +9,7 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+#[cfg(unix)]
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -37,7 +38,7 @@ impl Reply {
         {
             let _ = self.0.write_all(format!("{answer}\n").as_bytes());
         }
-        let _ = &mut self;
+        let _ = (&mut self, answer);
     }
 }
 

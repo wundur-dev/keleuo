@@ -8,7 +8,9 @@
 //!
 //! Standard library only, so it starts in a few milliseconds.
 
-use std::io::{BufRead, BufReader, Read, Write};
+#[cfg(unix)]
+use std::io::{BufRead, BufReader};
+use std::io::{Read, Write};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -46,6 +48,7 @@ fn ask(_: &str, _: &str, _: &str, _: &str, _: bool) -> Option<String> {
 }
 
 /// A JSON string of plain text (tokens and event names are letters, digits and dashes).
+#[cfg(unix)]
 fn quote(s: &str) -> String {
     let clean: String = s.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_').collect();
     format!("\"{clean}\"")

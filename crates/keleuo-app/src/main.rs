@@ -5,6 +5,9 @@
 //! `--new` starts a session there directly. When a window is already open the request goes to
 //! it (see `instance`) instead of opening a second one.
 
+// A window, not a console program, on Windows (a debug build keeps its console, for the log).
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 extern crate gpui_kit as gpui;
 
 use std::cell::RefCell;
@@ -84,13 +87,24 @@ fn parse_args() -> anyhow::Result<(instance::Request, Option<String>)> {
         let path = if cwd == Path::new("/") { PathBuf::new() } else { cwd };
         return Ok((instance::Request { ssh: String::new(), path, new, quit: false }, None));
     };
-    match cwd.join(arg).canonicalize() {
+    match full_path(&cwd.join(arg)) {
         Ok(p) if p.is_dir() => Ok((instance::Request { ssh: String::new(), path: p, new, quit: false }, None)),
         _ => Ok((
             instance::Request { ssh: String::new(), path: PathBuf::new(), new: false, quit: false },
             Some(format!("{arg} is not a folder that exists.")),
         )),
     }
+}
+
+/// `path` in full, links followed. On Windows without the `\\?\` that marks such a path (it
+/// would show in every path in the window), except a network one, which needs it.
+fn full_path(path: &Path) -> std::io::Result<PathBuf> {
+    let full = path.canonicalize()?;
+    #[cfg(windows)]
+    if let Some(plain) = full.to_str().and_then(|s| s.strip_prefix(r"\\?\")).filter(|s| !s.starts_with("UNC")) {
+        return Ok(PathBuf::from(plain));
+    }
+    Ok(full)
 }
 
 /// Quit, asking first when a session is working (see `Shell::confirm_quit`).
