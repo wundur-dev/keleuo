@@ -155,26 +155,6 @@ impl ChatPanel {
         el.into_any_element()
     }
 
-    /// The strip above the chat while this turn's subagents run.
-    pub(super) fn render_agent_strip(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let chat = &self.session.read(cx).chat;
-        chat.running_agents().next()?;
-        let agents: Vec<SubAgent> = chat.turn_agents().to_vec();
-        let theme = cx.theme();
-        let (border, bg) = (theme.border, theme.secondary);
-        let mut strip = div()
-            .flex_none()
-            .flex()
-            .flex_col()
-            .border_b_1()
-            .border_color(border)
-            .bg(bg.opacity(0.6));
-        for a in &agents {
-            strip = strip.child(self.render_agent(a, false, cx));
-        }
-        Some(strip.into_any_element())
-    }
-
     /// A watched subagent: its description and state, then its items as they arrive. No
     /// message box: it is the subagent's work, not a conversation to write into.
     pub(super) fn render_agent_view(&mut self, id: &str, cx: &mut Context<Self>) -> Div {

@@ -382,7 +382,42 @@ impl ChatPanel {
             self.load_earlier(from, to, cx);
         }
         let last = ix + 1 == self.list_len;
-        // A centred column of comfortable width, the page behind it.
+        // In a run of one tool's calls: the first entry is the group's header, the others show
+        // only while it is open (closed, they take no room).
+        let mut member = false;
+        let mut group = None;
+        if let Some((run, key)) = self.tool_group(ix, cx) {
+            let open = self.toggled.contains(&key);
+            if ix == run.start {
+                group = Some(self.render_tool_group(run, key, open, cx));
+            }
+            if !open {
+                return match group {
+                    Some(header) => self.column(header, last),
+                    None => div().into_any_element(),
+                };
+            }
+            member = true;
+        }
+        let parts = match self.preview_text(ix, &item, cx) {
+            Some(text) => vec![self.render_preview(text, cx)],
+            None => self.render_items(std::slice::from_ref(&item), &format!("main{ix}"), cx),
+        };
+        let body = div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .when(member, |d| d.pl_4())
+            .children(parts);
+        match group {
+            Some(header) => self.column(div().w_full().flex().flex_col().gap_2().child(header).child(body).into_any_element(), last),
+            None => self.column(body.into_any_element(), last),
+        }
+    }
+
+    /// An entry in the centred column of comfortable width, the page behind it.
+    fn column(&self, content: AnyElement, last: bool) -> AnyElement {
         div()
             .w_full()
             .flex()
@@ -390,19 +425,23 @@ impl ChatPanel {
             .px_4()
             .pt_3()
             .when(last, |d| d.pb_4())
-            .child(
-                div()
-                    .w_full()
-                    .max_w(px(COLUMN))
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .children(match self.preview_text(ix, &item, cx) {
-                        Some(text) => vec![self.render_preview(text, cx)],
-                        None => self.render_items(std::slice::from_ref(&item), &format!("main{ix}"), cx),
-                    }),
-            )
+            .child(div().w_full().max_w(px(COLUMN)).flex().flex_col().gap_2().child(content))
             .into_any_element()
+    }
+
+    /// The run of one tool's calls item `ix` is in (see [`keleuo_core::conversation::tool_run`]),
+    /// and the key its open state is kept under.
+    fn tool_group(&self, ix: usize, cx: &App) -> Option<(std::ops::Range<usize>, String)> {
+        let chat = &self.session.read(cx).chat;
+        let items = match &self.agent {
+            Some(id) => &chat.agent(id)?.items,
+            None => &chat.items,
+        };
+        // A subagent's card and a call with a fix to offer stay on their own.
+        let run = keleuo_core::conversation::tool_run(items, ix, |t| chat.agent(&t.id).is_none() && t.issue.is_none())?;
+        let Some(Item::Tool(first)) = items.get(run.start) else { return None };
+        let key = format!("group:{}", first.id);
+        Some((run, key))
     }
 
     pub fn focus_input(&self, window: &mut Window, cx: &mut App) {
@@ -713,7 +752,6 @@ impl Render for ChatPanel {
             .track_focus(&self.focus)
             .on_action(cx.listener(|p, _: &CopyConversation, window, cx| p.copy_conversation(window, cx)))
             .child(self.render_header(cx))
-            .children(self.render_agent_strip(cx))
             .when_some(terminal.clone(), |d, term| {
                 d.child(div().flex_1().min_h_0().relative().child(term))
                     .children(self.render_edits(cx))
