@@ -13,7 +13,7 @@ pub mod map;
 pub mod store;
 
 use std::io::{BufRead, BufReader, Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -141,15 +141,38 @@ fn mode_args(mode: Option<&str>) -> Vec<String> {
     }
 }
 
-/// The run for one message.
-fn run_args(options: &StartOptions, chat: &str) -> Vec<String> {
+/// The run for one message, with its images (`--image`, one each: a flag `--help` does not
+/// list, seen in cursor-agent 2026.10.14; the images go with the message as Cursor's own
+/// interface sends pasted ones).
+fn run_args(options: &StartOptions, chat: &str, images: &[PathBuf]) -> Vec<String> {
     let mut args: Vec<String> = ["-p", "--output-format", "stream-json", "--stream-partial-output", "--trust"].map(String::from).into();
     if let Some(model) = &options.model {
         args.extend(["--model".into(), model.clone()]);
     }
     args.extend(mode_args(options.permission_mode.as_deref()));
     args.extend(["--resume".into(), chat.into()]);
+    for image in images {
+        args.extend(["--image".into(), image.to_string_lossy().to_string()]);
+    }
     args
+}
+
+/// The images as paths on `host`: these, or copies written there (in its `/tmp`).
+fn remote_images(host: &dyn Host, images: &[PathBuf]) -> std::io::Result<Vec<PathBuf>> {
+    if !host.is_remote() || images.is_empty() {
+        return Ok(images.to_vec());
+    }
+    let dir = PathBuf::from(format!("/tmp/keleuo-images-{}", std::process::id()));
+    host.create_dir_all(&dir)?;
+    images
+        .iter()
+        .map(|local| {
+            let name = local.file_name().map_or_else(|| "image.png".into(), |n| n.to_string_lossy().to_string());
+            let there = dir.join(name);
+            host.write(&there, &std::fs::read(local)?)?;
+            Ok(there)
+        })
+        .collect()
 }
 
 /// A conversation with Cursor Agent: one `cursor-agent` run per message.
@@ -170,28 +193,9 @@ impl CursorAgent {
     fn spec(&self, args: Vec<String>) -> ProgramSpec {
         ProgramSpec { program: "cursor-agent".into(), args, cwd: self.options.cwd.clone(), ..Default::default() }
     }
-}
 
-impl Agent for CursorAgent {
-    fn running(&self) -> bool {
-        self.sink.is_some()
-    }
-
-    fn start(&mut self, host: Arc<dyn Host>, options: &StartOptions, sink: Sink) -> anyhow::Result<()> {
-        *self.chat.lock().unwrap() = options.resume.clone();
-        self.host = Some(host);
-        self.options = options.clone();
-        sink(Message::Event(Event::Started {
-            session_id: options.resume.clone(),
-            model: options.model.clone(),
-            permission_mode: options.permission_mode.clone(),
-            cwd: Some(options.cwd.to_string_lossy().to_string()),
-        }));
-        self.sink = Some(sink);
-        Ok(())
-    }
-
-    fn send(&mut self, text: &str) -> std::io::Result<()> {
+    /// Start the run for one message (and its images, files on this machine).
+    fn run(&mut self, text: &str, images: &[PathBuf]) -> std::io::Result<()> {
         let (Some(host), Some(sink)) = (self.host.clone(), self.sink.clone()) else {
             return Err(std::io::Error::other("Cursor is not started"));
         };
@@ -202,6 +206,7 @@ impl Agent for CursorAgent {
         let (chat, current, stopped) = (self.chat.clone(), self.current.clone(), self.stopped.clone());
         let base = self.spec(Vec::new());
         let text = text.to_string();
+        let images = images.to_vec();
         // Off the window's thread: making the chat and starting the run take a moment.
         std::thread::spawn(move || {
             let end = |error: String| {
@@ -227,7 +232,12 @@ impl Agent for CursorAgent {
                     Err(e) => return end(format!("could not start cursor-agent: {e}")),
                 },
             };
-            let spec = host.program_command(&ProgramSpec { args: run_args(&options, &id), ..base });
+            // On another machine the images are copied there first: the run reads them there.
+            let images = match remote_images(host.as_ref(), &images) {
+                Ok(paths) => paths,
+                Err(e) => return end(format!("could not copy the images: {e}")),
+            };
+            let spec = host.program_command(&ProgramSpec { args: run_args(&options, &id, &images), ..base });
             // A group of its own: the run starts a worker that writes the reply, and stopping
             // the run must end that too.
             let mut cmd = spec.to_command();
@@ -292,6 +302,38 @@ impl Agent for CursorAgent {
         });
         Ok(())
     }
+}
+
+impl Agent for CursorAgent {
+    fn running(&self) -> bool {
+        self.sink.is_some()
+    }
+
+    fn start(&mut self, host: Arc<dyn Host>, options: &StartOptions, sink: Sink) -> anyhow::Result<()> {
+        *self.chat.lock().unwrap() = options.resume.clone();
+        self.host = Some(host);
+        self.options = options.clone();
+        sink(Message::Event(Event::Started {
+            session_id: options.resume.clone(),
+            model: options.model.clone(),
+            permission_mode: options.permission_mode.clone(),
+            cwd: Some(options.cwd.to_string_lossy().to_string()),
+        }));
+        self.sink = Some(sink);
+        Ok(())
+    }
+
+    fn send(&mut self, text: &str) -> std::io::Result<()> {
+        self.run(text, &[])
+    }
+
+    fn send_with_images(&mut self, text: &str, images: &[PathBuf]) -> std::io::Result<()> {
+        self.run(text, images)
+    }
+
+    fn takes_images(&self) -> bool {
+        true
+    }
 
     fn answer_permission(&mut self, _request_id: &str, _allow: bool, _input: &Value) -> std::io::Result<()> {
         // Cursor never asks when run like this.
@@ -352,11 +394,56 @@ mod tests {
     #[test]
     fn every_run_continues_the_chat() {
         let options = StartOptions { model: Some("auto".into()), permission_mode: Some("plan".into()), ..Default::default() };
-        let args = run_args(&options, "c1");
+        let args = run_args(&options, "c1", &[]);
         assert_eq!(&args[..2], ["-p", "--output-format"]);
         assert!(args.windows(2).any(|w| w == ["--model", "auto"]));
         assert!(args.windows(2).any(|w| w == ["--mode", "plan"]));
         assert!(args.ends_with(&["--resume".into(), "c1".into()]));
+        let args = run_args(&options, "c1", &[PathBuf::from("/tmp/a.png"), PathBuf::from("/tmp/b.png")]);
+        assert!(args.ends_with(&["--image".into(), "/tmp/a.png".into(), "--image".into(), "/tmp/b.png".into()]));
+    }
+
+    /// A 32 by 32 red PNG.
+    fn red_png() -> Vec<u8> {
+        fn chunk(out: &mut Vec<u8>, kind: &[u8], data: &[u8]) {
+            out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+            let mut body = kind.to_vec();
+            body.extend_from_slice(data);
+            out.extend_from_slice(&body);
+            out.extend_from_slice(&crc32(&body).to_be_bytes());
+        }
+        fn crc32(data: &[u8]) -> u32 {
+            let mut crc = !0u32;
+            for &b in data {
+                crc ^= u32::from(b);
+                for _ in 0..8 {
+                    crc = if crc & 1 == 1 { (crc >> 1) ^ 0xEDB8_8320 } else { crc >> 1 };
+                }
+            }
+            !crc
+        }
+        // Uncompressed deflate: one stored block holding every row.
+        let row: Vec<u8> = std::iter::once(0u8).chain([220u8, 30, 30].repeat(32)).collect();
+        let raw: Vec<u8> = row.repeat(32);
+        let mut z = vec![0x78, 0x01, 0x01];
+        z.extend_from_slice(&(raw.len() as u16).to_le_bytes());
+        z.extend_from_slice(&(!(raw.len() as u16)).to_le_bytes());
+        z.extend_from_slice(&raw);
+        let (mut a, mut b) = (1u32, 0u32);
+        for &x in &raw {
+            a = (a + u32::from(x)) % 65521;
+            b = (b + a) % 65521;
+        }
+        z.extend_from_slice(&((b << 16) | a).to_be_bytes());
+        let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+        let mut ihdr = Vec::new();
+        ihdr.extend_from_slice(&32u32.to_be_bytes());
+        ihdr.extend_from_slice(&32u32.to_be_bytes());
+        ihdr.extend_from_slice(&[8, 2, 0, 0, 0]);
+        chunk(&mut png, b"IHDR", &ihdr);
+        chunk(&mut png, b"IDAT", &z);
+        chunk(&mut png, b"IEND", &[]);
+        png
     }
 
     /// Against the real `cursor-agent` (signed in; spends a little): two messages in one chat,
@@ -400,6 +487,23 @@ mod tests {
         eprintln!("second: {:?}", reply(&second));
         assert!(reply(&second).to_lowercase().contains("heron"));
         assert!(matches!(second.last(), Some(Event::TurnEnded { error: None, .. })));
+        // An image goes with the message.
+        let red = dir.join("red.png");
+        std::fs::write(&red, red_png()).unwrap();
+        agent.send_with_images("What colour is the attached image? One word, no tools.", &[red]).unwrap();
+        let mut events = Vec::new();
+        loop {
+            match rx.recv_timeout(Duration::from_secs(120)).expect("the turn ends") {
+                Message::Event(e @ Event::TurnEnded { .. }) => {
+                    events.push(e);
+                    break;
+                }
+                Message::Event(e) => events.push(e),
+                _ => {}
+            }
+        }
+        eprintln!("image: {:?}", reply(&events));
+        assert!(reply(&events).to_lowercase().contains("red"));
         // Stopped part way: the run ends, as interrupted.
         agent.send("Write a 2000-word story about a heron, in plain prose.").unwrap();
         std::thread::sleep(Duration::from_secs(4));
