@@ -82,6 +82,13 @@ impl Backend for CursorBackend {
         Some(ProgramSpec { program: "cursor-agent".into(), args, cwd: options.cwd.clone(), ..Default::default() })
     }
 
+    /// A pasted image path becomes `[Image #N]` in its interface, the image attached (as in
+    /// Claude Code). Images pasted from the clipboard are kept by the window and pasted so.
+    fn terminal_attach(&self, path: &Path, bracketed: bool) -> Option<Vec<u8>> {
+        let p = path.to_string_lossy();
+        Some(if bracketed { format!("\x1b[200~{p}\x1b[201~") } else { p.to_string() }.into_bytes())
+    }
+
     /// Its interface stops a turn on Ctrl+C ("ctrl+c to stop" while it works).
     fn terminal_interrupt(&self) -> Vec<u8> {
         vec![0x03]

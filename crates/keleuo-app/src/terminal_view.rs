@@ -119,17 +119,28 @@ pub struct TerminalView {
     save: Option<Task<()>>,
 }
 
-/// Keeps a pasted image (its bytes and file extension).
-pub type PastedFn = dyn Fn(Vec<u8>, &'static str, &mut App);
+/// Keeps a pasted image (its bytes and file extension); the file it is kept in.
+pub type PastedFn = dyn Fn(Vec<u8>, &'static str, &mut App) -> Option<std::path::PathBuf>;
+/// What to type to attach an image file (bracketed paste or not).
+pub type AttachFn = dyn Fn(&std::path::Path, bool) -> Option<Vec<u8>>;
+
+/// How an image on the clipboard reaches the interface.
+#[derive(Clone)]
+pub enum PasteImage {
+    /// A key that makes the interface read the clipboard itself.
+    Key(Vec<u8>),
+    /// The kept copy's path, typed in (the interface attaches the file at that path).
+    Path(Rc<AttachFn>),
+}
 /// The image behind `[Image #N]`.
 pub type ImageFn = dyn Fn(usize, &App) -> Option<std::path::PathBuf>;
 
-/// Images in an agent's interface: Cmd+V with an image on the clipboard sends `paste_key` (the
-/// interface reads the clipboard itself) after `pasted` keeps a copy; `image` gives the image
-/// behind an `[Image #N]` marker on screen, for a preview while the pointer is over it.
+/// Images in an agent's interface: Cmd+V with an image on the clipboard has `pasted` keep a
+/// copy, then hands it over as `paste` says; `image` gives the image behind an `[Image #N]`
+/// marker on screen, for a preview while the pointer is over it.
 #[derive(Clone)]
 pub struct ImageSupport {
-    pub paste_key: Vec<u8>,
+    pub paste: PasteImage,
     pub pasted: Rc<PastedFn>,
     pub image: Rc<ImageFn>,
 }
@@ -454,16 +465,22 @@ impl TerminalView {
                 _ => None,
             });
             if let Some(image) = image {
-                // The interface pastes it itself (its own `[Image #N]`); keep a copy to show.
+                // A copy is kept (to show, and for an interface that takes a path); the
+                // interface makes its own `[Image #N]`.
                 let ext = match image.format {
                     ImageFormat::Jpeg => "jpg",
                     ImageFormat::Gif => "gif",
                     ImageFormat::Webp => "webp",
                     _ => "png",
                 };
-                (images.pasted)(image.bytes.clone(), ext, cx);
-                if let Some(pty) = &self.pty {
-                    pty.write(images.paste_key.clone());
+                let kept = (images.pasted)(image.bytes.clone(), ext, cx);
+                let bracketed = self.mode().contains(TermMode::BRACKETED_PASTE);
+                let keys = match &images.paste {
+                    PasteImage::Key(key) => Some(key.clone()),
+                    PasteImage::Path(attach) => kept.and_then(|path| attach(&path, bracketed)),
+                };
+                if let (Some(pty), Some(keys)) = (&self.pty, keys) {
+                    pty.write(keys);
                 }
                 return;
             }
