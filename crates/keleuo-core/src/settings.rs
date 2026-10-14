@@ -149,6 +149,11 @@ pub struct Settings {
     pub default_view: String,
     /// The view each session was last shown in, by session id.
     pub session_views: std::collections::BTreeMap<String, String>,
+    /// The permission mode new sessions start in (the agent's own mode name: `"default"` asks
+    /// before acting, `"auto"`, `"acceptEdits"`, `"plan"`); empty is `"auto"`.
+    pub default_permission_mode: String,
+    /// The permission mode each session was last set to, by session id.
+    pub session_modes: std::collections::BTreeMap<String, String>,
     /// The session list folded to a rail.
     pub sessions_folded: bool,
     /// The sessions open when the window last changed, in list order.
@@ -249,6 +254,23 @@ impl Settings {
         while self.session_views.len() > 500 {
             let first = self.session_views.keys().next().cloned().unwrap_or_default();
             self.session_views.remove(&first);
+        }
+    }
+
+    /// The permission mode a session runs in: the one it was set to, else the default.
+    pub fn mode_for(&self, session: Option<&str>) -> String {
+        session
+            .and_then(|id| self.session_modes.get(id))
+            .cloned()
+            .unwrap_or_else(|| if self.default_permission_mode.is_empty() { "auto".into() } else { self.default_permission_mode.clone() })
+    }
+
+    /// Remember a session's permission mode (kept to the last few hundred sessions).
+    pub fn set_mode(&mut self, session: &str, mode: &str) {
+        self.session_modes.insert(session.to_string(), mode.to_string());
+        while self.session_modes.len() > 500 {
+            let first = self.session_modes.keys().next().cloned().unwrap_or_default();
+            self.session_modes.remove(&first);
         }
     }
 

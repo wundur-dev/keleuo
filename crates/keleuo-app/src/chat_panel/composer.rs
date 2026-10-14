@@ -678,21 +678,18 @@ impl ChatPanel {
     /// The permission mode menu.
     fn render_mode_button(&self, cx: &mut Context<Self>) -> AnyElement {
         let session = self.session.read(cx);
-        let mode = session.live_mode.clone().or_else(|| session.permission_mode.clone()).unwrap_or_else(|| "default".into());
+        // The session's mode; what the interface reports only while it runs the session (it
+        // may have been switched there, with Shift+Tab).
+        let live = session.interactive().then(|| session.live_mode.clone()).flatten();
+        let mode = live.or_else(|| session.permission_mode.clone());
         let caps = session.backend.capabilities();
         let w_mode = self.session.downgrade();
-        let modes: Vec<(Option<String>, &'static str)> = vec![
-            (None, "Ask before acting"),
-            (caps.accept_edits_mode.clone(), "Accept edits"),
-            (Some("plan".to_string()), "Plan"),
-        ];
-        let mode_label = match mode.as_str() {
-            "acceptEdits" => "Accept edits",
-            "plan" => "Plan",
-            "auto" => "Auto",
-            "bypassPermissions" => "Bypass permissions",
-            _ => "Ask before acting",
-        };
+        let modes: Vec<(Option<String>, &'static str)> = crate::agent_session::MODES
+            .iter()
+            .filter(|(m, _)| *m != "acceptEdits" || caps.accept_edits_mode.is_some())
+            .map(|(m, label)| (Some(m.to_string()), *label))
+            .collect();
+        let mode_label = crate::agent_session::mode_label(mode.as_deref());
         let mode_button = Button::new("mode")
             .xsmall()
             .ghost()

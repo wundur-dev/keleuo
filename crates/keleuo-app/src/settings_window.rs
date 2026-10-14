@@ -148,6 +148,14 @@ fn chat() -> SettingPage {
     SettingPage::new("Chat").icon(IconName::Bot).resettable(true).groups([
         SettingGroup::new().title("Conversation").items([
             choice(
+                "Permission mode for new sessions",
+                "Auto lets Claude run what it judges safe and asks about the rest; Ask before acting asks about every change and command. Each session can switch on its own, and keeps its choice.",
+                &[("auto", "Auto"), ("default", "Ask before acting"), ("acceptEdits", "Accept edits"), ("plan", "Plan")],
+                "auto",
+                |s| s.default_permission_mode.clone(),
+                |s, v| s.default_permission_mode = v.to_string(),
+            ),
+            choice(
                 "Show what a session costs",
                 "Auto shows the cost only when the agent is billed per use, and how full its context is otherwise.",
                 &[("auto", "Auto"), ("always", "Always"), ("never", "Never (context instead)")],

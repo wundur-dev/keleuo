@@ -317,6 +317,11 @@ impl AgentSession {
         })
         .detach();
         self.hybrid = crate::prefs(cx).hybrid_views;
+        // Always a mode of its own, passed to the agent whichever way it runs (left to the
+        // agent, its interface and its headless mode start in different ones).
+        if self.permission_mode.is_none() {
+            self.permission_mode = Some(cx.global::<crate::AppSettings>().0.borrow().mode_for(self.chat.session_id.as_deref()));
+        }
         if !self.backend.capabilities().terminal_view {
             return;
         }
@@ -702,9 +707,20 @@ impl AgentSession {
         cx.notify();
     }
 
+    /// Keep the session's mode for when it opens again.
+    fn remember_mode(&self, mode: Option<&str>, cx: &mut Context<Self>) {
+        if let (Some(id), Some(mode)) = (&self.chat.session_id, mode) {
+            let settings = cx.global::<crate::AppSettings>().0.clone();
+            settings.borrow_mut().set_mode(id, mode);
+            let _ = settings.borrow().save();
+        }
+    }
+
     /// Switch the permission mode. With the interface running, press its mode key until its
     /// status line shows the mode (as a person would); otherwise restart with it.
     pub fn set_mode(&mut self, mode: Option<String>, cx: &mut Context<Self>) {
+        let mode = Some(mode.unwrap_or_else(|| "default".into()));
+        self.remember_mode(mode.as_deref(), cx);
         let cycle = self.backend.mode_cycle();
         let (Some((modes, key)), true, Some(view)) = (cycle, self.interactive() && self.ready, self.terminal_view()) else {
             self.set_permission_mode(mode, cx);
@@ -800,6 +816,11 @@ impl AgentSession {
         // It is past any question it was asking.
         self.asking = None;
         if let Some(mode) = self.backend.hook_mode(&call.payload) {
+            // Switched in the terminal (Shift+Tab): the session's mode from now on, in Chat too.
+            if self.permission_mode.as_deref() != Some(mode.as_str()) {
+                self.remember_mode(Some(&mode), cx);
+                self.permission_mode = Some(mode.clone());
+            }
             self.live_mode = Some(mode);
         }
         let Some(hook) = self.backend.parse_hook(&call.event, &call.payload, &self.chat.cwd) else { return };
@@ -1145,6 +1166,8 @@ impl AgentSession {
             return;
         }
         self.permission_mode = mode;
+        // What the interface last said no longer holds.
+        self.live_mode = None;
         let now = self.interactive() && self.running(cx) && !self.chat.busy;
         self.stop(cx);
         if now {
@@ -1153,7 +1176,7 @@ impl AgentSession {
         }
         self.chat.push_notice(format!(
             "Permission mode: {}. {}",
-            self.permission_mode.as_deref().unwrap_or("ask before acting"),
+            mode_label(self.permission_mode.as_deref()),
             if now { "Restarted with it." } else { "Applies from the next message." }
         ));
         cx.notify();
@@ -1363,6 +1386,19 @@ const PREVIEW_EVERY: std::time::Duration = std::time::Duration::from_millis(100)
 /// Lines of scrollback and screen the preview is looked for in (a reply taller than this gets
 /// no preview: its start is out of reach).
 const PREVIEW_LINES: usize = 400;
+
+/// The permission modes the composer offers (the agent's name for each, and what it is called
+/// here), and what a mode is called.
+pub const MODES: [(&str, &str); 4] =
+    [("default", "Ask before acting"), ("auto", "Auto"), ("acceptEdits", "Accept edits"), ("plan", "Plan")];
+
+pub fn mode_label(mode: Option<&str>) -> &'static str {
+    match mode {
+        Some("bypassPermissions") => "Bypass permissions",
+        Some(m) => MODES.iter().find(|(name, _)| *name == m).map_or("Ask before acting", |(_, label)| *label),
+        None => "Ask before acting",
+    }
+}
 
 /// A message as compared with its copy in the session file: without the interface's image
 /// markers (`[Image #1]`), its paste markers, and outer spaces.
