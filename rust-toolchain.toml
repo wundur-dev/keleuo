@@ -2,3 +2,5 @@
 channel = "1.99.0"
 components = ["rustfmt", "clippy"]
 profile = "minimal"
+# Both Mac architectures: releases are universal (scripts/bundle-macos.sh).
+targets = ["aarch64-apple-darwin", "x86_64-apple-darwin"]

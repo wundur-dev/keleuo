@@ -1,7 +1,8 @@
 #!/bin/sh
 # bundle-macos.sh <version> <out-dir> [build-number]
 #
-# Build the release binaries and assemble Keleuo.app in <out-dir>. `keleuo` is the window;
+# Build the release binaries for Apple silicon and Intel, join each pair into one universal
+# binary, and assemble Keleuo.app in <out-dir>. `keleuo` is the window;
 # `keleuo-hook` sits beside it because the window finds it next to its own executable.
 # The build number (CFBundleVersion) defaults to 1; the release workflow passes its run number.
 # Not signed here: the release workflow signs and notarizes the bundle it produces.
@@ -15,12 +16,17 @@ REPO=$(cd "$(dirname "$0")/.." && pwd)
 APP="$OUT/Keleuo.app"
 
 cd "$REPO"
-cargo build -p keleuo-app --release --bins
+TARGET=${CARGO_TARGET_DIR:-target}
+for arch in aarch64-apple-darwin x86_64-apple-darwin; do
+    cargo build -p keleuo-app --release --bins --target "$arch"
+done
 
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-TARGET=${CARGO_TARGET_DIR:-target}
-cp "$TARGET/release/keleuo" "$TARGET/release/keleuo-hook" "$APP/Contents/MacOS/"
+for bin in keleuo keleuo-hook; do
+    lipo -create -output "$APP/Contents/MacOS/$bin" \
+        "$TARGET/aarch64-apple-darwin/release/$bin" "$TARGET/x86_64-apple-darwin/release/$bin"
+done
 cp crates/keleuo-app/assets/icon/Keleuo.icns "$APP/Contents/Resources/Keleuo.icns"
 
 cat > "$APP/Contents/Info.plist" <<EOF
