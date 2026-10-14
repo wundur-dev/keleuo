@@ -553,6 +553,7 @@ impl ChatPanel {
         };
         let default_terminal = cx.global::<crate::AppSettings>().0.borrow().view_for(None) == "terminal";
         let muted = theme.muted_foreground;
+        let locked = session.switch_blocked().map(|why| (SharedString::from(why), self.spinner(muted).xsmall()));
         let weak = self.session.downgrade();
         let input = self.input.clone();
         let strip = sheet_tabs::simple_strip(
@@ -563,6 +564,7 @@ impl ChatPanel {
             Joined::Top,
             palette,
             24.,
+            locked,
             Rc::new(move |ix, window, cx| {
                 let view = if ix == 0 { View::Chat } else { View::Terminal };
                 let _ = weak.update(cx, |s, cx| s.set_view(view, cx));

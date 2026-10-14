@@ -88,6 +88,10 @@ pub struct Prefs {
     pub keep_terminal_history: bool,
     /// The terminals' font size, in points.
     pub terminal_font_size: f32,
+    /// Experimental: an agent with its own terminal interface runs it for the session's whole
+    /// life, Chat drawing from its session file, so switching views is instant. Off: Chat runs
+    /// the agent headless and Terminal its interface, one at a time, switching between turns.
+    pub hybrid_views: bool,
 }
 
 /// The terminals' font size when none is set, and the range allowed.
@@ -104,6 +108,7 @@ impl Default for Prefs {
             command_changes: true,
             keep_terminal_history: true,
             terminal_font_size: TERMINAL_FONT_SIZE,
+            hybrid_views: false,
         }
     }
 }

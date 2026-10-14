@@ -62,13 +62,21 @@ pub fn change(cx: &mut App, f: impl FnOnce(&mut Settings)) {
 
 /// A switch for one of the on-by-default prefs.
 fn pref(title: &'static str, description: &'static str, field: fn(&mut Prefs) -> &mut bool) -> SettingItem {
+    switch_pref(title, description, field, true)
+}
+
+fn pref_off_by_default(title: &'static str, description: &'static str, field: fn(&mut Prefs) -> &mut bool) -> SettingItem {
+    switch_pref(title, description, field, false)
+}
+
+fn switch_pref(title: &'static str, description: &'static str, field: fn(&mut Prefs) -> &mut bool, default: bool) -> SettingItem {
     SettingItem::new(
         title,
         SettingField::switch(
             move |cx: &App| get(cx, |s| *field(&mut s.prefs.clone())),
             move |on: bool, cx: &mut App| change(cx, |s| *field(&mut s.prefs) = on),
         )
-        .default_value(true),
+        .default_value(default),
     )
     .description(description)
 }
@@ -179,6 +187,11 @@ fn chat() -> SettingPage {
                 |p| &mut p.paste_pills,
             ),
         ]),
+        SettingGroup::new().title("Experimental").items([pref_off_by_default(
+            "Hybrid Chat and Terminal",
+            "Claude Code's own interface runs for the whole session and Chat is drawn from it, so switching is instant, even mid-turn. Off: Chat runs Claude Code headless, and switching restarts it in the other view between turns. Applies to sessions as they start.",
+            |p| &mut p.hybrid_views,
+        )]),
     ])
 }
 

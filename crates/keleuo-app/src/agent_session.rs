@@ -1,12 +1,16 @@
 //! One chat session: an agent (from its backend) and the conversation it feeds. No drawing here.
 //!
-//! For a backend with its own terminal interface (Claude Code), the session runs that interface
-//! ONCE, in a pseudo-terminal, for the session's whole life. The Terminal view shows it; the
-//! Chat view draws the same conversation from the session's file (followed as it grows) and its
-//! message box types into that same process. Switching views only changes what is shown. The
-//! interface reports through hooks (see `hooks.rs`): when it is up, when a message went in, each
-//! tool, each permission request (answered from Chat, or in the terminal, whichever comes
-//! first) and the end of each turn.
+//! For a backend with its own terminal interface (Claude Code), each view runs the agent its own
+//! way, one at a time: Chat runs it headless (its structured stream, behind the window) and
+//! Terminal runs its interface in a pseudo-terminal. Switching ends one and resumes the
+//! conversation in the other, so it waits for the agent to be idle (see `switch_blocked`).
+//!
+//! With the experimental hybrid setting the session runs the interface ONCE, for its whole
+//! life: Terminal shows it, and Chat draws the same conversation from the session's file
+//! (followed as it grows) and types its messages into that same process, so switching only
+//! changes what is shown. Whenever the interface runs it reports through hooks (see
+//! `hooks.rs`): when it is up, when a message went in, each tool, each permission request
+//! (answered from Chat, or in the terminal, whichever comes first) and the end of each turn.
 //!
 //! A backend without such an interface runs its structured agent behind the window, and there
 //! is only Chat.
@@ -157,6 +161,13 @@ pub struct AgentSession {
     /// The current turn (where it starts in the chat) and the git working tree when it started,
     /// once read: what commands changed is found against it when the turn ends.
     git_turn: Option<(usize, Option<keleuo_core::command_changes::Baseline>)>,
+    /// The interface drives the session in both views (the experimental hybrid setting, read
+    /// when the session begins).
+    hybrid: bool,
+    /// Terminal to Chat: the interface is ending; Chat's agent starts once it has.
+    closing: bool,
+    /// Messages sent while the interface ends, sent once it has.
+    held: Vec<(String, Vec<PathBuf>)>,
 }
 
 impl EventEmitter<SessionEvent> for AgentSession {}
@@ -203,6 +214,9 @@ impl AgentSession {
             restart_after_turn: false,
             restarting: None,
             git_turn: None,
+            hybrid: false,
+            closing: false,
+            held: Vec::new(),
         }
     }
 
@@ -228,16 +242,38 @@ impl AgentSession {
         Some(move |from, to| backend.load_segment(host.as_ref(), &cwd, &id, from, to))
     }
 
-    /// Messages waiting for the interface to be up.
+    /// Messages waiting for the agent to be up.
     pub fn queued_count(&self) -> usize {
-        self.queued.len()
+        self.queued.len() + self.held.len()
     }
 
-    /// Whether the agent's own terminal interface drives this session (Chat is then a view of
-    /// its session file). On another machine too: its hooks reach the window through a socket
-    /// its ssh connection forwards.
+    /// Whether the agent's own terminal interface drives this session now: in Terminal, or in
+    /// both views with the hybrid setting (Chat is then a view of its session file). On
+    /// another machine too: its hooks reach the window through a socket its ssh connection
+    /// forwards.
     pub fn interactive(&self) -> bool {
-        self.backend.capabilities().terminal_view
+        self.backend.capabilities().terminal_view && (self.hybrid || self.view == View::Terminal)
+    }
+
+    /// Why the other view cannot be shown now, if it cannot. Switching restarts the agent in
+    /// the other view, which would cut short what it is doing (not with the hybrid setting,
+    /// where both views show one process).
+    pub fn switch_blocked(&self) -> Option<String> {
+        if self.hybrid || !self.backend.capabilities().terminal_view {
+            return None;
+        }
+        let name = self.backend.name();
+        if self.closing {
+            Some(format!("{name} is closing in the terminal; one moment."))
+        } else if self.chat.pending_permissions().next().is_some() {
+            Some(format!("{name} is waiting for permission. Answer it first."))
+        } else if self.chat.busy || self.chat.running_tools().next().is_some() {
+            Some(format!("{name} is working. Switch when it's done."))
+        } else if self.chat.running_agents().next().is_some() {
+            Some("A subagent is still running in the background. Switch when it's done.".into())
+        } else {
+            None
+        }
     }
 
     /// Start the session: its agent's interface (unless it waits for another process), in the
@@ -257,12 +293,17 @@ impl AgentSession {
             });
         })
         .detach();
-        if !self.interactive() {
+        self.hybrid = crate::prefs(cx).hybrid_views;
+        if !self.backend.capabilities().terminal_view {
             return;
         }
         let want = cx.global::<crate::AppSettings>().0.borrow().view_for(self.chat.session_id.as_deref()).to_string();
         if want == "terminal" {
             self.view = View::Terminal;
+        }
+        // Chat without the hybrid: its agent starts with the first message.
+        if !self.interactive() {
+            return;
         }
         if self.waiting_for.is_none() && !self.dormant {
             self.start_terminal(cx);
@@ -974,6 +1015,11 @@ impl AgentSession {
     /// Send a user turn with images (files). Pastes marked in `text` (see
     /// [`keleuo_core::paste`]) show folded in the chat and go without their markers.
     pub fn send_with(&mut self, text: &str, images: Vec<PathBuf>, cx: &mut Context<Self>) {
+        if self.closing {
+            self.held.push((text.to_string(), images));
+            cx.notify();
+            return;
+        }
         let shown = text.trim();
         let sent = keleuo_core::paste::without_markers(shown);
         let text = sent.trim();
@@ -1083,18 +1129,68 @@ impl AgentSession {
         self.terminal.as_ref().map(|t| t.view.clone())
     }
 
-    /// Show Chat or Terminal. Nothing is started or stopped: both are views of one process.
+    /// Show Chat or Terminal. With the hybrid setting nothing is started or stopped (both are
+    /// views of one process); without it the agent restarts on the conversation in the other
+    /// view, between turns only.
     pub fn set_view(&mut self, view: View, cx: &mut Context<Self>) {
-        if view == self.view || (view == View::Terminal && !self.interactive()) {
+        if view == self.view || (view == View::Terminal && !self.backend.capabilities().terminal_view) || self.switch_blocked().is_some() {
             return;
         }
         crate::perf::switch_begin(if view == View::Terminal { "to Terminal" } else { "to Chat" });
-        if view == View::Terminal && self.terminal.is_none() && self.waiting_for.is_none() {
-            self.start_terminal(cx);
+        if self.hybrid {
+            if view == View::Terminal && self.terminal.is_none() && self.waiting_for.is_none() {
+                self.start_terminal(cx);
+            }
+            self.view = view;
+        } else if view == View::Terminal {
+            // Chat's agent is idle: it ends, and the interface resumes the conversation.
+            self.release();
+            self.view = view;
+            if self.waiting_for.is_none() {
+                self.start_terminal(cx);
+            }
+        } else {
+            self.view = view;
+            self.close_terminal(cx);
         }
-        self.view = view;
         self.remember_view(cx);
         cx.notify();
+    }
+
+    /// Terminal to Chat (without the hybrid): end the interface. Chat shows at once; a message
+    /// sent meanwhile waits for the interface to have exited (two processes on one
+    /// conversation would each write their own turns to its file), then starts Chat's agent.
+    fn close_terminal(&mut self, cx: &mut Context<Self>) {
+        let Some(run) = self.terminal.take() else { return };
+        // Its exit is expected: not watched as the interface quitting by itself.
+        let view = run.view.clone();
+        drop(run);
+        self.release();
+        if view.read(cx).exited {
+            return;
+        }
+        let Some(pty) = view.read(cx).pty.clone() else { return };
+        pty.hang_up();
+        self.closing = true;
+        self.restarting = Some("in Chat".into());
+        cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            // A few seconds at most: a process that will not end is left to its hang-up.
+            for _ in 0..100 {
+                cx.background_executor().timer(std::time::Duration::from_millis(50)).await;
+                if view.read_with(cx, |v, _| v.exited) {
+                    break;
+                }
+            }
+            let _ = this.update(cx, |s, cx| {
+                s.closing = false;
+                s.restarting = None;
+                for (text, images) in std::mem::take(&mut s.held) {
+                    s.send_with(&text, images, cx);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn remember_view(&self, cx: &mut Context<Self>) {

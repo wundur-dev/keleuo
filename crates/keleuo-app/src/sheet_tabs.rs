@@ -10,6 +10,7 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
+use gpui_kit::component::Icon;
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 
@@ -327,6 +328,8 @@ pub fn tab_box(state: &Rc<StripState>, id: impl Into<ElementId>, ix: usize, n: u
 pub type OnSelect = Rc<dyn Fn(usize, &mut Window, &mut App)>;
 
 /// A plain strip of labelled tabs (a session's Chat and Terminal views): click to show.
+/// `locked`: the tabs not shown cannot be chosen now; they are dimmed, carry `icon` (a
+/// spinner, say), and say why on hover.
 #[allow(clippy::too_many_arguments)]
 pub fn simple_strip(
     state: &Rc<StripState>,
@@ -336,19 +339,25 @@ pub fn simple_strip(
     joined: Joined,
     palette: Palette,
     height: f32,
+    locked: Option<(SharedString, Icon)>,
     on_select: OnSelect,
 ) -> Div {
     let mut row = div().flex().flex_1().h_full().pl(px(4.));
     for (ix, label) in labels.iter().enumerate() {
         let select = on_select.clone();
-        row = row.child(
-            tab_box(state, (id, ix), ix, ix, joined)
-                .text_size(px(11.))
+        let tab = tab_box(state, (id, ix), ix, ix, joined).text_size(px(11.));
+        row = row.child(match locked.clone().filter(|_| ix != shown) {
+            Some((why, icon)) => tab
+                .text_color(palette.face_text.opacity(0.5))
+                .child(icon)
+                .child(label.clone())
+                .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(why.clone()).build(window, cx)),
+            None => tab
                 .text_color(if ix == shown { palette.content_text } else { palette.face_text })
                 .cursor_pointer()
                 .child(label.clone())
                 .on_click(move |_, window, cx| select(ix, window, cx)),
-        );
+        });
     }
     div()
         .relative()
