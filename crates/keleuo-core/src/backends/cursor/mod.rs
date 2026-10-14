@@ -50,6 +50,8 @@ impl Backend for CursorBackend {
 
     fn capabilities(&self) -> Capabilities {
         Capabilities {
+            // Its Task tool (reported when each subagent starts and ends).
+            subagents: true,
             // A few of `cursor-agent models`; any other name is typed in.
             models: ["auto", "composer-2.5", "claude-sonnet-5-thinking-high", "claude-opus-5-thinking-high", "gpt-5.3-codex"]
                 .map(String::from)

@@ -324,3 +324,39 @@ fn cursor_turn_maps_onto_a_chat() {
     assert!(replies[1].contains("Created `bye.txt`"));
     assert!(events.iter().any(|e| matches!(e, keleuo_core::agent::Event::TurnEnded { error: None, input_tokens, .. } if *input_tokens > 10_000)));
 }
+
+/// Cursor's Task tool starts subagents: each a subagent card with its description, ended with
+/// what it said; the reply's whole blocks replace their pieces (no text twice).
+#[test]
+fn cursor_tasks_are_subagents() {
+    use keleuo_core::backends::cursor::map::Mapper as CursorMapper;
+    use keleuo_core::conversation::AgentStatus;
+    let mut m = CursorMapper::new("/tmp/p", None);
+    let mut chat = Conversation::new("");
+    chat.push_user("two subagents");
+    for e in fixture("cursor_subagents.jsonl").lines().flat_map(|l| m.map_line(l)) {
+        chat.apply(e);
+    }
+    assert_eq!(chat.agents.len(), 2);
+    let described: Vec<&str> = chat.agents.iter().map(|a| a.description.as_str()).collect();
+    assert_eq!(described, ["Read hello.txt content", "Read bye.txt content"]);
+    assert!(chat.agents.iter().all(|a| a.status == AgentStatus::Done));
+    assert_eq!(chat.agents[1].summary.as_deref(), Some("bye"));
+    assert!(chat.agents[0].duration_ms.unwrap() > 0);
+    let replies: Vec<&str> = chat
+        .items
+        .iter()
+        .filter_map(|i| match i {
+            Item::Assistant { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        replies,
+        [
+            "Using the parallel-agents skill, then launching two Task subagents to read the files.",
+            "Using dispatching-parallel-agents — launching both file-reader subagents now.",
+            "**hello.txt** is `hello`; **bye.txt** is `bye`.",
+        ]
+    );
+}

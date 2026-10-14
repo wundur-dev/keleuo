@@ -10,8 +10,11 @@
 //! a string or a list of parts (`text`, `reasoning`, `tool-call` with `toolCallId`, `toolName`
 //! and `args`, `tool-result` with `toolCallId` and `result`). The person's own words are the
 //! `<user_query>` of a user message; user messages without one are context Cursor adds (the
-//! machine, the folder). Other records (file contents kept for checkpoints, per-request
-//! notes) are not part of the conversation.
+//! machine, the folder). Tools Cursor loads on demand are called through `CallDynamicTool`
+//! (`args.toolName`, `args.arguments`), after a `GetDynamicTools` lookup that is not shown; a
+//! `Task` call so is a subagent, whose result has its answer inside `<response>`. Other
+//! records (file contents kept for checkpoints, per-request notes) are not part of the
+//! conversation.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -66,6 +69,8 @@ fn events(messages: &[Value], cwd: &str) -> Vec<Event> {
     let mut out = Vec::new();
     // Tool calls by id, for their results: the name and input given to the call.
     let mut calls: HashMap<String, (String, Value)> = HashMap::new();
+    // Lookups of tools, not shown (nor their results).
+    let mut hidden: Vec<String> = Vec::new();
     for m in messages {
         let parts = match m.get("content") {
             Some(Value::Array(parts)) => parts.as_slice(),
@@ -85,13 +90,21 @@ fn events(messages: &[Value], cwd: &str) -> Vec<Event> {
                         "text" if !s(p, "text").trim().is_empty() => {
                             out.push(Event::Text { text: s(p, "text").to_string(), parent: None });
                         }
+                        "tool-call" if s(p, "toolName") == "GetDynamicTools" => hidden.push(s(p, "toolCallId").to_string()),
                         "tool-call" => {
                             let id = s(p, "toolCallId").to_string();
                             let (name, input) = tool(s(p, "toolName"), p.get("args").unwrap_or(&Value::Null));
                             let summary = summary(&name, &input, cwd);
                             let diff = diff::from_input(&name, &input);
                             calls.insert(id.clone(), (name.clone(), input.clone()));
-                            out.push(Event::ToolCall { id, name, summary, input, diff, parent: None });
+                            out.push(Event::ToolCall { id: id.clone(), name: name.clone(), summary, input: input.clone(), diff, parent: None });
+                            if name == "Task" {
+                                out.push(Event::SubagentStarted {
+                                    id,
+                                    description: s(&input, "description").to_string(),
+                                    kind: s(&input, "subagent_type").to_string(),
+                                });
+                            }
                         }
                         _ => {}
                     }
@@ -100,12 +113,26 @@ fn events(messages: &[Value], cwd: &str) -> Vec<Event> {
             Some("tool") => {
                 for p in parts.iter().filter(|p| s(p, "type") == "tool-result") {
                     let id = s(p, "toolCallId").to_string();
+                    if hidden.contains(&id) {
+                        continue;
+                    }
                     let output = match p.get("result") {
                         Some(Value::String(t)) => t.clone(),
                         Some(v) => v.to_string(),
                         None => String::new(),
                     };
                     let (name, input) = calls.get(&id).cloned().unwrap_or_default();
+                    if name == "Task" {
+                        // A subagent: its answer, in its card and as the call's result.
+                        let answer = between(&output, "<response>", "</response>").map(str::trim).map(str::to_string);
+                        let failed = answer.is_none();
+                        if let Some(a) = &answer {
+                            out.push(Event::Text { text: a.clone(), parent: Some(id.clone()) });
+                        }
+                        out.push(Event::ToolResult { id: id.clone(), output: answer.clone().unwrap_or(output), is_error: failed, diff: None, file_changed: None, parent: None });
+                        out.push(Event::SubagentEnded { id, failed, summary: answer, tokens: None, duration_ms: None });
+                        continue;
+                    }
                     let is_error = failed(&name, &output);
                     let file_changed = (diff::is_edit_tool(&name) && !is_error)
                         .then(|| input.get("file_path").and_then(Value::as_str).map(PathBuf::from))
@@ -121,14 +148,24 @@ fn events(messages: &[Value], cwd: &str) -> Vec<Event> {
 
 /// The person's words in a user message part: what is inside `<user_query>`.
 fn user_query(text: &str) -> Option<&str> {
-    let start = text.find("<user_query>")? + "<user_query>".len();
-    let end = text[start..].find("</user_query>").map_or(text.len(), |e| start + e);
-    Some(text[start..end].trim())
+    between(text, "<user_query>", "</user_query>").map(str::trim)
+}
+
+/// What is between `open` and `close` (or the end) in `text`.
+fn between<'a>(text: &'a str, open: &str, close: &str) -> Option<&'a str> {
+    let start = text.find(open)? + open.len();
+    let end = text[start..].find(close).map_or(text.len(), |e| start + e);
+    Some(&text[start..end])
 }
 
 /// A Cursor tool call in the names Keleuo's cards and diffs know: `StrReplace` is an Edit
 /// (`old_string`, `new_string`), `Write` a Write (`content`), with the file as `file_path`.
 fn tool(name: &str, args: &Value) -> (String, Value) {
+    // A tool loaded on demand: the one it calls, with its arguments.
+    if name == "CallDynamicTool" {
+        let inner = s(args, "toolName");
+        return tool(if inner.is_empty() { name } else { inner }, args.get("arguments").unwrap_or(&Value::Null));
+    }
     let mut input: Map<String, Value> = args.as_object().cloned().unwrap_or_default();
     if let Some(path) = input.remove("path") {
         input.insert("file_path".into(), path);
@@ -150,6 +187,9 @@ fn tool(name: &str, args: &Value) -> (String, Value) {
 fn summary(name: &str, input: &Value, cwd: &str) -> String {
     if name == "Shell" {
         return s(input, "command").to_string();
+    }
+    if name == "Task" {
+        return s(input, "description").to_string();
     }
     for key in ["file_path", "pattern", "glob_pattern"] {
         let value = s(input, key);
@@ -227,6 +267,12 @@ pub(super) mod tests {
                 {"type": "tool-result", "toolCallId": "call-3", "toolName": "StrReplace", "result": "The file /tmp/p/hello.txt has been updated."},
                 {"type": "tool-result", "toolCallId": "call-4", "toolName": "Shell", "result": "Exit code: 0\n\nCommand output:\n\n```\nbye.txt\nhello.txt\n\n```"}]}),
             json!({"role": "assistant", "id": "a3", "content": [{"type": "reasoning", "text": ""}, {"type": "text", "text": "`hello.txt` contains `hello`.\n\nCreated `bye.txt` with `bye`."}]}),
+            json!({"role": "assistant", "id": "a5", "content": [
+                {"type": "tool-call", "toolCallId": "call-6", "toolName": "GetDynamicTools", "args": {"namespace": "cursor", "toolName": "Task"}},
+                {"type": "tool-call", "toolCallId": "call-7", "toolName": "CallDynamicTool", "args": {"namespace": "cursor", "toolName": "Task", "arguments": {"description": "Read bye.txt content", "subagent_type": "generalPurpose", "prompt": "Read /tmp/p/bye.txt", "model": "inherit"}}}]}),
+            json!({"role": "tool", "id": "t4", "content": [
+                {"type": "tool-result", "toolCallId": "call-6", "toolName": "GetDynamicTools", "result": "{\"tool\": \"Task\"}"},
+                {"type": "tool-result", "toolCallId": "call-7", "toolName": "CallDynamicTool", "result": "This is the output of the subagent:\n\nresponse:\n<response>\nbye\n</response>\n\nAgent ID: 5777f330 (can be used with the `resume` parameter)"}]}),
             json!({"role": "user", "content": [{"type": "text", "text": "<timestamp>Wednesday, Oct 14, 2026, 4:14 PM (UTC-4)</timestamp>\n<user_query>\nRun: false\n</user_query>"}]}),
             json!({"role": "assistant", "id": "a4", "content": [{"type": "tool-call", "toolCallId": "call-5", "toolName": "Shell", "args": {"command": "false"}}]}),
             json!({"role": "tool", "id": "t3", "content": [{"type": "tool-result", "toolCallId": "call-5", "toolName": "Shell", "result": "Exit code: 1\n\nCommand output:\n\n```\n\n```"}]}),
@@ -263,10 +309,13 @@ pub(super) mod tests {
                 "Edit hello.txt ok +1 -1",
                 "Shell ls ok",
                 "reply: `hello.txt` contains `hello`.",
+                "Task Read bye.txt content ok",
                 "user: Run: false",
                 "Shell false failed",
             ]
         );
+        assert_eq!(chat.agents.len(), 1);
+        assert_eq!((chat.agents[0].kind.as_str(), chat.agents[0].summary.as_deref()), ("generalPurpose", Some("bye")));
         assert_eq!(chat.session_id.as_deref(), Some("c1"));
         assert!(!chat.busy);
     }

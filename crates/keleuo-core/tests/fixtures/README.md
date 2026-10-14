@@ -19,3 +19,7 @@ partial tool input deltas, hook and rate limit events, and the long lists in `in
 - `cursor_turn.jsonl`: Cursor Agent (`cursor-agent -p --output-format stream-json
   --stream-partial-output --trust --model auto`, CLI 2026.09.26) reading `hello.txt`,
   creating `bye.txt` and running `ls`. The folder path is `/tmp/p`.
+- `cursor_subagents.jsonl`: Cursor Agent starting two subagents with its Task tool
+  (`taskToolCall`), each reading a file, then a one-line summary. Its reply's whole blocks
+  carry `model_call_id` and `timestamp_ms` both. Thinking and the tool lookups before the
+  tasks are left out.

@@ -2,9 +2,12 @@
 //! --stream-partial-output`) onto the neutral [`crate::agent::Event`]s.
 //!
 //! One run is one turn: `system/init`, the person's message back, `thinking` deltas, the reply
-//! as `assistant` deltas (they carry `timestamp_ms`) closed by the whole block (no
-//! `timestamp_ms`), `tool_call` `started` / `completed` pairs (`tool_call.<kind>ToolCall` with
-//! `args`, then `result.success`, `result.rejected` or `result.error`), and a `result`.
+//! as `assistant` pieces closed by the whole block (it carries `model_call_id`, or no
+//! `timestamp_ms`; the pieces have `timestamp_ms` only), `tool_call` `started` / `completed`
+//! pairs (`tool_call.<kind>ToolCall` with `args`, then `result.success`, `result.rejected` or
+//! `result.error`), and a `result`. A `taskToolCall` starts a subagent: `args` has its
+//! `description` and `prompt`, its result the subagent's `conversationSteps` and `durationMs`
+//! (what it does in between is not reported).
 
 use std::path::PathBuf;
 
@@ -20,8 +23,9 @@ pub struct Mapper {
     roots: Vec<String>,
     /// The mode the run was started in, reported as the session's.
     mode: Option<String>,
-    /// A reply block is being streamed.
+    /// A reply block is being streamed: what has come of it so far.
     text_open: bool,
+    streamed: String,
     /// "thinking" was reported for the current stretch of thinking.
     thinking: bool,
     /// The run reported its end (`result`).
@@ -67,13 +71,19 @@ impl Mapper {
             ("assistant", _) => {
                 self.thinking = false;
                 let text = assistant_text(v);
-                if v.get("timestamp_ms").is_some() {
+                // The whole block: marked as such, or the same as the pieces so far.
+                let whole = v.get("model_call_id").is_some()
+                    || v.get("timestamp_ms").is_none()
+                    || (self.text_open && text == self.streamed);
+                if !whole {
                     // A piece of the reply as it is written.
                     let mut out = Vec::new();
                     if !self.text_open {
                         self.text_open = true;
+                        self.streamed.clear();
                         out.push(Event::TextStart);
                     }
+                    self.streamed.push_str(&text);
                     out.push(Event::TextDelta(text));
                     out
                 } else {
@@ -90,9 +100,17 @@ impl Mapper {
                 let args = call.get("args").cloned().unwrap_or(Value::Null);
                 if phase == "started" {
                     let summary = self.summary(kind, &args, call);
-                    vec![Event::ToolCall { id, name: tool_name(kind), summary, input: args, diff: None, parent: None }]
+                    let mut out = vec![Event::ToolCall { id: id.clone(), name: tool_name(kind), summary, input: args.clone(), diff: None, parent: None }];
+                    if kind == "task" {
+                        out.push(Event::SubagentStarted { id, description: s(&args, "description").to_string(), kind: subagent_kind(&args) });
+                    }
+                    out
                 } else {
-                    vec![self.result(id, kind, &args, call.get("result").unwrap_or(&Value::Null))]
+                    let result = call.get("result").unwrap_or(&Value::Null);
+                    if kind == "task" {
+                        return self.task_ended(id, result);
+                    }
+                    vec![self.result(id, kind, &args, result)]
                 }
             }
             ("result", _) => {
@@ -129,6 +147,9 @@ impl Mapper {
         if kind == "shell" {
             return s(args, "command").to_string();
         }
+        if kind == "task" {
+            return s(args, "description").to_string();
+        }
         for key in ["path", "targetFile", "pattern", "globPattern", "query", "url"] {
             let value = s(args, key);
             if !value.is_empty() {
@@ -136,6 +157,35 @@ impl Mapper {
             }
         }
         s(call, "description").to_string()
+    }
+
+    /// A subagent's end: what it said (shown in its card and as the call's result), how long it
+    /// took, and whether it failed.
+    fn task_ended(&self, id: String, result: &Value) -> Vec<Event> {
+        let ok = result.get("success");
+        let said: Vec<String> = ok
+            .and_then(|o| o.get("conversationSteps"))
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|step| step.pointer("/assistantMessage/text").and_then(Value::as_str))
+            .filter(|t| !t.trim().is_empty())
+            .map(str::to_string)
+            .collect();
+        let failed = ok.is_none();
+        let summary = said.last().cloned().or_else(|| failed.then(|| compact(result)));
+        let duration_ms = ok.and_then(|o| o.get("durationMs")).and_then(|d| d.as_u64().or_else(|| d.as_str()?.parse().ok()));
+        let mut out: Vec<Event> = said.iter().map(|t| Event::Text { text: t.clone(), parent: Some(id.clone()) }).collect();
+        out.push(Event::ToolResult {
+            id: id.clone(),
+            output: summary.clone().unwrap_or_default(),
+            is_error: failed,
+            diff: None,
+            file_changed: None,
+            parent: None,
+        });
+        out.push(Event::SubagentEnded { id, failed, summary, tokens: None, duration_ms });
+        out
     }
 
     fn result(&self, id: String, kind: &str, args: &Value, result: &Value) -> Event {
@@ -167,6 +217,15 @@ impl Mapper {
         };
         let file_changed = (changes_file && !is_error).then_some(path).flatten();
         Event::ToolResult { id, output, is_error, diff, file_changed, parent: None }
+    }
+}
+
+/// A subagent's type, as Cursor names it (`subagentType: {"explore": {}}`); "" when unspecified.
+fn subagent_kind(args: &Value) -> String {
+    match args.get("subagentType") {
+        Some(Value::String(k)) => k.clone(),
+        Some(Value::Object(o)) => o.keys().next().filter(|k| *k != "unspecified").cloned().unwrap_or_default(),
+        _ => String::new(),
     }
 }
 
