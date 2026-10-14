@@ -373,17 +373,18 @@ impl ChatPanel {
     fn render_entry(&mut self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
         let item = self.item_at(ix, cx);
         let Some(item) = item else { return div().into_any_element() };
-        // The end-of-turn card, turned off in Settings: nothing, taking no room.
+        let last = ix + 1 == self.list_len;
+        // The end-of-turn card, turned off in Settings: nothing, taking no room (but the last
+        // entry keeps the gap at the bottom).
         if matches!(item, Item::TurnChanges(_)) && !crate::prefs(cx).turn_card {
-            return div().into_any_element();
+            return div().when(last, |d| d.pb_4()).into_any_element();
         }
         if let Item::Earlier { from, to, .. } = item {
             // In view (or about to be): read it.
             self.load_earlier(from, to, cx);
         }
-        let last = ix + 1 == self.list_len;
         // In a run of one tool's calls: the first entry is the group's header, the others show
-        // only while it is open (closed, they take no room).
+        // only while it is open (closed, they take no room, but the last keeps the bottom gap).
         let mut member = false;
         let mut group = None;
         if let Some((run, key)) = self.tool_group(ix, cx) {
@@ -394,7 +395,7 @@ impl ChatPanel {
             if !open {
                 return match group {
                     Some(header) => self.column(header, last),
-                    None => div().into_any_element(),
+                    None => div().when(last, |d| d.pb_4()).into_any_element(),
                 };
             }
             member = true;
