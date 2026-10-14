@@ -18,6 +18,10 @@ dirs = { workspace = true }
 notify = "8"
 # Images in a message to an agent run headless (embedded in its JSON input).
 base64 = "0.22"
+# Cursor keeps its chats in SQLite (read-only copies; backends::cursor::store).
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+# Cursor names its chat folders by the md5 of the project path.
+md5 = { package = "md-5", version = "0.10" }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

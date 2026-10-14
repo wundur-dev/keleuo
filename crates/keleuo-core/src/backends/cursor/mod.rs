@@ -10,6 +10,7 @@
 //! everything (`--force`), or read-only planning or questions (`--mode plan|ask`).
 
 pub mod map;
+pub mod store;
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
@@ -79,13 +80,21 @@ impl Backend for CursorBackend {
         models
     }
 
-    /// Cursor keeps its chats in its own database, which Keleuo does not read yet: a session
-    /// opened again shows no earlier messages, but its next message continues the chat.
-    fn load_session(&self, _host: &dyn Host, project: &Path, id: &str) -> std::io::Result<Conversation> {
-        let mut chat = Conversation::new(project.to_string_lossy());
-        chat.session_id = Some(id.to_string());
-        chat.push_notice("Earlier messages of this Cursor chat are not shown here; Cursor still has them, and the next message continues the chat.");
-        Ok(chat)
+    /// The chat as Cursor recorded it ([`store`]). When Keleuo cannot read Cursor's record (a
+    /// layout it does not know yet), the session opens with no earlier messages and a note;
+    /// its next message still continues the chat.
+    fn load_session(&self, host: &dyn Host, project: &Path, id: &str) -> std::io::Result<Conversation> {
+        match store::load(host, project, id) {
+            Ok(chat) => Ok(chat),
+            Err(e) => {
+                let mut chat = Conversation::new(project.to_string_lossy());
+                chat.session_id = Some(id.to_string());
+                chat.push_notice(format!(
+                    "Earlier messages of this Cursor chat are not shown here ({e}); Cursor still has them, and the next message continues the chat."
+                ));
+                Ok(chat)
+            }
+        }
     }
 }
 
