@@ -279,3 +279,23 @@ fn subagents_are_tracked_live() {
         .collect();
     assert_eq!(main_tools, ["Agent", "Agent"]);
 }
+
+/// A command run in the background is a task to Claude Code (`task_type: local_bash`), with
+/// the same task events as a subagent; it stays a tool call, not an agent. Lines from claude
+/// 2.1.299, cut to the fields that matter.
+#[test]
+fn a_background_command_is_not_a_subagent() {
+    let lines = [
+        r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_bg","name":"Bash","input":{"command":"sleep 70","description":"Sleep for 70 seconds in background","run_in_background":true}}]},"parent_tool_use_id":null}"#,
+        r#"{"type":"system","subtype":"task_started","task_id":"bs4n7wtbi","tool_use_id":"toolu_bg","description":"Sleep for 70 seconds in background","is_backgrounded":true,"task_type":"local_bash"}"#,
+        r#"{"type":"user","message":{"role":"user","content":[{"tool_use_id":"toolu_bg","type":"tool_result","content":"Command running in background with ID: bs4n7wtbi.","is_error":false}]},"parent_tool_use_id":null}"#,
+        r#"{"type":"system","subtype":"task_updated","task_id":"bs4n7wtbi","patch":{"status":"completed"}}"#,
+        r#"{"type":"system","subtype":"task_notification","task_id":"bs4n7wtbi","tool_use_id":"toolu_bg","status":"completed","summary":"Background command completed (exit code 0)"}"#,
+    ];
+    let mut chat = Conversation::new("");
+    let mut m = Mapper::new("");
+    chat.push_user("run it in the background");
+    apply_lines(&mut chat, &mut m, &lines.join("\n"));
+    assert!(chat.agents.is_empty());
+    assert!(chat.items.iter().any(|i| matches!(i, Item::Tool(t) if t.name == "Bash")));
+}

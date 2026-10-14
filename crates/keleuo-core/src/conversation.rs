@@ -142,6 +142,14 @@ pub struct SubAgent {
 }
 
 impl SubAgent {
+    /// What to call it on one line: the first line of its description, else its type.
+    pub fn title(&self) -> String {
+        match self.description.lines().map(str::trim).find(|l| !l.is_empty()) {
+            Some(line) => line.to_string(),
+            None => self.kind.clone(),
+        }
+    }
+
     pub fn running(&self) -> bool {
         self.status == AgentStatus::Running
     }
