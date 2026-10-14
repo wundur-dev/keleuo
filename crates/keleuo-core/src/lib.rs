@@ -32,6 +32,7 @@ pub mod links;
 pub mod markdown_marks;
 pub mod paste;
 pub mod platform;
+pub mod questions;
 pub mod settings;
 pub mod skills;
 pub mod slash;

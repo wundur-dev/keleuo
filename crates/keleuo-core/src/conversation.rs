@@ -80,6 +80,8 @@ pub struct PermissionPrompt {
     pub input: Value,
     /// `Some(true)` allowed, `Some(false)` denied, `None` still waiting.
     pub answer: Option<bool>,
+    /// A question's answer, as the person gave it (see [`crate::questions`]).
+    pub reply: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -261,6 +263,15 @@ impl Conversation {
         prompt.answer = Some(allow);
         self.revision += 1;
         Some(prompt.input.clone())
+    }
+
+    /// Mark a question answered with `reply` (as shown); returns the tool input it asked with.
+    pub fn answer_question(&mut self, request_id: &str, reply: String) -> Option<Value> {
+        let input = self.answer_permission(request_id, true)?;
+        if let Some(Item::Permission(p)) = self.items.iter_mut().find(|i| matches!(i, Item::Permission(p) if p.request_id == request_id)) {
+            p.reply = Some(reply);
+        }
+        Some(input)
     }
 
     /// Permission prompts still waiting for an answer.
@@ -671,6 +682,7 @@ impl Conversation {
                     description,
                     input,
                     answer: None,
+                    reply: None,
                 }));
                 self.status = Some("waiting for permission".into());
             }

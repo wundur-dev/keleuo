@@ -401,6 +401,11 @@ pub trait Backend: Send + Sync {
     fn hook_reply(&self, _allow: bool) -> String {
         String::new()
     }
+    /// What a waiting permission hook answers to allow the tool with `input` instead of the
+    /// one it asked with (a question's answers, see [`crate::questions`]).
+    fn hook_reply_with(&self, _input: &Value) -> String {
+        self.hook_reply(true)
+    }
     /// Every agent process of this kind on this machine except this window's own (children of
     /// `own_pid`). Read-only: nothing is signalled. Empty for a remote host.
     fn running(&self, _host: &dyn Host, _own_pid: u32) -> Vec<Running> {

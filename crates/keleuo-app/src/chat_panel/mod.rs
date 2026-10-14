@@ -94,6 +94,8 @@ pub struct ChatPanel {
     md_highlighters: HashMap<String, gpui_kit::component::highlighter::SyntaxHighlighter>,
     /// An image shown full size over the chat.
     preview: Option<PathBuf>,
+    /// Choices made on an open question card, by request: the labels picked for each question.
+    picks: HashMap<String, Vec<Vec<String>>>,
     /// The known failure whose fixes are being offered.
     fixing: Option<Issue>,
     /// Kinds of failure fixed from this panel (their notices say so).
@@ -217,6 +219,7 @@ impl ChatPanel {
             marked_as: None,
             md_marks: None,
             md_highlighters: HashMap::new(),
+            picks: HashMap::new(),
             preview: None,
             fixing: None,
             fixed: Default::default(),

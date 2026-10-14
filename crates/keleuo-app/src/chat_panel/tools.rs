@@ -2,6 +2,7 @@
 //! notice and fix when a command fails.
 
 use super::*;
+use keleuo_core::questions::Question;
 
 impl ChatPanel {
     /// The line on a tool card that failed in a known way.
@@ -439,6 +440,11 @@ impl ChatPanel {
     }
 
     pub(super) fn render_permission(&self, p: &PermissionPrompt, cx: &mut Context<Self>) -> AnyElement {
+        // A question for the person comes as a request to run the asking tool: shown as the
+        // question, answered by choosing.
+        if let Some(questions) = keleuo_core::questions::parse(&p.tool_name, &p.input) {
+            return self.render_question(p, std::rc::Rc::new(questions), cx);
+        }
         let theme = cx.theme();
         let (warning, muted, fg, border) = (
             theme.warning,
@@ -527,6 +533,129 @@ impl ChatPanel {
             }
         }
         card.into_any_element()
+    }
+}
+
+impl ChatPanel {
+    /// A question the agent asks: each with its choices as buttons. One question with one
+    /// answer goes at the click; otherwise Submit once each has a choice. Skip declines.
+    fn render_question(&self, p: &PermissionPrompt, qs: std::rc::Rc<Vec<Question>>, cx: &mut Context<Self>) -> AnyElement {
+        use gpui_kit::component::button::{Button, ButtonVariants as _};
+        use gpui_kit::component::{Disableable as _, Selectable as _};
+        let theme = cx.theme();
+        let (ring, muted, fg, border) = (theme.ring, theme.muted_foreground, theme.foreground, theme.border);
+        let open = p.answer.is_none();
+        let picks = self.picks.get(&p.request_id).cloned().unwrap_or_else(|| vec![Vec::new(); qs.len()]);
+        let name = self.session.read(cx).backend.name();
+        let mut card = div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .p_2()
+            .rounded_md()
+            .border_1()
+            .border_color(if open { ring } else { border })
+            .text_xs()
+            .child(
+                div()
+                    .flex()
+                    .gap_1()
+                    .items_center()
+                    .child(Icon::new(gpui_kit::assets::IconName::MessageCircleQuestionMark).xsmall().text_color(ring))
+                    .child(div().font_weight(FontWeight::SEMIBOLD).text_color(fg).child(format!("{name} asks"))),
+            );
+        for (i, q) in qs.iter().enumerate() {
+            let mut options = div().flex().flex_wrap().gap_1();
+            for (label, description) in &q.options {
+                let on = picks.get(i).is_some_and(|p| p.contains(label));
+                let (rid, qs2, label2) = (p.request_id.clone(), qs.clone(), label.clone());
+                let description = description.clone();
+                options = options.child(
+                    Button::new(SharedString::from(format!("q-{}-{i}-{label}", p.request_id)))
+                        .xsmall()
+                        .label(label.clone())
+                        .selected(on)
+                        .when(on, |b| b.primary())
+                        .disabled(!open)
+                        .when(!description.is_empty(), |b| b.tooltip(description))
+                        .on_click(cx.listener(move |panel, _, _, cx| panel.pick(&rid, &qs2, i, &label2, cx))),
+                );
+            }
+            card = card.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .when(!q.header.is_empty(), |d| d.child(div().text_color(muted).child(q.header.clone())))
+                    .child(div().text_sm().text_color(fg).child(q.question.clone()))
+                    .when(q.multi, |d| d.child(div().text_color(muted).child("Choose any that apply.")))
+                    .child(options),
+            );
+        }
+        if open {
+            let one_click = qs.len() == 1 && !qs[0].multi;
+            let ready = picks.iter().all(|p| !p.is_empty());
+            let (rid1, rid2, qs2) = (p.request_id.clone(), p.request_id.clone(), qs.clone());
+            card = card.child(
+                div()
+                    .flex()
+                    .gap_2()
+                    .when(!one_click, |d| {
+                        d.child(
+                            Button::new(SharedString::from(format!("q-submit-{}", p.request_id)))
+                                .xsmall()
+                                .primary()
+                                .label("Submit")
+                                .disabled(!ready)
+                                .on_click(cx.listener(move |panel, _, _, cx| panel.submit_question(&rid1, &qs2, cx))),
+                        )
+                    })
+                    .child(
+                        Button::new(SharedString::from(format!("q-skip-{}", p.request_id)))
+                            .xsmall()
+                            .ghost()
+                            .label("Skip")
+                            .on_click(cx.listener(move |panel, _, _, cx| {
+                                panel.picks.remove(&rid2);
+                                panel.session.update(cx, |s, cx| s.answer(&rid2, false, cx));
+                            })),
+                    ),
+            );
+        } else {
+            let said = match (&p.reply, p.answer) {
+                (Some(r), _) => format!("Answered: {r}"),
+                (None, Some(true)) => "Answered in the terminal".to_string(),
+                _ => "Skipped".to_string(),
+            };
+            card = card.child(div().text_color(muted).child(said));
+        }
+        card.into_any_element()
+    }
+
+    /// A choice on a question card; one question with one answer goes at once.
+    fn pick(&mut self, rid: &str, qs: &[Question], i: usize, label: &str, cx: &mut Context<Self>) {
+        let picks = self.picks.entry(rid.to_string()).or_insert_with(|| vec![Vec::new(); qs.len()]);
+        let Some(chosen) = picks.get_mut(i) else { return };
+        if qs[i].multi {
+            match chosen.iter().position(|l| l == label) {
+                Some(at) => {
+                    chosen.remove(at);
+                }
+                None => chosen.push(label.to_string()),
+            }
+        } else {
+            *chosen = vec![label.to_string()];
+        }
+        if qs.len() == 1 && !qs[0].multi {
+            self.submit_question(rid, qs, cx);
+        }
+        cx.notify();
+    }
+
+    fn submit_question(&mut self, rid: &str, qs: &[Question], cx: &mut Context<Self>) {
+        let Some(picks) = self.picks.remove(rid) else { return };
+        let answers = qs.iter().zip(picks).map(|(q, p)| (q.question.clone(), p)).collect();
+        self.session.update(cx, |s, cx| s.answer_question(rid, answers, cx));
     }
 }
 

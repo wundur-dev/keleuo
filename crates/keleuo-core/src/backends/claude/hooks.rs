@@ -85,6 +85,12 @@ pub fn reply(allow: bool) -> String {
     json!({"hookSpecificOutput": {"hookEventName": "PermissionRequest", "decision": decision}}).to_string()
 }
 
+/// A permission hook's answer allowing the tool with `input` in place of what it asked with.
+pub fn reply_with(input: &Value) -> String {
+    let decision = json!({"behavior": "allow", "updatedInput": input});
+    json!({"hookSpecificOutput": {"hookEventName": "PermissionRequest", "decision": decision}}).to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -178,6 +178,10 @@ impl Backend for ClaudeBackend {
         hooks::reply(allow)
     }
 
+    fn hook_reply_with(&self, input: &Value) -> String {
+        hooks::reply_with(input)
+    }
+
     fn terminal_attach(&self, path: &Path, bracketed: bool) -> Option<Vec<u8>> {
         // A pasted image path becomes `[Image #N]`, the image itself attached.
         let p = path.to_string_lossy();

@@ -1141,6 +1141,20 @@ impl AgentSession {
         cx.notify();
     }
 
+    /// Answer a question the agent asked (its request to run the asking tool): allowed, with
+    /// the chosen labels for each question added to the tool's input.
+    pub fn answer_question(&mut self, request_id: &str, answers: Vec<(String, Vec<String>)>, cx: &mut Context<Self>) {
+        let shown = answers.iter().map(|(_, a)| a.join(", ")).collect::<Vec<_>>().join("; ");
+        let Some(input) = self.chat.answer_question(request_id, shown) else { return };
+        let input = keleuo_core::questions::answered(&input, &answers);
+        if let Some(reply) = self.waiting.remove(request_id) {
+            reply.send(&self.backend.hook_reply_with(&input));
+        } else {
+            let _ = self.agent.answer_permission(request_id, true, &input);
+        }
+        cx.notify();
+    }
+
     /// Answer the oldest open permission prompt (for the control channel).
     pub fn answer_first(&mut self, allow: bool, cx: &mut Context<Self>) {
         let id = self.chat.pending_permissions().next().map(|p| p.request_id.clone());

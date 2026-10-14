@@ -40,6 +40,7 @@ icon_assets!(
         FilePlus,
         FolderPlus,
         FileDiff,
+        MessageCircleQuestionMark,
     ]
 );
 
