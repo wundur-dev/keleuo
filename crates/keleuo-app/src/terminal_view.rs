@@ -19,7 +19,8 @@ use gpui_kit::*;
 use crate::palette;
 use crate::pty::{GridSize, Pty, PtyEvent};
 
-pub const FONT_FAMILY: &str = "Menlo";
+/// The fixed-width font every system has: Menlo on macOS, Consolas on Windows.
+pub const FONT_FAMILY: &str = if cfg!(windows) { "Consolas" } else if cfg!(target_os = "linux") { "DejaVu Sans Mono" } else { "Menlo" };
 
 /// The placeholder over a starting program goes once its output has paused this long, or this
 /// long after its first output at most, looked for this often, and fades out over this.

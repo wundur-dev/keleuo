@@ -336,6 +336,12 @@ impl Host for LocalHost {
         if spec.unset.is_empty() {
             return CommandSpec { program, args: spec.args.clone(), cwd: Some(spec.cwd.clone()), env: spec.env.clone() };
         }
+        // Windows has no `env`: set to empty instead, which the agents (JavaScript, where an
+        // empty variable reads as unset) take as absent.
+        if cfg!(windows) {
+            let env = spec.unset.iter().map(|v| (v.clone(), String::new())).chain(spec.env.iter().cloned()).collect();
+            return CommandSpec { program, args: spec.args.clone(), cwd: Some(spec.cwd.clone()), env };
+        }
         // `env -u` works the same for a plain process and a pseudo-terminal.
         let mut args: Vec<String> = spec.unset.iter().flat_map(|v| ["-u".to_string(), v.clone()]).collect();
         args.push(program.to_string_lossy().to_string());

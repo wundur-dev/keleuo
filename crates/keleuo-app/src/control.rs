@@ -4,7 +4,7 @@
 //! `Shell::command` and `Workspace::command`); `key <keystrokes>` types inside the window.
 //! Replies go to stderr as `control: <line> -> <result>`.
 
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::PathBuf;
 
 use gpui_kit::*;
@@ -26,15 +26,32 @@ pub fn start(cx: &mut App) {
     };
     let (tx, rx) = async_channel::unbounded::<String>();
     std::thread::spawn(move || {
+        // How far a plain file has been read: only lines added since are new (a FIFO starts
+        // empty each time it is opened). A file that shrank was started over.
+        let mut read = 0u64;
         loop {
             // Opening a FIFO blocks until a writer appears; EOF means the writer left.
-            let Ok(file) = std::fs::File::open(&path) else {
+            let Ok(mut file) = std::fs::File::open(&path) else {
                 std::thread::sleep(std::time::Duration::from_millis(200));
                 continue;
             };
-            for line in BufReader::new(file).lines() {
-                let Ok(line) = line else { break };
-                if !line.trim().is_empty() && tx.send_blocking(line).is_err() {
+            let plain = file.metadata().ok().filter(|m| m.is_file()).map(|m| m.len());
+            if let Some(len) = plain {
+                if len < read {
+                    read = 0;
+                }
+                let _ = file.seek(SeekFrom::Start(read));
+            }
+            let mut reader = BufReader::new(file);
+            let mut line = String::new();
+            // Whole lines only: one still being written is read next time.
+            while reader.read_line(&mut line).is_ok_and(|n| n > 0) && line.ends_with('\n') {
+                if plain.is_some() {
+                    read += line.len() as u64;
+                }
+                let command = line.trim().to_string();
+                line.clear();
+                if !command.is_empty() && tx.send_blocking(command).is_err() {
                     return;
                 }
             }

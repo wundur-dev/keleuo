@@ -120,7 +120,7 @@ const TAIL: usize = 4;
 
 impl EventEmitter<ChatPanelEvent> for ChatPanel {}
 
-const MONO: &str = "Menlo";
+const MONO: &str = crate::terminal_view::FONT_FAMILY;
 /// How often the chat redraws while something runs: the spinners' step and the clocks.
 /// Ten a second reads as motion; continuous animation would redraw every frame.
 const TICK: std::time::Duration = std::time::Duration::from_millis(100);
