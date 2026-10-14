@@ -16,6 +16,8 @@ ignore = { workspace = true }
 similar = { workspace = true }
 dirs = { workspace = true }
 notify = "8"
+# Images in a message to an agent run headless (embedded in its JSON input).
+base64 = "0.22"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

@@ -371,6 +371,15 @@ impl Agent for ClaudeCode {
         self.process()?.send_user(text)
     }
 
+    fn send_with_images(&mut self, text: &str, images: &[std::path::PathBuf]) -> std::io::Result<()> {
+        let line = stream::user_message_with_images(text, images)?;
+        self.process()?.send_line(&line)
+    }
+
+    fn takes_images(&self) -> bool {
+        true
+    }
+
     fn answer_permission(&mut self, request_id: &str, allow: bool, input: &Value) -> std::io::Result<()> {
         self.process()?.send_line(&stream::permission_response(request_id, allow, input))
     }

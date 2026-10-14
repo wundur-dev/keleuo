@@ -180,6 +180,15 @@ pub trait Agent: Send {
     /// Start the agent on `host`. Messages arrive through `sink`.
     fn start(&mut self, host: &dyn Host, options: &StartOptions, sink: Sink) -> anyhow::Result<()>;
     fn send(&mut self, text: &str) -> std::io::Result<()>;
+    /// Send a user turn with images (files on this machine). Unsupported by default: then
+    /// [`Agent::takes_images`] is false and only the text goes.
+    fn send_with_images(&mut self, text: &str, _images: &[std::path::PathBuf]) -> std::io::Result<()> {
+        self.send(text)
+    }
+    /// Whether [`Agent::send_with_images`] sends the images.
+    fn takes_images(&self) -> bool {
+        false
+    }
     /// Answer a permission prompt; `input` is what to run with when allowed.
     fn answer_permission(&mut self, request_id: &str, allow: bool, input: &Value) -> std::io::Result<()>;
     /// Stop the current turn, keeping the process.

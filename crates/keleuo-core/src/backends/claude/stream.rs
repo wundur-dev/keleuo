@@ -371,6 +371,31 @@ pub fn user_message(text: &str) -> String {
     json!({"type": "user", "message": {"role": "user", "content": text}}).to_string()
 }
 
+/// The stdin line for a user turn with images: each read from its file (on this machine) and
+/// embedded, then the text.
+pub fn user_message_with_images(text: &str, images: &[std::path::PathBuf]) -> std::io::Result<String> {
+    use base64::Engine as _;
+    let mut content = Vec::new();
+    for path in images {
+        let data = base64::engine::general_purpose::STANDARD.encode(std::fs::read(path)?);
+        content.push(json!({"type": "image", "source": {"type": "base64", "media_type": image_type(path), "data": data}}));
+    }
+    if !text.is_empty() {
+        content.push(json!({"type": "text", "text": text}));
+    }
+    Ok(json!({"type": "user", "message": {"role": "user", "content": content}}).to_string())
+}
+
+/// An image's media type, from its file name (PNG unless it says otherwise).
+fn image_type(path: &std::path::Path) -> &'static str {
+    match path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).as_deref() {
+        Some("jpg" | "jpeg") => "image/jpeg",
+        Some("gif") => "image/gif",
+        Some("webp") => "image/webp",
+        _ => "image/png",
+    }
+}
+
 /// The stdin line answering a permission prompt. `input` is the tool input to run with
 /// (normally the one in the request).
 pub fn permission_response(request_id: &str, allow: bool, input: &Value) -> String {

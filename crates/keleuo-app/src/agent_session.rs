@@ -1113,9 +1113,6 @@ impl AgentSession {
             cx.notify();
             return;
         }
-        if !images.is_empty() {
-            self.chat.push_notice(format!("{} cannot take images here; sent the text only.", self.backend.name()));
-        }
         if !self.agent.running()
             && let Err(e) = self.start(cx)
         {
@@ -1123,9 +1120,23 @@ impl AgentSession {
             cx.notify();
             return;
         }
-        self.chat.push_user(shown);
+        if !text.is_empty() {
+            self.chat.push_user(shown);
+        }
+        let images = if self.agent.takes_images() {
+            images
+        } else {
+            if !images.is_empty() {
+                self.chat.push_notice(format!("{} cannot take images here; sent the text only.", self.backend.name()));
+            }
+            Vec::new()
+        };
+        if !images.is_empty() {
+            self.chat.apply(Event::UserImages(images.clone()));
+        }
         self.watch_turn(cx);
-        if let Err(e) = self.agent.send(text) {
+        let sent = if images.is_empty() { self.agent.send(text) } else { self.agent.send_with_images(text, &images) };
+        if let Err(e) = sent {
             self.chat.push_error(format!("Could not send to {}: {e}", self.backend.name()));
         }
         cx.notify();
