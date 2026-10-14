@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
 
-use crate::agent::{Agent, Backend, Capabilities, Event, Message, Sink, StartOptions};
+use crate::agent::{Agent, Backend, Capabilities, Event, Message, ModelOption, Sink, StartOptions};
 use crate::conversation::Conversation;
 use crate::host::{Host, ProgramSpec};
 use map::Mapper;
@@ -33,7 +33,10 @@ const MODES: [(&str, &str); 4] =
 
 /// Cursor Agent as a [`Backend`].
 #[derive(Default)]
-pub struct CursorBackend;
+pub struct CursorBackend {
+    /// The account's models, listed once per run of the window.
+    models: Mutex<Option<Vec<ModelOption>>>,
+}
 
 impl Backend for CursorBackend {
     fn id(&self) -> &'static str {
@@ -62,6 +65,20 @@ impl Backend for CursorBackend {
         MODES.to_vec()
     }
 
+    /// `cursor-agent models`: every model and variant (effort, fast) the account may use.
+    fn list_models(&self, host: &dyn Host) -> Vec<ModelOption> {
+        if let Some(known) = self.models.lock().unwrap().clone() {
+            return known;
+        }
+        let spec = ProgramSpec { program: "cursor-agent".into(), args: vec!["models".into()], ..Default::default() };
+        let Ok(out) = host.program_command(&spec).to_command().stdin(Stdio::null()).output() else { return Vec::new() };
+        let models = parse_models(&String::from_utf8_lossy(&out.stdout));
+        if !models.is_empty() {
+            *self.models.lock().unwrap() = Some(models.clone());
+        }
+        models
+    }
+
     /// Cursor keeps its chats in its own database, which Keleuo does not read yet: a session
     /// opened again shows no earlier messages, but its next message continues the chat.
     fn load_session(&self, _host: &dyn Host, project: &Path, id: &str) -> std::io::Result<Conversation> {
@@ -69,6 +86,37 @@ impl Backend for CursorBackend {
         chat.session_id = Some(id.to_string());
         chat.push_notice("Earlier messages of this Cursor chat are not shown here; Cursor still has them, and the next message continues the chat.");
         Ok(chat)
+    }
+}
+
+/// The lines of `cursor-agent models` (`<id> - <name>`, after a heading), in its order.
+fn parse_models(text: &str) -> Vec<ModelOption> {
+    text.lines()
+        .filter_map(|line| {
+            let (id, label) = line.trim().split_once(" - ")?;
+            if id.is_empty() || id.contains(' ') {
+                return None;
+            }
+            let label = label.split(" (current").next().unwrap_or(label).trim();
+            Some(ModelOption { id: id.into(), label: label.into(), family: family(id).into() })
+        })
+        .collect()
+}
+
+/// The family a model id belongs to, for the menu ("" for Auto, which stands alone).
+fn family(id: &str) -> &'static str {
+    let id = id.strip_prefix("cursor-").unwrap_or(id);
+    match id.split(['-', '.']).next().unwrap_or("") {
+        "auto" => "",
+        "claude" => "Claude",
+        "gpt" | "o3" | "o4" | "codex" => "GPT",
+        "gemini" => "Gemini",
+        "grok" => "Grok",
+        "composer" => "Composer",
+        "kimi" => "Kimi",
+        "glm" => "GLM",
+        "deepseek" => "DeepSeek",
+        _ => "Other",
     }
 }
 
@@ -266,6 +314,28 @@ mod tests {
         // Claude's Auto (the settings' default) and the rest: the person's allowlist.
         assert!(mode_args(Some("auto")).is_empty());
         assert!(mode_args(None).is_empty());
+    }
+
+    #[test]
+    fn the_model_list_reads_as_families() {
+        let text = "Available models\n\nauto - Auto (current, default)\ngpt-5.3-codex-low - Codex 5.3 Low\n\
+            claude-opus-5-thinking-high - Claude Opus 5 1M Thinking\ncursor-grok-4.5-high - Grok 4.5\n\
+            grok-4.7-low-fast - Grok 4.7  Low Fast\ncomposer-2.5 - Composer 2.5\nmuse-spark-1.3 - Muse Spark\n\n\
+            Tip: use --model <id> (or /model <id> in interactive mode) to switch.\n";
+        let models = parse_models(text);
+        let got: Vec<(&str, &str, &str)> = models.iter().map(|m| (m.id.as_str(), m.label.as_str(), m.family.as_str())).collect();
+        assert_eq!(
+            got,
+            [
+                ("auto", "Auto", ""),
+                ("gpt-5.3-codex-low", "Codex 5.3 Low", "GPT"),
+                ("claude-opus-5-thinking-high", "Claude Opus 5 1M Thinking", "Claude"),
+                ("cursor-grok-4.5-high", "Grok 4.5", "Grok"),
+                ("grok-4.7-low-fast", "Grok 4.7  Low Fast", "Grok"),
+                ("composer-2.5", "Composer 2.5", "Composer"),
+                ("muse-spark-1.3", "Muse Spark", "Other"),
+            ]
+        );
     }
 
     #[test]

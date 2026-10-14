@@ -17,7 +17,7 @@ impl Global for Backends {}
 /// Claude Code (the default), Cursor; plus the scripted test agent when
 /// `KELEUO_TEST_BACKENDS=1`.
 pub fn registry() -> Registry {
-    let mut all: Vec<Arc<dyn Backend>> = vec![Arc::new(ClaudeBackend), Arc::new(CursorBackend)];
+    let mut all: Vec<Arc<dyn Backend>> = vec![Arc::new(ClaudeBackend), Arc::new(CursorBackend::default())];
     if keleuo_core::env_var("TEST_BACKENDS").is_ok_and(|v| v == "1") {
         all.push(Arc::new(ScriptedBackend { step: std::time::Duration::from_millis(120) }));
     }
