@@ -1,4 +1,10 @@
-# Keleuo
+<p align="center">
+  <img src="crates/keleuo-app/assets/icon/keleuo-512.png" alt="Keleuo icon: a cream voxel character beside a golden crane lowering a cube" width="128" height="128">
+</p>
+
+<h1 align="center">Keleuo</h1>
+
+<p align="center"><a href="https://keleuo.com">keleuo.com</a></p>
 
 A native desktop app for working with coding agents (Claude Code so far): a list of
 sessions, each a whole workspace with its chat or the agent's own terminal, files, skills
