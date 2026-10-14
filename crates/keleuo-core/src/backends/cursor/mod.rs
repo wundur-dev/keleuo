@@ -20,7 +20,7 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
 
-use crate::agent::{Agent, Backend, Capabilities, Event, Message, ModelOption, Sink, StartOptions};
+use crate::agent::{Agent, Backend, Capabilities, Event, Follow, Message, ModelOption, Sink, StartOptions};
 use crate::conversation::Conversation;
 use crate::host::{Host, ProgramSpec};
 use map::Mapper;
@@ -52,6 +52,8 @@ impl Backend for CursorBackend {
         Capabilities {
             // Its Task tool (reported when each subagent starts and ends).
             subagents: true,
+            // `cursor-agent` itself in Terminal; Chat follows its record (see `follow_session`).
+            terminal_view: true,
             // A few of `cursor-agent models`; any other name is typed in.
             models: ["auto", "composer-2.5", "claude-sonnet-5-thinking-high", "claude-opus-5-thinking-high", "gpt-5.3-codex"]
                 .map(String::from)
@@ -66,6 +68,63 @@ impl Backend for CursorBackend {
 
     fn permission_modes(&self) -> Vec<(&'static str, &'static str)> {
         MODES.to_vec()
+    }
+
+    /// Cursor's own interface on chat `id` (a new id is made by Cursor on first use). It asks
+    /// before acting itself, in the terminal, unless the mode says otherwise.
+    fn terminal_program(&self, options: &StartOptions, id: &str, _new: bool) -> Option<ProgramSpec> {
+        let mut args: Vec<String> = vec!["--trust".into()];
+        if let Some(model) = &options.model {
+            args.extend(["--model".into(), model.clone()]);
+        }
+        args.extend(mode_args(options.permission_mode.as_deref()));
+        args.extend(["--resume".into(), id.into()]);
+        Some(ProgramSpec { program: "cursor-agent".into(), args, cwd: options.cwd.clone(), ..Default::default() })
+    }
+
+    /// Its interface stops a turn on Ctrl+C ("ctrl+c to stop" while it works).
+    fn terminal_interrupt(&self) -> Vec<u8> {
+        vec![0x03]
+    }
+
+    /// Chat `id` as Cursor writes it: a turn is in its record once it ends (one stopped part way
+    /// never is), so each change to the record brings that turn's messages, then the turn's
+    /// end. What is there already is not sent again.
+    fn follow_session(&self, host: Arc<dyn Host>, project: &Path, id: &str, sink: Sink) -> Option<Follow> {
+        let (follow, stop) = Follow::new();
+        let (project, id) = (project.to_path_buf(), id.to_string());
+        std::thread::spawn(move || {
+            // A couple of seconds behind is fine; less often over ssh, where each look costs a
+            // round trip.
+            let every = std::time::Duration::from_millis(if host.is_remote() { 3000 } else { 1500 });
+            let mut seen = store::read(host.as_ref(), &project, &id).map(|e| e.len()).unwrap_or(0);
+            let mut last = store::written(host.as_ref(), &project, &id);
+            while !stop.load(Ordering::Relaxed) {
+                std::thread::sleep(every);
+                let now = store::written(host.as_ref(), &project, &id);
+                if now == last || now.is_none() {
+                    continue;
+                }
+                last = now;
+                let Ok(events) = store::read(host.as_ref(), &project, &id) else { continue };
+                if events.len() <= seen {
+                    continue;
+                }
+                for e in events[seen..].iter().cloned() {
+                    sink(Message::Event(e));
+                }
+                seen = events.len();
+                sink(Message::Event(Event::TurnEnded {
+                    error: None,
+                    cost_total_usd: None,
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    duration_ms: None,
+                    session_id: Some(id.clone()),
+                }));
+            }
+        });
+        Some(follow)
     }
 
     /// `cursor-agent models`: every model and variant (effort, fast) the account may use.
@@ -517,6 +576,58 @@ mod tests {
         }
         assert_eq!(last, Some(Event::Interrupted));
         agent.stop();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The record follower against the real `cursor-agent`: a chat with one turn, followed;
+    /// a second turn (a run of its own, as if typed in Terminal) arrives as its messages and its
+    /// end, and the first is not sent again.
+    /// `cargo test -p keleuo-core follow_for_real -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn follow_for_real() {
+        use std::sync::mpsc::channel;
+        use std::time::Duration;
+        let dir = std::env::temp_dir().join(format!("keleuo-follow-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // Cursor names the chat folder after the real path (no /var symlink).
+        let dir = dir.canonicalize().unwrap();
+        let id = format!("{:08x}-0000-4000-8000-{:012x}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() & 0xffff_ffff_ffff);
+        let turn = |text: &str| {
+            let mut child = std::process::Command::new("cursor-agent")
+                .args(["-p", "--trust", "--model", "auto", "--resume", &id])
+                .current_dir(&dir)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .spawn()
+                .unwrap();
+            child.stdin.take().unwrap().write_all(text.as_bytes()).unwrap();
+            assert!(child.wait().unwrap().success());
+        };
+        turn("Reply with just: one");
+        let host: Arc<dyn Host> = Arc::new(crate::host::LocalHost);
+        let (tx, rx) = channel::<Message>();
+        let tx = Mutex::new(tx);
+        let _follow = CursorBackend::default()
+            .follow_session(host, &dir, &id, Arc::new(move |m| drop(tx.lock().unwrap().send(m))))
+            .unwrap();
+        std::thread::sleep(Duration::from_secs(2));
+        turn("Reply with just: two");
+        let mut got = Vec::new();
+        loop {
+            match rx.recv_timeout(Duration::from_secs(30)).expect("the turn arrives") {
+                Message::Event(e @ Event::TurnEnded { .. }) => {
+                    got.push(e);
+                    break;
+                }
+                Message::Event(e) => got.push(e),
+                _ => {}
+            }
+        }
+        eprintln!("followed: {got:?}");
+        let users: Vec<&str> = got.iter().filter_map(|e| if let Event::UserText(t) = e { Some(t.as_str()) } else { None }).collect();
+        assert_eq!(users, ["Reply with just: two"]);
+        assert!(got.iter().any(|e| matches!(e, Event::Text { text, .. } if text.to_lowercase().contains("two"))));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

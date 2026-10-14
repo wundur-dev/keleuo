@@ -1116,6 +1116,12 @@ impl AgentSession {
                 self.chat.apply(Event::UserImages(images.clone()));
                 self.skip_images += 1;
             }
+            // An agent with no hooks cannot say its turn began: it has, with this message (its
+            // end comes with the session's record).
+            if self.backend.hook_settings(&|_| String::new()).is_none() && !(text.is_empty() && images.is_empty()) {
+                self.chat.busy = true;
+                self.chat.status = Some("working".into());
+            }
             if !self.running(cx) {
                 self.start_terminal(cx);
             }
@@ -1199,6 +1205,10 @@ impl AgentSession {
         if self.interactive() {
             if let Some(pty) = self.terminal.as_ref().and_then(|t| t.view.read(cx).pty.clone()) {
                 pty.write(self.backend.terminal_interrupt());
+            }
+            // No hooks to say the turn stopped (nor a record of a stopped turn): it has.
+            if self.backend.hook_settings(&|_| String::new()).is_none() && self.chat.busy {
+                self.chat.apply(Event::Interrupted);
             }
         } else {
             let _ = self.agent.interrupt();
