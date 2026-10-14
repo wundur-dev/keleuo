@@ -20,6 +20,13 @@ use crate::palette;
 use crate::pty::{GridSize, Pty, PtyEvent};
 
 pub const FONT_FAMILY: &str = "Menlo";
+
+/// The placeholder over a starting program goes once its output has paused this long, or this
+/// long after its first output at most, looked for this often, and fades out over this.
+const SETTLE_QUIET: std::time::Duration = std::time::Duration::from_millis(250);
+const SETTLE_AT_MOST: std::time::Duration = std::time::Duration::from_secs(3);
+const SETTLE_CHECK: std::time::Duration = std::time::Duration::from_millis(80);
+const PLACEHOLDER_FADE: std::time::Duration = std::time::Duration::from_millis(180);
 /// The font size, from Settings.
 pub fn font_size(cx: &App) -> f32 {
     crate::prefs(cx).terminal_font_size()
@@ -76,9 +83,18 @@ pub struct TerminalView {
     pub unseen: bool,
     /// The program has drawn something (the screen is no longer blank).
     pub drawn: bool,
-    /// Shown over the blank screen until the program draws: the conversation's last lines
-    /// and what is starting.
+    /// Shown over the screen while the program starts: the shape of the conversation's last
+    /// lines, a spinner and what is starting. It stays until the program has drawn and then
+    /// gone quiet for a moment (an interface draws its banner, then the conversation, in
+    /// steps), then fades out.
     pub placeholder: Option<Placeholder>,
+    /// The program's first screen is complete: the placeholder fades (from `revealed`).
+    settled: bool,
+    revealed: Option<std::time::Instant>,
+    /// When output last came, and when the first did.
+    last_output: Option<std::time::Instant>,
+    first_output: Option<std::time::Instant>,
+    settling: Option<Task<()>>,
     /// For an agent's interface: what Cmd+V with an image does (see [`ImageSupport`]).
     pub images: Option<ImageSupport>,
     /// The image whose `[Image #N]` marker is under the pointer, and where.
@@ -198,6 +214,7 @@ impl TerminalView {
                                             view.drawn = true;
                                             crate::perf::switch_step("terminal drew its first screen");
                                         }
+                                        view.output_came(cx);
                                     }
                                     PtyEvent::Title(t) => view.title = Some(t),
                                     PtyEvent::Copy(text) => {
@@ -228,6 +245,11 @@ impl TerminalView {
             unseen: false,
             drawn: false,
             placeholder: None,
+            settled: false,
+            revealed: None,
+            last_output: None,
+            first_output: None,
+            settling: None,
             images: None,
             hover_image: None,
             error,
@@ -246,6 +268,40 @@ impl TerminalView {
 
     /// Keep what it shows, two seconds after its output stops (a running program writing
     /// steadily is saved at most every two seconds).
+    /// Output came: once the screen has something and the output pauses (or after a while,
+    /// for a program that never pauses), the placeholder fades.
+    fn output_came(&mut self, cx: &mut Context<Self>) {
+        let now = std::time::Instant::now();
+        self.last_output = Some(now);
+        self.first_output.get_or_insert(now);
+        if self.settled || self.placeholder.is_none() || !self.drawn || self.settling.is_some() {
+            return;
+        }
+        self.settling = Some(cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            loop {
+                cx.background_executor().timer(SETTLE_CHECK).await;
+                let done = this.update(cx, |view, cx| {
+                    let quiet = view.last_output.is_none_or(|t| t.elapsed() >= SETTLE_QUIET);
+                    let long = view.first_output.is_some_and(|t| t.elapsed() >= SETTLE_AT_MOST);
+                    if !(quiet || long || view.exited) {
+                        return false;
+                    }
+                    view.settled = true;
+                    view.revealed = Some(std::time::Instant::now());
+                    view.settling = None;
+                    cx.notify();
+                    true
+                });
+                if done.unwrap_or(true) {
+                    break;
+                }
+            }
+            // Once more when the fade is over, to take the placeholder away.
+            cx.background_executor().timer(PLACEHOLDER_FADE).await;
+            let _ = this.update(cx, |_, cx| cx.notify());
+        }));
+    }
+
     fn schedule_save(&mut self, cx: &mut Context<Self>) {
         if self.history.is_none() || self.save.is_some() || !crate::prefs(cx).keep_terminal_history {
             return;
@@ -740,33 +796,67 @@ impl Render for TerminalView {
             return base.p_2().text_color(hsla(if palette::is_dark() { 0xcc6666 } else { 0xc0392b })).child(err.clone());
         }
         let text_size = font_size(cx);
+        // Fading out once settled, then gone.
+        let fading = self.revealed.is_some_and(|t| t.elapsed() < PLACEHOLDER_FADE);
         let placeholder = self
             .placeholder
             .as_ref()
-            .filter(|_| !self.drawn && !self.exited)
+            .filter(|_| (!self.settled && !self.exited) || fading)
             .map(|p| {
+                // The conversation's last lines as bars of their length (a skeleton: its shape,
+                // not its text, which the program is about to draw its own way).
+                let cell = self.cell.get().width;
+                let bar = hsla(palette::dim()).opacity(0.22);
+                // From the top, where the interface draws: its banner (a logo and two lines),
+                // then the conversation.
+                let line = |w: f32| div().h(px(text_size * 0.75)).w(cell * w).rounded(px(3.)).bg(bar);
                 let mut col = div()
                     .absolute()
                     .inset_0()
                     .px_2()
-                    .pb_3()
+                    .pt_3()
                     .bg(hsla(palette::background()))
                     .flex()
                     .flex_col()
-                    .justify_end()
-                    .gap_1()
+                    .gap(px(text_size * 0.7))
                     .overflow_hidden()
-                    .font_family(FONT_FAMILY)
-                    .text_size(px(text_size));
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(cell * 2.)
+                            .pb(px(text_size))
+                            .child(div().w(cell * 8.).h(px(text_size * 3.)).rounded(px(4.)).bg(bar))
+                            .child(div().flex().flex_col().gap(px(text_size * 0.6)).child(line(18.)).child(line(30.))),
+                    );
                 for (user, line) in &p.lines {
+                    let chars = line.chars().count().clamp(4, 120) as f32;
                     col = col.child(
                         div()
-                            .truncate()
-                            .text_color(hsla(palette::dim()).opacity(if *user { 1.0 } else { 0.8 }))
-                            .child(if *user { format!("> {line}") } else { line.clone() }),
+                            .h(px(text_size * 0.75))
+                            .when(*user, |d| d.ml(cell * 2.))
+                            .w(cell * chars)
+                            .max_w(relative(0.92))
+                            .rounded(px(3.))
+                            .bg(if *user { bar.opacity(0.32) } else { bar }),
                     );
                 }
-                col.child(div().pt_2().text_color(hsla(palette::foreground())).child(p.label.clone()))
+                col.child(
+                    div()
+                        .pt_2()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .text_size(px(text_size))
+                        .text_color(hsla(palette::dim()))
+                        .child(gpui_kit::component::spinner::Spinner::new().color(hsla(palette::dim())))
+                        .child(p.label.clone()),
+                )
+            })
+            .map(|col| match self.revealed {
+                // Animated only while fading: it starts when the fade does.
+                Some(_) => col.with_animation("placeholder-fade", Animation::new(PLACEHOLDER_FADE), |d, t| d.opacity(1. - t)).into_any_element(),
+                None => col.into_any_element(),
             });
         base.px_1().relative().child(
             canvas(

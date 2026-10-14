@@ -219,17 +219,60 @@ impl Pty {
 impl Pty {
     /// End what runs in it, as closing a terminal window does: hang up on its foreground
     /// process group, ask it to quit, and stop reading. Other handles to the terminal may
-    /// keep it on screen; its program is gone either way.
-    pub fn hang_up(&self) {
+    /// keep it on screen. Gives the process group hung up on, to make sure of its end (see
+    /// [`gone`], [`kill`] and [`end_for_certain`]): a program may outlive the hang-up (Claude
+    /// Code does), and once hung up its exit is no longer reported.
+    pub fn end(&self) -> Option<i32> {
         #[cfg(unix)]
-        unsafe {
+        let group = unsafe {
             let group = libc::tcgetpgrp(self.master_fd);
             if group > 0 {
                 libc::killpg(group, libc::SIGHUP);
                 libc::killpg(group, libc::SIGTERM);
             }
-        }
+            (group > 0).then_some(group)
+        };
+        #[cfg(not(unix))]
+        let group = None;
         let _ = self.sender.send(Msg::Shutdown);
+        group
+    }
+}
+
+/// Whether process group `group` has ended.
+pub fn gone(group: i32) -> bool {
+    #[cfg(unix)]
+    return unsafe { libc::killpg(group, 0) } != 0;
+    #[cfg(not(unix))]
+    {
+        let _ = group;
+        true
+    }
+}
+
+/// End process group `group` for certain.
+pub fn kill(group: i32) {
+    #[cfg(unix)]
+    unsafe {
+        libc::killpg(group, libc::SIGKILL);
+    }
+    #[cfg(not(unix))]
+    let _ = group;
+}
+
+/// Hang up on what runs in `pty` and, if it has not ended a moment later, kill it (off the
+/// UI thread; for an end nothing waits on).
+pub fn end_for_certain(pty: &Pty) {
+    if let Some(group) = pty.end() {
+        std::thread::spawn(move || {
+            for _ in 0..20 {
+                if gone(group) {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            kill(group);
+        });
     }
 }
 

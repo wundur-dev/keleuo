@@ -123,8 +123,13 @@ fn user_images(v: &Value) -> Vec<PathBuf> {
 
 /// Whether a session file exists and holds a message (read until the first one).
 pub fn has_messages(host: &dyn Host, path: &Path) -> bool {
+    has_messages_from(host, path, 0)
+}
+
+/// Whether the file holds a message from byte `from` on (a turn written since then).
+pub fn has_messages_from(host: &dyn Host, path: &Path, from: u64) -> bool {
     let mut found = false;
-    let _ = host.for_each_line(path, 0, None, &mut |_, line| {
+    let _ = host.for_each_line(path, from, None, &mut |_, line| {
         if (line.contains("\"type\":\"user\"") || line.contains("\"type\":\"assistant\""))
             && serde_json::from_str::<Value>(line)
                 .ok()
@@ -1073,6 +1078,15 @@ mod tests {
         assert!(!has_messages(&host, &path), "only bookkeeping lines");
         std::fs::write(&path, "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"hi\"}}\n").unwrap();
         assert!(has_messages(&host, &path));
+        // From a point on: only what was written after it counts.
+        let at = std::fs::metadata(&path).unwrap().len();
+        let mut more = std::fs::read_to_string(&path).unwrap();
+        more += "{\"type\":\"system\",\"subtype\":\"informational\"}\n";
+        std::fs::write(&path, &more).unwrap();
+        assert!(!has_messages_from(&host, &path, at), "a notice is not a turn");
+        more += "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[]}}\n";
+        std::fs::write(&path, &more).unwrap();
+        assert!(has_messages_from(&host, &path, at));
         let _ = std::fs::remove_dir_all(dir);
     }
 

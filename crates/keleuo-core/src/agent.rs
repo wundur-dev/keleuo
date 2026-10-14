@@ -311,6 +311,15 @@ pub trait Backend: Send + Sync {
     fn session_has_messages(&self, _host: &dyn Host, _project: &Path, _id: &str) -> bool {
         true
     }
+    /// How long session `id`'s file is now, to ask [`Backend::session_moved_on`] later.
+    fn session_len(&self, _host: &dyn Host, _project: &Path, _id: &str) -> Option<u64> {
+        None
+    }
+    /// Whether session `id` has a message past byte `since` of its file: a process that has
+    /// been idle since then no longer knows the whole conversation. When it cannot tell: yes.
+    fn session_moved_on(&self, _host: &dyn Host, _project: &Path, _id: &str, _since: u64) -> bool {
+        true
+    }
     /// The items of an [`crate::conversation::Item::Earlier`] part of session `id`.
     fn load_segment(&self, _host: &dyn Host, _project: &Path, _id: &str, _from: u64, _to: u64) -> std::io::Result<Vec<crate::conversation::Item>> {
         Err(std::io::Error::other("this agent cannot read earlier parts"))

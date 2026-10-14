@@ -164,11 +164,31 @@ pub struct AgentSession {
     /// The interface drives the session in both views (the experimental hybrid setting, read
     /// when the session begins).
     hybrid: bool,
-    /// Terminal to Chat: the interface is ending; Chat's agent starts once it has.
+    /// The interface is ending before Chat's agent works; that agent starts once it has.
     closing: bool,
     /// Messages sent while the interface ends, sent once it has.
     held: Vec<(String, Vec<PathBuf>)>,
+    /// Without the hybrid, the view not shown keeps its agent, idle, in case the conversation
+    /// has not moved on when it shows again (then switching back restarts nothing): the
+    /// interface, Terminal hidden...
+    parked: Option<Parked>,
+    /// ...or Chat's headless agent, Terminal shown, and how long the session file was then.
+    agent_parked_at: Option<u64>,
+    /// Counts switches, so a parked agent's time limit is its own park's.
+    switches: u64,
 }
+
+/// The interface, kept idle while Chat shows (see `parked`).
+struct Parked {
+    run: TerminalRun,
+    pty: Option<Rc<crate::pty::Pty>>,
+    /// The session file's length when it was parked (`None`: not known, so it cannot be kept).
+    len: Option<u64>,
+    ready: bool,
+}
+
+/// How long the view not shown keeps its idle agent.
+const PARK_FOR: std::time::Duration = std::time::Duration::from_secs(600);
 
 impl EventEmitter<SessionEvent> for AgentSession {}
 
@@ -217,6 +237,9 @@ impl AgentSession {
             hybrid: false,
             closing: false,
             held: Vec::new(),
+            parked: None,
+            agent_parked_at: None,
+            switches: 0,
         }
     }
 
@@ -507,6 +530,10 @@ impl AgentSession {
         });
         self.pasted_images.clear();
         let exit = cx.observe(&view, |s, view, cx| {
+            // A parked interface (Chat showing) is not the session's to follow.
+            if s.terminal.as_ref().is_none_or(|t| t.view != view) {
+                return;
+            }
             s.read_preview(&view, cx);
             if view.read(cx).exited && s.ready {
                 s.ready = false;
@@ -789,6 +816,7 @@ impl AgentSession {
                 self.set_ready(cx);
             }
             Hook::Prompt(text) => {
+                self.end_parked_agent();
                 self.prompts_seen += 1;
                 let t = plain(&text);
                 // Empty: a prompt the interface made itself (a report, a task notice), which
@@ -1037,6 +1065,7 @@ impl AgentSession {
             self.sent_at = Some(std::time::Instant::now());
         }
         if self.interactive() {
+            self.end_parked_agent();
             if !text.is_empty() {
                 self.chat.push_user(shown);
                 self.push_echo(text.to_string());
@@ -1053,6 +1082,13 @@ impl AgentSession {
             } else {
                 self.queued.push((text.to_string(), images));
             }
+            cx.notify();
+            return;
+        }
+        // The idle interface ends before this agent writes to the conversation.
+        if let Some(p) = self.parked.take() {
+            self.held.push((shown.to_string(), images));
+            self.end_interface(p.run.view.clone(), p.pty, cx);
             cx.notify();
             return;
         }
@@ -1143,42 +1179,129 @@ impl AgentSession {
             }
             self.view = view;
         } else if view == View::Terminal {
-            // Chat's agent is idle: it ends, and the interface resumes the conversation.
-            self.release();
-            self.view = view;
-            if self.waiting_for.is_none() {
-                self.start_terminal(cx);
+            // Chat's agent is idle: it waits, in case Chat shows again before anything changes.
+            self.agent_parked_at = if self.agent.running() { self.session_len() } else { None };
+            if self.agent_parked_at.is_none() {
+                self.end_agent();
             }
+            self.view = view;
+            match self.parked.take() {
+                // Nothing new since the interface was hidden: it shows as it was.
+                Some(p) if p.len.is_some_and(|l| !self.moved_on(l)) && !p.run.view.read(cx).exited => {
+                    self.terminal = Some(p.run);
+                    self.ready = p.ready;
+                    if let Some(id) = self.chat.session_id.clone() {
+                        self.follow(&id, cx);
+                    }
+                }
+                stale => {
+                    if let Some(pty) = stale.and_then(|p| p.pty) {
+                        crate::pty::end_for_certain(&pty);
+                    }
+                    if self.waiting_for.is_none() {
+                        self.start_terminal(cx);
+                    }
+                }
+            }
+            self.park_timer(cx);
         } else {
             self.view = view;
-            self.close_terminal(cx);
+            // The interface waits, idle, in case Terminal shows again before anything changes.
+            if let Some(run) = self.terminal.take()
+                && !run.view.read(cx).exited
+            {
+                let pty = run.view.read(cx).pty.clone();
+                self.parked = Some(Parked { len: self.session_len(), ready: self.ready, run, pty });
+            }
+            self.following = None;
+            self.ready = false;
+            // Chat's own agent, if it waited: kept when nothing changed meanwhile.
+            if let Some(len) = self.agent_parked_at.take()
+                && !(self.agent.running() && !self.moved_on(len))
+            {
+                self.end_agent();
+            }
+            self.park_timer(cx);
         }
         self.remember_view(cx);
         cx.notify();
     }
 
-    /// Terminal to Chat (without the hybrid): end the interface. Chat shows at once; a message
-    /// sent meanwhile waits for the interface to have exited (two processes on one
-    /// conversation would each write their own turns to its file), then starts Chat's agent.
-    fn close_terminal(&mut self, cx: &mut Context<Self>) {
-        let Some(run) = self.terminal.take() else { return };
-        // Its exit is expected: not watched as the interface quitting by itself.
-        let view = run.view.clone();
-        drop(run);
-        self.release();
-        if view.read(cx).exited {
-            return;
+    /// The session file's length now.
+    fn session_len(&self) -> Option<u64> {
+        let id = self.chat.session_id.as_deref()?;
+        self.backend.session_len(self.host.as_ref(), &self.cwd, id)
+    }
+
+    /// Whether the conversation has a turn past `len` of its file (an idle agent from then is
+    /// out of date).
+    fn moved_on(&self, len: u64) -> bool {
+        self.chat.session_id.as_deref().is_none_or(|id| self.backend.session_moved_on(self.host.as_ref(), &self.cwd, id, len))
+    }
+
+    /// End Chat's headless agent.
+    fn end_agent(&mut self) {
+        if self.agent.running() {
+            self.agent.stop();
+            self._reader = None;
+            self.chat.process_ended();
         }
-        let Some(pty) = view.read(cx).pty.clone() else { return };
-        pty.hang_up();
+    }
+
+    /// The interface works now: Chat's agent, waiting while Terminal shows, would fall behind.
+    fn end_parked_agent(&mut self) {
+        if !self.hybrid && self.agent_parked_at.take().is_some() {
+            self.end_agent();
+        }
+    }
+
+    /// A parked agent ends when its view has not shown again for a while.
+    fn park_timer(&mut self, cx: &mut Context<Self>) {
+        self.switches += 1;
+        let at = self.switches;
+        cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            cx.background_executor().timer(PARK_FOR).await;
+            let _ = this.update(cx, |s, cx| {
+                if s.switches != at {
+                    return;
+                }
+                if let Some(pty) = s.parked.take().and_then(|p| p.pty) {
+                    crate::pty::end_for_certain(&pty);
+                }
+                if s.view == View::Terminal && s.agent_parked_at.take().is_some() {
+                    s.end_agent();
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// End the interface in `view` before Chat's agent works: a message sent meanwhile waits
+    /// for it to have exited (two processes on one conversation would each write their own
+    /// turns to its file), then goes.
+    fn end_interface(&mut self, view: Entity<TerminalView>, pty: Option<Rc<crate::pty::Pty>>, cx: &mut Context<Self>) {
+        let Some(pty) = pty.filter(|_| !view.read(cx).exited) else {
+            for (text, images) in std::mem::take(&mut self.held) {
+                self.send_with(&text, images, cx);
+            }
+            return;
+        };
+        let group = pty.end();
         self.closing = true;
         self.restarting = Some("in Chat".into());
         cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
-            // A few seconds at most: a process that will not end is left to its hang-up.
-            for _ in 0..100 {
-                cx.background_executor().timer(std::time::Duration::from_millis(50)).await;
-                if view.read_with(cx, |v, _| v.exited) {
-                    break;
+            // Ended when its process group is gone: killed if the hang-up has not done it in
+            // two seconds, given a moment more to go, and then the message goes regardless.
+            if let Some(group) = group {
+                for tick in 0..30 {
+                    if crate::pty::gone(group) {
+                        break;
+                    }
+                    if tick == 20 {
+                        crate::pty::kill(group);
+                    }
+                    cx.background_executor().timer(std::time::Duration::from_millis(100)).await;
                 }
             }
             let _ = this.update(cx, |s, cx| {
@@ -1207,13 +1330,17 @@ impl AgentSession {
         if let Some(run) = self.terminal.take()
             && let Some(pty) = run.view.read(cx).pty.clone()
         {
-            pty.hang_up();
+            crate::pty::end_for_certain(&pty);
         }
         self.release();
     }
 
     /// Let go of the agent and the file following (all a drop can do, with no app at hand).
     fn release(&mut self) {
+        if let Some(pty) = self.parked.take().and_then(|p| p.pty) {
+            crate::pty::end_for_certain(&pty);
+        }
+        self.agent_parked_at = None;
         self.terminal = None;
         self.following = None;
         self.ready = false;
