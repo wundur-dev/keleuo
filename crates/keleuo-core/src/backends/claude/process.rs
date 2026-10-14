@@ -5,6 +5,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Stdio};
 use std::sync::Arc;
+use std::sync::mpsc;
 
 use super::stream;
 use crate::host::{CommandSpec, ProgramSpec};
@@ -90,7 +91,9 @@ type Message = Line;
 /// A running `claude`.
 pub struct Process {
     child: Child,
-    stdin: Option<ChildStdin>,
+    /// Lines for Claude's stdin, written in order by a thread of their own: a message with an
+    /// image is megabytes, and writing it would hold up the window.
+    stdin: Option<mpsc::Sender<String>>,
     next_request: u64,
 }
 
@@ -119,7 +122,7 @@ impl Process {
         );
         read_lines(stderr, sink, |line| Some(Line::Stderr(line)), false);
         Ok(Self {
-            stdin: child.stdin.take(),
+            stdin: child.stdin.take().map(write_lines),
             child,
             next_request: 0,
         })
@@ -129,11 +132,11 @@ impl Process {
     pub fn send_line(&mut self, line: &str) -> std::io::Result<()> {
         let stdin = self
             .stdin
-            .as_mut()
+            .as_ref()
             .ok_or_else(|| std::io::Error::other("stdin closed"))?;
-        stdin.write_all(line.as_bytes())?;
-        stdin.write_all(b"\n")?;
-        stdin.flush()
+        stdin
+            .send(format!("{line}\n"))
+            .map_err(|_| std::io::Error::other("stdin closed"))
     }
 
     pub fn send_user(&mut self, text: &str) -> std::io::Result<()> {
@@ -167,6 +170,20 @@ impl Drop for Process {
     fn drop(&mut self) {
         self.kill();
     }
+}
+
+/// A thread writing each line sent to `stdin`; it ends when the sender is dropped or a write
+/// fails (Claude has gone; then sending says the input is closed).
+fn write_lines(mut stdin: ChildStdin) -> mpsc::Sender<String> {
+    let (tx, rx) = mpsc::channel::<String>();
+    std::thread::spawn(move || {
+        for line in rx {
+            if stdin.write_all(line.as_bytes()).and_then(|()| stdin.flush()).is_err() {
+                break;
+            }
+        }
+    });
+    tx
 }
 
 fn read_lines<R: std::io::Read + Send + 'static>(
