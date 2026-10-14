@@ -227,6 +227,84 @@ impl ChatPanel {
         col.into_any_element()
     }
 
+    /// The header of a run of one tool's calls (`run`, items of the chat shown): how many, the
+    /// latest one, whether one runs or failed, and how long they took. A click opens or closes
+    /// the group (its calls are entries of their own below it).
+    pub(super) fn render_tool_group(&self, run: std::ops::Range<usize>, key: String, open: bool, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let (fg, muted, border, card_bg, hover, green, red) =
+            (theme.foreground, theme.muted_foreground, theme.border, theme.secondary, theme.secondary_hover, theme.green, theme.red);
+        let tools: Vec<ToolCall> = {
+            let chat = &self.session.read(cx).chat;
+            let items = match &self.agent {
+                Some(id) => chat.agent(id).map(|a| a.items.as_slice()).unwrap_or_default(),
+                None => chat.items.as_slice(),
+            };
+            items
+                .get(run)
+                .unwrap_or_default()
+                .iter()
+                .filter_map(|i| if let Item::Tool(t) = i { Some(t.clone()) } else { None })
+                .collect()
+        };
+        let Some(latest) = tools.last() else { return div().into_any_element() };
+        let running = tools.iter().any(ToolCall::running);
+        let failed = tools.iter().filter(|t| t.is_error).count();
+        let status = if running {
+            self.spinner(muted).xsmall().into_any_element()
+        } else if failed > 0 {
+            Icon::new(IconName::CircleX).xsmall().text_color(red).into_any_element()
+        } else {
+            Icon::new(IconName::Check).xsmall().text_color(green).into_any_element()
+        };
+        let total: std::time::Duration = tools.iter().filter_map(ToolCall::elapsed).sum();
+        let elapsed = (running || total.as_secs() >= 1).then(|| format_elapsed(total));
+        // The one running, else the latest.
+        let shown = tools.iter().find(|t| t.running()).unwrap_or(latest);
+        div()
+            .id(SharedString::from(format!("tool-group-{key}")))
+            .h(px(24.))
+            .px_1()
+            .flex()
+            .items_center()
+            .gap_1()
+            .text_xs()
+            .border_1()
+            .border_color(border)
+            .rounded_md()
+            .bg(card_bg.opacity(0.5))
+            .cursor_pointer()
+            .hover(|d| d.bg(hover))
+            .child(Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight }).xsmall().text_color(muted))
+            .child(status)
+            .child(
+                div()
+                    .flex_none()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(fg)
+                    .child(keleuo_core::conversation::tool_run_label(&latest.name, tools.len())),
+            )
+            .when(failed > 0, |d| d.child(div().flex_none().text_color(red).child(format!("{failed} failed"))))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .font_family(MONO)
+                    .text_color(muted)
+                    .child(shown.summary.lines().next().unwrap_or_default().to_string()),
+            )
+            .when_some(elapsed, |d, e| d.child(div().flex_none().text_color(muted).child(e)))
+            .on_click(cx.listener(move |p, _, _, cx| {
+                if !p.toggled.remove(&key) {
+                    p.toggled.insert(key.clone());
+                }
+                p.list.remeasure();
+                cx.notify();
+            }))
+            .into_any_element()
+    }
+
     pub(super) fn render_tool(&self, ix: usize, tool: &ToolCall, cx: &mut Context<Self>) -> AnyElement {
         // A tool call that started a subagent shows as the subagent's card.
         if let Some(agent) = self.session.read(cx).chat.agent(&tool.id).cloned()

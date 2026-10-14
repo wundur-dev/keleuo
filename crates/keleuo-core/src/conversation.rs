@@ -927,6 +927,84 @@ fn plural(n: usize, word: &str) -> String {
     if n == 1 { format!("1 {word}") } else { format!("{n} {word}s") }
 }
 
+/// How many calls of one tool in a row the chat shows as one group.
+pub const TOOL_RUN: usize = 3;
+
+/// The run of tool calls item `ix` belongs to, when it is in one: [`TOOL_RUN`] or more
+/// [`Item::Tool`]s in a row with the same name, each one `groupable` (a subagent's card or a
+/// call with a fix to offer stays on its own).
+pub fn tool_run(items: &[Item], ix: usize, groupable: impl Fn(&ToolCall) -> bool) -> Option<std::ops::Range<usize>> {
+    let name = match items.get(ix)? {
+        Item::Tool(t) if groupable(t) => t.name.as_str(),
+        _ => return None,
+    };
+    let member = |i: &Item| matches!(i, Item::Tool(t) if t.name == name && groupable(t));
+    let start = items[..ix].iter().rposition(|i| !member(i)).map_or(0, |p| p + 1);
+    let end = items[ix..].iter().position(|i| !member(i)).map_or(items.len(), |p| ix + p);
+    (end - start >= TOOL_RUN).then_some(start..end)
+}
+
+/// What a group of `n` calls of `tool` is called: "4 commands", "3 files read".
+pub fn tool_run_label(tool: &str, n: usize) -> String {
+    let what = match tool {
+        "Bash" | "Shell" => "commands",
+        "Read" => "files read",
+        "Edit" | "MultiEdit" | "Write" => "edits",
+        "Grep" | "Glob" => "searches",
+        "WebFetch" => "pages fetched",
+        "WebSearch" => "web searches",
+        _ => return format!("{n} {tool} calls"),
+    };
+    format!("{n} {what}")
+}
+
+#[cfg(test)]
+mod tool_run_tests {
+    use super::*;
+
+    fn tool(id: &str, name: &str) -> Item {
+        Item::Tool(ToolCall {
+            id: id.into(),
+            name: name.into(),
+            input: Value::Null,
+            summary: String::new(),
+            result: None,
+            is_error: false,
+            diff: None,
+            parent: None,
+            started: None,
+            duration_ms: None,
+            live: None,
+            issue: None,
+        })
+    }
+
+    #[test]
+    fn three_or_more_of_one_tool_in_a_row_make_a_group() {
+        let items = vec![
+            Item::User("go".into()),
+            tool("a", "Bash"),
+            tool("b", "Bash"),
+            tool("c", "Bash"),
+            tool("d", "Read"),
+            tool("e", "Bash"),
+            tool("f", "Bash"),
+        ];
+        let all = |_: &ToolCall| true;
+        for ix in 1..=3 {
+            assert_eq!(tool_run(&items, ix, all), Some(1..4));
+        }
+        // A different tool ends the run; two in a row are no group.
+        assert_eq!(tool_run(&items, 4, all), None);
+        assert_eq!(tool_run(&items, 5, all), None);
+        assert_eq!(tool_run(&items, 0, all), None);
+        // A call that is not groupable splits the run.
+        assert_eq!(tool_run(&items, 1, |t: &ToolCall| t.id != "b"), None);
+        assert_eq!(tool_run_label("Bash", 3), "3 commands");
+        assert_eq!(tool_run_label("Frobnicate", 4), "4 Frobnicate calls");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
