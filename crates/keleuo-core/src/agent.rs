@@ -96,6 +96,17 @@ pub enum Event {
     UserImages(Vec<PathBuf>),
 }
 
+/// A model an agent offers, as the agent itself lists it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ModelOption {
+    /// What to ask for (`--model <id>`).
+    pub id: String,
+    /// What the agent calls it.
+    pub label: String,
+    /// The family it is grouped under in the menu ("Claude", "GPT"); empty: on its own.
+    pub family: String,
+}
+
 /// The permission modes as `(mode, what the status line says)`, in the order the mode key
 /// cycles them, and that key.
 pub type ModeCycle = (Vec<(String, String)>, Vec<u8>);
@@ -178,7 +189,7 @@ pub struct StartOptions {
 pub trait Agent: Send {
     fn running(&self) -> bool;
     /// Start the agent on `host`. Messages arrive through `sink`.
-    fn start(&mut self, host: &dyn Host, options: &StartOptions, sink: Sink) -> anyhow::Result<()>;
+    fn start(&mut self, host: Arc<dyn Host>, options: &StartOptions, sink: Sink) -> anyhow::Result<()>;
     fn send(&mut self, text: &str) -> std::io::Result<()>;
     /// Send a user turn with images (files on this machine). Unsupported by default: then
     /// [`Agent::takes_images`] is false and only the text goes.
@@ -369,6 +380,16 @@ pub trait Backend: Send + Sync {
     /// The command that switches the model (`/model <name>`), when there is one.
     fn model_command(&self, _model: &str) -> Option<String> {
         None
+    }
+    /// Every model the agent offers this person, asked of the agent itself (slow: run off the
+    /// window's thread). Empty when it cannot list them: then [`Capabilities::models`].
+    fn list_models(&self, _host: &dyn Host) -> Vec<ModelOption> {
+        Vec::new()
+    }
+    /// The permission modes the window offers, as `(mode name, what it is called)`; the first
+    /// is the default. Claude Code's by default.
+    fn permission_modes(&self) -> Vec<(&'static str, &'static str)> {
+        vec![("default", "Ask before acting"), ("auto", "Auto"), ("acceptEdits", "Accept edits"), ("plan", "Plan")]
     }
     /// The permission modes, in the order the interface's mode key cycles through them, as
     /// `(mode name, what its status line says)`; and that key.

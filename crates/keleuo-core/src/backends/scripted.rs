@@ -71,7 +71,7 @@ impl Agent for ScriptedAgent {
         self.sink.is_some()
     }
 
-    fn start(&mut self, _host: &dyn Host, options: &StartOptions, sink: Sink) -> anyhow::Result<()> {
+    fn start(&mut self, _host: Arc<dyn Host>, options: &StartOptions, sink: Sink) -> anyhow::Result<()> {
         self.cwd = options.cwd.to_string_lossy().to_string();
         sink(Message::Event(Event::Started {
             session_id: Some(format!("scripted-{}", std::process::id())),
@@ -236,7 +236,7 @@ mod tests {
         let tx = Mutex::new(tx);
         let mut agent = backend.new_agent();
         agent
-            .start(&LocalHost, &StartOptions { cwd: "/tmp/p".into(), ..Default::default() }, Arc::new(move |m| {
+            .start(Arc::new(LocalHost), &StartOptions { cwd: "/tmp/p".into(), ..Default::default() }, Arc::new(move |m| {
                 let _ = tx.lock().unwrap().send(m);
             }))
             .unwrap();

@@ -20,7 +20,7 @@ use gpui_kit::*;
 use keleuo_core::conversation::{
     AgentStatus, Item, PermissionPrompt, SubAgent, ToolCall,
 };
-use keleuo_core::agent::Issue;
+use keleuo_core::agent::{Issue, ModelOption};
 use keleuo_core::diff::{FileDiff, LineKind};
 use keleuo_core::links::{self, FileIndex};
 use keleuo_core::compose::{self, ListBreak};

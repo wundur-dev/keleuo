@@ -21,7 +21,7 @@ use std::sync::Arc;
 
 use gpui_kit::prelude::*;
 use gpui_kit::*;
-use keleuo_core::agent::{Agent, Backend, Event, Follow, Hook, Launch, Message, StartOptions};
+use keleuo_core::agent::{Agent, Backend, Event, Follow, Hook, Launch, Message, ModelOption, StartOptions};
 use keleuo_core::conversation::Conversation;
 use keleuo_core::host::Host;
 
@@ -114,6 +114,9 @@ pub struct AgentSession {
     pub cwd: PathBuf,
     pub chat: Conversation,
     pub backend: Arc<dyn Backend>,
+    /// Every model the agent lists for this person (see [`Backend::list_models`]); `None` until
+    /// asked ([`AgentSession::want_models`]).
+    pub listed_models: Option<Vec<ModelOption>>,
     /// The structured agent (backends without a terminal interface).
     agent: Box<dyn Agent>,
     /// `None` is the backend's default mode (it asks); otherwise its own mode name.
@@ -206,6 +209,7 @@ impl AgentSession {
             dormant: false,
             preview_read: None,
             prompts_seen: 0,
+            listed_models: None,
             chat: Conversation::new(cwd.to_string_lossy().to_string()),
             cwd,
             permission_mode: keleuo_core::env_var("PERMISSION_MODE").ok().filter(|m| !m.is_empty()),
@@ -688,6 +692,23 @@ impl AgentSession {
     /// Switch the model. The interface restarts on the same conversation with it (between
     /// turns), rather than typing its `/model` command: Claude Code's `/model` also saves the
     /// choice as the person's default for every new session, in their own settings.
+    /// Ask the agent for its models, once, off the UI thread (the model menu then lists them).
+    pub fn want_models(&mut self, cx: &mut Context<Self>) {
+        if self.listed_models.is_some() {
+            return;
+        }
+        self.listed_models = Some(Vec::new());
+        let (backend, host) = (self.backend.clone(), self.host.clone());
+        cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let models = cx.background_spawn(async move { backend.list_models(host.as_ref()) }).await;
+            let _ = this.update(cx, |s, cx| {
+                s.listed_models = Some(models);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     pub fn set_model(&mut self, model: &str, cx: &mut Context<Self>) {
         self.model = Some(model.to_string());
         if self.interactive() && self.running(cx) {
@@ -928,7 +949,7 @@ impl AgentSession {
         };
         let (tx, rx) = async_channel::unbounded::<Message>();
         self.agent.start(
-            self.host.as_ref(),
+            self.host.clone(),
             &options,
             Arc::new(move |m| {
                 let _ = tx.send_blocking(m);
@@ -1201,7 +1222,7 @@ impl AgentSession {
         }
         self.chat.push_notice(format!(
             "Permission mode: {}. {}",
-            mode_label(self.permission_mode.as_deref()),
+            mode_label(self.backend.as_ref(), self.permission_mode.as_deref()),
             if now { "Restarted with it." } else { "Applies from the next message." }
         ));
         cx.notify();
@@ -1412,16 +1433,17 @@ const PREVIEW_EVERY: std::time::Duration = std::time::Duration::from_millis(100)
 /// no preview: its start is out of reach).
 const PREVIEW_LINES: usize = 400;
 
-/// The permission modes the composer offers (the agent's name for each, and what it is called
-/// here), and what a mode is called.
-pub const MODES: [(&str, &str); 4] =
-    [("default", "Ask before acting"), ("auto", "Auto"), ("acceptEdits", "Accept edits"), ("plan", "Plan")];
-
-pub fn mode_label(mode: Option<&str>) -> &'static str {
+/// What a permission mode is called, among `backend`'s modes; one it does not have (another
+/// agent's) counts as its first, its default.
+pub fn mode_label(backend: &dyn Backend, mode: Option<&str>) -> &'static str {
+    let modes = backend.permission_modes();
     match mode {
-        Some("bypassPermissions") => "Bypass permissions",
-        Some(m) => MODES.iter().find(|(name, _)| *name == m).map_or("Ask before acting", |(_, label)| *label),
-        None => "Ask before acting",
+        Some("bypassPermissions") if !modes.iter().any(|(m, _)| *m == "bypassPermissions") => "Bypass permissions",
+        _ => modes
+            .iter()
+            .find(|(name, _)| Some(*name) == mode)
+            .or(modes.first())
+            .map_or("Default", |(_, label)| *label),
     }
 }
 

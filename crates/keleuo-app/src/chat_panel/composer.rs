@@ -608,6 +608,9 @@ impl ChatPanel {
 
     /// The model menu, or the field typing a model's name in its place.
     fn render_model_control(&self, cx: &mut Context<Self>) -> AnyElement {
+        if self.session.read(cx).listed_models.is_none() {
+            self.session.update(cx, |s, cx| s.want_models(cx));
+        }
         let session = self.session.read(cx);
         let model = session.chat.model.clone().or_else(|| session.model.clone()).unwrap_or_else(|| "default model".into());
         let w_model = self.session.downgrade();
@@ -616,6 +619,8 @@ impl ChatPanel {
         // before, and "Other model…" to type one. The running one is ticked; an alias shows
         // what it stands for.
         let models: Vec<String> = session.backend.capabilities().models.clone();
+        // Every model the agent lists, when it lists them: the menu then offers those instead.
+        let listed: Vec<ModelOption> = session.listed_models.clone().unwrap_or_default();
         let recent: Vec<String> = cx.global::<crate::AppSettings>().0.borrow().recent_models.clone();
         // What was picked (an alias or a typed name), and what it runs as.
         let (picked, running_as) = (session.model.clone(), session.chat.model.clone());
@@ -624,7 +629,7 @@ impl ChatPanel {
             .ghost()
             .label(short_model(&model))
             .tooltip("Model")
-            .dropdown_menu(move |menu, _, _| {
+            .dropdown_menu(move |menu, window, cx| {
                 use gpui_kit::component::menu::PopupMenuItem;
                 let mut menu = menu;
                 let is = |m: &str| match (&picked, &running_as) {
@@ -632,7 +637,41 @@ impl ChatPanel {
                     (None, Some(r)) => r.contains(m),
                     (None, None) => false,
                 };
-                for m in &models {
+                // The agent's own list: those on their own first, then a submenu per family, in
+                // the agent's order.
+                let mut families: Vec<&str> = Vec::new();
+                for m in &listed {
+                    if m.family.is_empty() {
+                        let (w, id) = (w_model.clone(), m.id.clone());
+                        menu = menu.item(PopupMenuItem::new(m.label.clone()).checked(is(&m.id)).on_click(move |_, _, cx| {
+                            let _ = w.update(cx, |s, cx| s.set_model(&id, cx));
+                        }));
+                    } else if !families.contains(&m.family.as_str()) {
+                        families.push(&m.family);
+                    }
+                }
+                for family in families {
+                    let members: Vec<ModelOption> = listed.iter().filter(|m| m.family == family).cloned().collect();
+                    let current = members.iter().any(|m| is(&m.id));
+                    let w = w_model.clone();
+                    let picked = picked.clone();
+                    let label = if current { format!("{family} ✓") } else { family.to_string() };
+                    menu = menu.submenu(label, window, cx, move |sub, _, _| {
+                        let mut sub = sub.scrollable(true).max_h(px(420.));
+                        for m in &members {
+                            let (w, id) = (w.clone(), m.id.clone());
+                            let checked = picked.as_deref() == Some(m.id.as_str());
+                            // Its name; with its id when another in the family has the same name.
+                            let twin = members.iter().filter(|o| o.label == m.label).count() > 1;
+                            let label = if twin { format!("{} ({})", m.label, m.id) } else { m.label.clone() };
+                            sub = sub.item(PopupMenuItem::new(label).checked(checked).on_click(move |_, _, cx| {
+                                let _ = w.update(cx, |s, cx| s.set_model(&id, cx));
+                            }));
+                        }
+                        sub
+                    });
+                }
+                for m in models.iter().filter(|_| listed.is_empty()) {
                     let (w, m2) = (w_model.clone(), m.clone());
                     let running = is(m);
                     let label = match (&running_as, running) {
@@ -684,12 +723,14 @@ impl ChatPanel {
         let mode = live.or_else(|| session.permission_mode.clone());
         let caps = session.backend.capabilities();
         let w_mode = self.session.downgrade();
-        let modes: Vec<(Option<String>, &'static str)> = crate::agent_session::MODES
-            .iter()
+        let modes: Vec<(Option<String>, &'static str)> = session
+            .backend
+            .permission_modes()
+            .into_iter()
             .filter(|(m, _)| *m != "acceptEdits" || caps.accept_edits_mode.is_some())
-            .map(|(m, label)| (Some(m.to_string()), *label))
+            .map(|(m, label)| (Some(m.to_string()), label))
             .collect();
-        let mode_label = crate::agent_session::mode_label(mode.as_deref());
+        let mode_label = crate::agent_session::mode_label(session.backend.as_ref(), mode.as_deref());
         let mode_button = Button::new("mode")
             .xsmall()
             .ghost()

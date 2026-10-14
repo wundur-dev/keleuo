@@ -7,15 +7,17 @@ use std::sync::Arc;
 use gpui_kit::{App, Global};
 use keleuo_core::agent::{Backend, Registry};
 use keleuo_core::backends::claude::ClaudeBackend;
+use keleuo_core::backends::cursor::CursorBackend;
 use keleuo_core::backends::scripted::ScriptedBackend;
 
 pub struct Backends(pub Registry);
 
 impl Global for Backends {}
 
-/// Claude Code; plus the scripted test agent when `KELEUO_TEST_BACKENDS=1`.
+/// Claude Code (the default), Cursor; plus the scripted test agent when
+/// `KELEUO_TEST_BACKENDS=1`.
 pub fn registry() -> Registry {
-    let mut all: Vec<Arc<dyn Backend>> = vec![Arc::new(ClaudeBackend)];
+    let mut all: Vec<Arc<dyn Backend>> = vec![Arc::new(ClaudeBackend), Arc::new(CursorBackend::default())];
     if keleuo_core::env_var("TEST_BACKENDS").is_ok_and(|v| v == "1") {
         all.push(Arc::new(ScriptedBackend { step: std::time::Duration::from_millis(120) }));
     }
@@ -40,7 +42,7 @@ mod tests {
     #[test]
     fn only_the_registry_names_a_backend() {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-        let forbidden = ["ClaudeCode", "ClaudeBackend", "claude::", "ScriptedBackend", "scripted::"];
+        let forbidden = ["ClaudeCode", "ClaudeBackend", "claude::", "CursorBackend", "cursor::", "ScriptedBackend", "scripted::"];
         let mut bad = Vec::new();
         for entry in std::fs::read_dir(&dir).unwrap() {
             let path = entry.unwrap().path();
