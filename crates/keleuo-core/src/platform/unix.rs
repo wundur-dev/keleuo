@@ -18,3 +18,18 @@ pub fn without_vars(program: PathBuf, args: &[String], unset: &[String]) -> (Pat
     all.extend(args.iter().cloned());
     ("/usr/bin/env".into(), all, Vec::new())
 }
+
+/// A process group of its own.
+pub fn own_group(cmd: &mut Command) -> &mut Command {
+    use std::os::unix::process::CommandExt;
+    cmd.process_group(0)
+}
+
+/// SIGKILL to the whole group (its id is the child's, see [`own_group`]).
+pub fn kill_group(child: &mut std::process::Child) {
+    if let Ok(pid) = libc::pid_t::try_from(child.id()) {
+        // SAFETY: kill(2) with a negative id signals that process group; no memory involved.
+        unsafe { libc::kill(-pid, libc::SIGKILL) };
+    }
+    let _ = child.kill();
+}

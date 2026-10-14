@@ -928,7 +928,7 @@ impl AgentSession {
         };
         let (tx, rx) = async_channel::unbounded::<Message>();
         self.agent.start(
-            self.host.as_ref(),
+            self.host.clone(),
             &options,
             Arc::new(move |m| {
                 let _ = tx.send_blocking(m);
@@ -1201,7 +1201,7 @@ impl AgentSession {
         }
         self.chat.push_notice(format!(
             "Permission mode: {}. {}",
-            mode_label(self.permission_mode.as_deref()),
+            mode_label(self.backend.as_ref(), self.permission_mode.as_deref()),
             if now { "Restarted with it." } else { "Applies from the next message." }
         ));
         cx.notify();
@@ -1412,16 +1412,17 @@ const PREVIEW_EVERY: std::time::Duration = std::time::Duration::from_millis(100)
 /// no preview: its start is out of reach).
 const PREVIEW_LINES: usize = 400;
 
-/// The permission modes the composer offers (the agent's name for each, and what it is called
-/// here), and what a mode is called.
-pub const MODES: [(&str, &str); 4] =
-    [("default", "Ask before acting"), ("auto", "Auto"), ("acceptEdits", "Accept edits"), ("plan", "Plan")];
-
-pub fn mode_label(mode: Option<&str>) -> &'static str {
+/// What a permission mode is called, among `backend`'s modes; one it does not have (another
+/// agent's) counts as its first, its default.
+pub fn mode_label(backend: &dyn Backend, mode: Option<&str>) -> &'static str {
+    let modes = backend.permission_modes();
     match mode {
-        Some("bypassPermissions") => "Bypass permissions",
-        Some(m) => MODES.iter().find(|(name, _)| *name == m).map_or("Ask before acting", |(_, label)| *label),
-        None => "Ask before acting",
+        Some("bypassPermissions") if !modes.iter().any(|(m, _)| *m == "bypassPermissions") => "Bypass permissions",
+        _ => modes
+            .iter()
+            .find(|(name, _)| Some(*name) == mode)
+            .or(modes.first())
+            .map_or("Default", |(_, label)| *label),
     }
 }
 

@@ -19,3 +19,14 @@ pub fn command(program: &OsStr) -> Command {
 pub fn without_vars(program: PathBuf, args: &[String], unset: &[String]) -> (PathBuf, Vec<String>, Vec<(String, String)>) {
     (program, args.to_vec(), unset.iter().map(|v| (v.clone(), String::new())).collect())
 }
+
+/// Nothing to set up: [`kill_group`] ends the tree by process id.
+pub fn own_group(cmd: &mut Command) -> &mut Command {
+    cmd
+}
+
+/// `taskkill /T` ends the process and the ones it started.
+pub fn kill_group(child: &mut std::process::Child) {
+    let _ = command(OsStr::new("taskkill")).args(["/T", "/F", "/PID", &child.id().to_string()]).output();
+    let _ = child.kill();
+}

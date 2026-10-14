@@ -338,8 +338,8 @@ impl Agent for ClaudeCode {
         self.process.is_some()
     }
 
-    fn start(&mut self, host: &dyn Host, options: &StartOptions, sink: Sink) -> anyhow::Result<()> {
-        let spec = host.program_command(
+    fn start(&mut self, host: Arc<dyn Host>, options: &StartOptions, sink: Sink) -> anyhow::Result<()> {
+        let spec = host.as_ref().program_command(
             &Options {
                 program: self.program.clone(),
                 cwd: options.cwd.clone(),
@@ -431,7 +431,7 @@ mod tests {
         assert!(!agent.running());
         agent
             .start(
-                &LocalHost,
+                Arc::new(LocalHost),
                 &StartOptions { cwd: dir.clone(), ..Default::default() },
                 Arc::new(move |m| sink_got.lock().unwrap().push(m)),
             )

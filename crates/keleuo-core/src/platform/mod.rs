@@ -27,3 +27,14 @@ pub fn command(program: impl AsRef<OsStr>) -> Command {
 pub fn without_vars(program: PathBuf, args: &[String], unset: &[String]) -> (PathBuf, Vec<String>, Vec<(String, String)>) {
     os::without_vars(program, args, unset)
 }
+
+/// Start `cmd`'s program as the head of a group of its own, so [`kill_group`] reaches the
+/// programs it starts too.
+pub fn own_group(cmd: &mut Command) -> &mut Command {
+    os::own_group(cmd)
+}
+
+/// End `child` and every program it started.
+pub fn kill_group(child: &mut std::process::Child) {
+    os::kill_group(child)
+}

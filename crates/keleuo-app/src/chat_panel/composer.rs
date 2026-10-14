@@ -684,12 +684,14 @@ impl ChatPanel {
         let mode = live.or_else(|| session.permission_mode.clone());
         let caps = session.backend.capabilities();
         let w_mode = self.session.downgrade();
-        let modes: Vec<(Option<String>, &'static str)> = crate::agent_session::MODES
-            .iter()
+        let modes: Vec<(Option<String>, &'static str)> = session
+            .backend
+            .permission_modes()
+            .into_iter()
             .filter(|(m, _)| *m != "acceptEdits" || caps.accept_edits_mode.is_some())
-            .map(|(m, label)| (Some(m.to_string()), *label))
+            .map(|(m, label)| (Some(m.to_string()), label))
             .collect();
-        let mode_label = crate::agent_session::mode_label(mode.as_deref());
+        let mode_label = crate::agent_session::mode_label(session.backend.as_ref(), mode.as_deref());
         let mode_button = Button::new("mode")
             .xsmall()
             .ghost()
