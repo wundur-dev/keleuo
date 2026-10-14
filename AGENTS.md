@@ -38,3 +38,15 @@ sessions come back. Never run it yourself: it quits the app this session runs in
   and how it was checked.
 - Never push to `main`, merge a PR, or delete a branch someone else made.
 - After the owner merges, switch back to `main` and pull.
+
+## Releasing
+
+The version lives in `Cargo.toml` (`[workspace.package] version`); the About window shows it.
+
+1. A PR bumps the version (semver: `0.1.0` → `0.1.1` for fixes, `0.2.0` for features).
+2. After it is merged, the owner tags `main` with the same version and pushes the tag:
+   `git tag v0.2.0 && git push origin v0.2.0`.
+3. The Release workflow builds, signs and notarizes Keleuo.app and publishes it as a GitHub
+   release. It fails if the tag does not match `Cargo.toml`.
+
+Agents prepare the version bump; they do not push release tags.
