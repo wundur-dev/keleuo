@@ -88,6 +88,7 @@ pub fn bind_keys(cx: &mut App) {
 pub fn menus(cx: &App) -> Vec<Menu> {
     let always_proportional = cx.global::<crate::AppSettings>().0.borrow().always_proportional;
     let notify = cx.global::<crate::AppSettings>().0.borrow().notify.clone();
+    let appearance = cx.global::<crate::AppSettings>().0.borrow().appearance.clone();
     vec![
         Menu::new("Keleuo").items([
             MenuItem::action("About Keleuo", ShowAbout),
@@ -120,9 +121,9 @@ pub fn menus(cx: &App) -> Vec<Menu> {
             MenuItem::action("Split Down", SplitDown),
             MenuItem::action("Reset Layout", ResetLayout),
             MenuItem::separator(),
-            MenuItem::action("Appearance: System", AppearanceSystem),
-            MenuItem::action("Appearance: Light", AppearanceLight),
-            MenuItem::action("Appearance: Dark", AppearanceDark),
+            MenuItem::action("Appearance: System", AppearanceSystem).checked(!matches!(appearance.as_str(), "light" | "dark")),
+            MenuItem::action("Appearance: Light", AppearanceLight).checked(appearance == "light"),
+            MenuItem::action("Appearance: Dark", AppearanceDark).checked(appearance == "dark"),
             MenuItem::separator(),
             MenuItem::action("Monospace When a Message Has Code", ToggleCodeFont).checked(!always_proportional),
             MenuItem::separator(),
@@ -137,4 +138,24 @@ pub fn menus(cx: &App) -> Vec<Menu> {
             MenuItem::action("Forward", GoForward),
         ]),
     ]
+}
+
+/// The menu bar as one menu, for the title bar's menu button (every system; on macOS the menu
+/// bar is there too): each of its menus a submenu, built when it opens.
+pub fn menu_popup(
+    menu: gpui_kit::component::menu::PopupMenu,
+    window: &mut Window,
+    cx: &mut Context<gpui_kit::component::menu::PopupMenu>,
+) -> gpui_kit::component::menu::PopupMenu {
+    let names: Vec<SharedString> = menus(cx).into_iter().map(|m| m.name).collect();
+    names.into_iter().enumerate().fold(menu, |menu, (ix, name)| {
+        menu.submenu(name, window, cx, move |sub, _, cx| {
+            let items = menus(cx).into_iter().nth(ix).map(|m| m.items).unwrap_or_default();
+            items.into_iter().fold(sub, |sub, item| match item {
+                MenuItem::Separator => sub.separator(),
+                MenuItem::Action { name, action, checked, disabled, .. } => sub.menu_with_check_and_disabled(name, checked, action, disabled),
+                MenuItem::Submenu(_) | MenuItem::SystemMenu(_) => sub,
+            })
+        })
+    })
 }

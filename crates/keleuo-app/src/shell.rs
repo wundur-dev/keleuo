@@ -14,6 +14,7 @@ use std::sync::Arc;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::menu::{ContextMenuExt, PopupMenu, PopupMenuItem};
+use gpui_kit::component::menu::DropdownMenu as _;
 use gpui_kit::component::{ActiveTheme, Icon, IconName, Sizable, TitleBar, WindowExt};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
@@ -1682,7 +1683,7 @@ fn folder_name(p: &Path) -> String {
 
 /// The repository a folder belongs to: its top folder and the branch checked out there.
 pub fn repo_of(folder: &Path) -> Option<(PathBuf, Option<String>)> {
-    let out = std::process::Command::new("git").arg("-C").arg(folder).args(["rev-parse", "--show-toplevel"]).output().ok()?;
+    let out = keleuo_core::platform::command("git").arg("-C").arg(folder).args(["rev-parse", "--show-toplevel"]).output().ok()?;
     if !out.status.success() {
         return None;
     }
@@ -1700,7 +1701,7 @@ pub fn suggest_worktree_name(top: &Path) -> String {
 }
 
 fn branch_exists(top: &Path, branch: &str) -> bool {
-    std::process::Command::new("git")
+    keleuo_core::platform::command("git")
         .arg("-C")
         .arg(top)
         .args(["rev-parse", "--verify", "--quiet", &format!("refs/heads/{branch}")])
@@ -1724,7 +1725,7 @@ fn make_worktree(top: &Path, name: &str) -> Result<(PathBuf, String), String> {
     if branch_exists(top, &branch) {
         return Err(format!("the branch {branch} exists already"));
     }
-    let out = std::process::Command::new("git")
+    let out = keleuo_core::platform::command("git")
         .arg("-C")
         .arg(top)
         .args(["worktree", "add", "-b", &branch])
@@ -1748,9 +1749,12 @@ impl Render for Shell {
         crate::perf::first_frame(window);
         let theme = cx.theme();
         let (bg, fg, hover, muted) = (theme.background, theme.foreground, theme.secondary_hover, theme.muted_foreground);
+        // Blocking the mouse: on Windows the title bar is a drag area, and a click the button
+        // does not block reaches it (Windows then moves the window instead).
         let button = |id: &'static str, icon: Icon, tip: &'static str| {
             div()
                 .id(id)
+                .occlude()
                 .size(px(22.))
                 .flex()
                 .flex_none()
@@ -1774,44 +1778,15 @@ impl Render for Shell {
             self.name(self.active, cx)
         };
         let has_session = !self.tabs.is_empty() && self.browser.is_none();
-        // Appearance: System, Light and Dark side by side in the middle of the bar, the saved
-        // choice marked.
-        let choice = cx.global::<AppSettings>().0.borrow().appearance.clone();
-        let (selected_bg, border) = (theme.secondary, theme.border);
-        let mut appearance = div()
-            .flex()
-            .items_center()
-            .gap(px(2.))
-            .p(px(2.))
-            .rounded_md()
-            .border_1()
-            .border_color(border);
-        for (value, label, tip) in [
-            ("system", "System", "Follow macOS"),
-            ("light", "Light", "Always light"),
-            ("dark", "Dark", "Always dark"),
-        ] {
-            let on = choice == value || (value == "system" && !matches!(choice.as_str(), "light" | "dark"));
-            appearance = appearance.child(
-                div()
-                    .id(SharedString::from(format!("t-appearance-{value}")))
-                    .h(px(20.))
-                    .px_2()
-                    .flex()
-                    .items_center()
-                    .gap_1()
-                    .rounded_sm()
-                    .text_xs()
-                    .text_color(if on { fg } else { muted })
-                    .when(on, |d| d.bg(selected_bg))
-                    .when(!on, |d| d.hover(|d| d.bg(hover)))
-                    .child(crate::icons::appearance(value).xsmall().text_color(if on { fg } else { muted }))
-                    .child(label)
-                    .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tip).build(window, cx))
-                    .on_click(move |_, _, cx| crate::theme::set_appearance(value, cx)),
-            );
-        }
-        let top = TitleBar::new().h(px(34.)).pl(px(76.)).child(
+        // The whole menu (Appearance in it), from a button at the right end, as Chrome has it.
+        let menu_button = gpui_kit::component::button::Button::new("t-menu")
+            .icon(Icon::new(gpui_kit::assets::IconName::EllipsisVertical))
+            .ghost()
+            .xsmall()
+            .dropdown_menu_with_anchor(Anchor::TopRight, crate::actions::menu_popup);
+        // Room for the macOS window buttons at the left; Windows has its own at the right.
+        let left = if cfg!(target_os = "macos") { 76. } else { 8. };
+        let top = TitleBar::new().h(px(34.)).pl(px(left)).child(
             div()
                 .size_full()
                 .relative()
@@ -1823,10 +1798,9 @@ impl Render for Shell {
                         .on_click(cx.listener(|s, _, _, cx| s.toggle_folded(cx))),
                 )
                 .child(
-                    // Kept clear of the appearance switch in the middle.
                     div().flex_1().min_w_0().child(
                         div()
-                            .max_w(relative(0.36))
+                            .max_w(relative(0.6))
                             .px_2()
                             .flex()
                             .items_center()
@@ -1838,7 +1812,6 @@ impl Render for Shell {
                             .child(div().min_w_0().truncate().child(title)),
                     ),
                 )
-                .child(div().absolute().inset_0().flex().items_center().justify_center().child(appearance))
                 .when(has_session, |d| {
                     d.child(
                         div()
@@ -1865,6 +1838,7 @@ impl Render for Shell {
                             ),
                     )
                 })
+                .child(div().flex_none().pr_1().occlude().child(menu_button)),
         );
         let main = match &self.browser {
             Some(b) => b.clone().into_any_element(),

@@ -715,7 +715,7 @@ pub fn parse_ps(output: &str) -> Vec<ClaudeProcess> {
 /// Every `claude` process on this machine except this window's (children of `own_pid`), with
 /// whole command lines (`ps -ww`: never cut at a column). Read-only.
 pub fn other_claude_processes(own_pid: u32) -> Vec<ClaudeProcess> {
-    let Ok(out) = std::process::Command::new("ps").args(["-axww", "-o", "pid=,ppid=,args="]).output() else {
+    let Ok(out) = crate::platform::command("ps").args(["-axww", "-o", "pid=,ppid=,args="]).output() else {
         return Vec::new();
     };
     parse_ps(&String::from_utf8_lossy(&out.stdout))
@@ -799,7 +799,7 @@ pub fn session_files(host: &dyn Host, claude_home: &Path, folder: &Path) -> Vec<
 
 /// Every `claude` process on this machine except ours, with its folder and start time.
 pub fn claude_processes(own_pid: u32) -> Vec<crate::agent::Running> {
-    let Ok(out) = std::process::Command::new("ps").args(["-axo", "pid=,ppid=,command="]).output() else {
+    let Ok(out) = crate::platform::command("ps").args(["-axo", "pid=,ppid=,command="]).output() else {
         return Vec::new();
     };
     parse_ps(&String::from_utf8_lossy(&out.stdout))
@@ -818,7 +818,7 @@ pub fn claude_processes(own_pid: u32) -> Vec<crate::agent::Running> {
 
 /// A process's start time as `HH:MM` (from `ps -o lstart=`: `Sun Oct 11 22:40:00 2026`).
 pub fn process_start(pid: u32) -> Option<String> {
-    let out = std::process::Command::new("ps").args(["-p", &pid.to_string(), "-o", "lstart="]).output().ok()?;
+    let out = crate::platform::command("ps").args(["-p", &pid.to_string(), "-o", "lstart="]).output().ok()?;
     lstart_time(&String::from_utf8_lossy(&out.stdout))
 }
 
@@ -837,7 +837,7 @@ pub fn process_cwd(pid: u32) -> Option<PathBuf> {
     if let Some(p) = macos_cwd(pid) {
         return Some(p);
     }
-    let out = std::process::Command::new("lsof")
+    let out = crate::platform::command("lsof")
         .args(["-a", "-p", &pid.to_string(), "-d", "cwd", "-Fn"])
         .output()
         .ok()?;

@@ -119,6 +119,8 @@ mod tests {
         out.stdout
     }
 
+    // Run through `sh`, as over ssh.
+    #[cfg(unix)]
     #[test]
     fn a_command_changes_and_new_files_since_the_baseline() {
         // A folder name a shell would trip on, as the SSH host passes it through one.

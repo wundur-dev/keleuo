@@ -235,6 +235,8 @@ mod tests {
         assert!(spot("Bash", "all good", p, None).is_none());
     }
 
+    // The hook is a shell script, for Unix shells.
+    #[cfg(unix)]
     #[test]
     fn the_hook_stops_unquoted_urls_only() {
         let d = dir("hook");

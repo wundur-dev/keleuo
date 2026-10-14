@@ -41,7 +41,7 @@ pub struct ProgramSpec {
 
 impl CommandSpec {
     pub fn to_command(&self) -> Command {
-        let mut cmd = Command::new(&self.program);
+        let mut cmd = crate::platform::command(&self.program);
         cmd.args(&self.args);
         cmd.envs(self.env.iter().map(|(k, v)| (k, v)));
         if let Some(cwd) = &self.cwd {
@@ -163,7 +163,7 @@ pub struct LocalHost;
 
 impl Host for LocalHost {
     fn git(&self, dir: &Path, args: &[&str]) -> Option<Vec<u8>> {
-        let out = std::process::Command::new("git")
+        let out = crate::platform::command("git")
             .arg("-C")
             .arg(dir)
             .args(args)
@@ -333,20 +333,9 @@ impl Host for LocalHost {
         } else {
             find_program(&spec.program).unwrap_or_else(|| spec.program.clone().into())
         };
-        if spec.unset.is_empty() {
-            return CommandSpec { program, args: spec.args.clone(), cwd: Some(spec.cwd.clone()), env: spec.env.clone() };
-        }
-        // Windows has no `env`: set to empty instead, which the agents (JavaScript, where an
-        // empty variable reads as unset) take as absent.
-        if cfg!(windows) {
-            let env = spec.unset.iter().map(|v| (v.clone(), String::new())).chain(spec.env.iter().cloned()).collect();
-            return CommandSpec { program, args: spec.args.clone(), cwd: Some(spec.cwd.clone()), env };
-        }
-        // `env -u` works the same for a plain process and a pseudo-terminal.
-        let mut args: Vec<String> = spec.unset.iter().flat_map(|v| ["-u".to_string(), v.clone()]).collect();
-        args.push(program.to_string_lossy().to_string());
-        args.extend(spec.args.iter().cloned());
-        CommandSpec { program: "/usr/bin/env".into(), args, cwd: Some(spec.cwd.clone()), env: spec.env.clone() }
+        let (program, args, mut env) = crate::platform::without_vars(program, &spec.args, &spec.unset);
+        env.extend(spec.env.iter().cloned());
+        CommandSpec { program, args, cwd: Some(spec.cwd.clone()), env }
     }
 }
 
@@ -618,7 +607,7 @@ pub fn find_program(name: &str) -> Option<PathBuf> {
 
 /// Whether a process on this machine still exists (asks `ps`; sends no signal).
 pub fn process_alive(pid: u32) -> bool {
-    std::process::Command::new("ps")
+    crate::platform::command("ps")
         .args(["-p", &pid.to_string(), "-o", "pid="])
         .output()
         .is_ok_and(|o| o.status.success() && !o.stdout.is_empty())
@@ -676,9 +665,15 @@ mod tests {
         assert_eq!(cmd.args, ["-p"]);
         assert_eq!(cmd.env, [("A".to_string(), "1".to_string())]);
         assert_eq!(host.shell_command(Path::new("/p")).cwd.as_deref(), Some(Path::new("/p")));
+        // A variable removed: through `env -u` on Unix, set empty on Windows (see `platform`).
         let cmd = host.program_command(&ProgramSpec { unset: vec!["X".into()], ..spec });
-        assert_eq!(cmd.program, PathBuf::from("/usr/bin/env"));
-        assert_eq!(cmd.args, ["-u", "X", "/bin/agent", "-p"]);
+        if cfg!(unix) {
+            assert_eq!(cmd.program, PathBuf::from("/usr/bin/env"));
+            assert_eq!(cmd.args, ["-u", "X", "/bin/agent", "-p"]);
+        } else {
+            assert_eq!(cmd.program, PathBuf::from("/bin/agent"));
+            assert_eq!(cmd.env, [("X".to_string(), String::new()), ("A".to_string(), "1".to_string())]);
+        }
     }
 
     #[test]
@@ -703,6 +698,8 @@ mod tests {
         assert_eq!(shell_quote("it's"), r"'it'\''s'");
     }
 
+    // The script is for the other machine's shell: run here by `sh`.
+    #[cfg(unix)]
     #[test]
     fn a_terminal_program_elsewhere_writes_its_files_runs_and_tidies_up() {
         let host = SshHost { destination: "dev".into(), home: None };
