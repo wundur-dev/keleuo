@@ -56,11 +56,7 @@ impl ChatPanel {
         if let Some(t) = agent.total_tokens {
             facts.push(format!("{:.1}k tok", t as f64 / 1000.0));
         }
-        let title = if agent.description.is_empty() {
-            agent.kind.clone()
-        } else {
-            agent.description.clone()
-        };
+        let title = agent.title();
         let header = div()
             .id(SharedString::from(format!(
                 "agent-h-{}-{card}",
@@ -198,7 +194,7 @@ impl ChatPanel {
                 if let Some(tokens) = a.total_tokens {
                     parts.push(format!("{tokens} tokens"));
                 }
-                (a.description.clone(), parts.join(" · "))
+                (a.title(), parts.join(" · "))
             }
             None => ("Subagent".to_string(), "no longer in this conversation".to_string()),
         };

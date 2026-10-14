@@ -111,7 +111,7 @@ impl AgentSide {
             AgentStatus::Failed => Icon::new(IconName::CircleX).xsmall().text_color(red),
         };
         let elapsed = a.elapsed().map(|d| format!("{}s", d.as_secs())).unwrap_or_default();
-        let title = if a.description.is_empty() { a.kind.clone() } else { a.description.clone() };
+        let title = a.title();
         let id = a.tool_use_id.clone();
         let panel = self.panel.downgrade();
         div()

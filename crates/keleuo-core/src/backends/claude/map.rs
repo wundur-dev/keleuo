@@ -36,6 +36,12 @@ impl Mapper {
         self.tools.get(tool_use_id).is_some_and(|(name, _)| is_agent_tool(name))
     }
 
+    /// Whether a tool call seen so far is one that does not start a subagent. Claude Code
+    /// reports background commands (`task_type: local_bash`) as tasks too; they are not agents.
+    fn other_tool(&self, tool_use_id: &str) -> bool {
+        self.tools.get(tool_use_id).is_some_and(|(name, _)| !is_agent_tool(name))
+    }
+
     pub fn map(&mut self, raw: Raw) -> Vec<Event> {
         match raw {
             Raw::Init { session_id, model, permission_mode, cwd } => {
@@ -145,6 +151,9 @@ impl Mapper {
                 description,
                 input,
             }],
+            Raw::TaskStarted { tool_use_id, .. } | Raw::TaskProgress { tool_use_id, .. } if self.other_tool(&tool_use_id) => {
+                Vec::new()
+            }
             Raw::TaskStarted { tool_use_id, task_id, description, subagent_type } => {
                 self.tasks.insert(task_id, tool_use_id.clone());
                 vec![Event::SubagentStarted { id: tool_use_id, description, kind: subagent_type }]
@@ -163,6 +172,9 @@ impl Mapper {
                 let Some(id) = tool_use_id.or_else(|| self.tasks.get(&task_id).cloned()) else {
                     return Vec::new();
                 };
+                if self.other_tool(&id) {
+                    return Vec::new();
+                }
                 vec![Event::SubagentEnded {
                     id,
                     failed: matches!(status.as_str(), "failed" | "error" | "killed" | "cancelled"),
