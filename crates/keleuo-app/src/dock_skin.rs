@@ -267,8 +267,8 @@ impl SheetGroup {
     /// tool panels are neither closed nor zoomed, so it would be empty.)
     fn header(&self, group: &TabGroupContext, window: &mut Window, cx: &mut App) -> AnyElement {
         let theme = cx.theme();
-        // White, as the panel below it: the bold title marks it.
-        let (bar, border, fg, muted) = (theme.background, theme.border, theme.foreground, theme.muted_foreground);
+        // The tool panels' light grey, as the panel below it: the bold title marks it.
+        let (bar, border, fg, muted) = (crate::theme::tool_ground(cx), theme.border, theme.foreground, theme.muted_foreground);
         let Some(ix) = shown_ix(group, cx) else {
             return div().into_any_element();
         };
@@ -501,7 +501,8 @@ impl SheetGroup {
 
 impl TabGroupRenderer for SheetGroup {
     fn frame(&self, group: &TabGroupContext, window: &mut Window, cx: &mut App) -> Stateful<Div> {
-        self.inner.frame(group, window, cx).bg(cx.theme().background)
+        let bg = if is_tool_group(group, cx) { crate::theme::tool_ground(cx) } else { cx.theme().background };
+        self.inner.frame(group, window, cx).bg(bg)
     }
 
     fn content_frame(&self, _: &TabGroupContext, _: &mut Window, _: &mut App) -> Stateful<Div> {
@@ -549,7 +550,9 @@ impl TabGroupRenderer for SheetGroup {
             return view.into_any_element();
         }
         let theme = cx.theme();
-        let (ground, content) = (crate::theme::strip_ground(cx), theme.background);
+        // The tabs along a tool group's bottom: the shown one in the panel's grey, on the
+        // session list's darker one.
+        let (ground, content) = (theme.sidebar, crate::theme::tool_ground(cx));
         // Room in the panel's colour above the tabs, so the list does not run into them (the
         // shown tab still joins the panel through it), and a little below them.
         div()

@@ -89,6 +89,13 @@ pub fn strip_ground(cx: &App) -> Hsla {
     crate::sheet_tabs::mix(t.background, t.sidebar, 0.55)
 }
 
+/// The ground of the tool panels (files, changes, skills, the agent): a much lighter grey than
+/// the session list's, so the chat and files stand out white beside them.
+pub fn tool_ground(cx: &App) -> Hsla {
+    let t = cx.theme();
+    crate::sheet_tabs::mix(t.background, t.sidebar, 0.45)
+}
+
 pub fn sync(cx: &mut App) {
     let dark = wants_dark(cx);
     if cx.theme().is_dark() != dark {

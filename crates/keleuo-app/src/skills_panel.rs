@@ -199,7 +199,7 @@ impl Render for SkillsPanel {
                 }
             }
         }
-        let bg = cx.theme().background;
+        let bg = crate::theme::tool_ground(cx);
         list.size_full().bg(bg)
     }
 }
