@@ -1451,11 +1451,21 @@ impl Workspace {
             }
             // As if "Other model…" were used with `arg` typed.
             "other-model" => self.claude.update(cx, |p, cx| p.test_other_model(arg, cx)),
+            "model-focus" => self.claude.update(cx, |p, cx| p.test_focus_model_select(window, cx)),
             "compose-send" => self.claude.update(cx, |p, cx| p.test_send_composed(window, cx)),
             "send-attached" => {
                 // Tests: send with what is attached.
                 let text = arg.to_string();
                 self.claude.update(cx, |p, cx| p.test_send(&text, cx));
+            }
+            "models" => {
+                // Tests: ask for the agent's models (once) and say how many it has listed so far.
+                self.session.update(cx, |s, cx| s.want_models(cx));
+                let s = self.session.read(cx);
+                return match &s.listed_models {
+                    Some(m) => format!("{} listed{}", m.len(), m.first().map(|m| format!(", first {}", m.id)).unwrap_or_default()),
+                    None => "not asked".into(),
+                };
             }
             "model" => {
                 let m = arg.to_string();

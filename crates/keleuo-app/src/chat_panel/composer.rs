@@ -2,6 +2,9 @@
 //! model picker, and lists that continue on Shift+Enter.
 
 use super::*;
+use gpui_kit::component::IndexPath;
+use gpui_kit::component::select::{SearchableVec, Select, SelectEvent, SelectGroup, SelectState};
+use gpui_kit::component::searchable_list::SearchableListItem;
 
 /// Shift+Enter on a list line in the message box: the next item's marker on the new line, or
 /// the marker taken away on an item left empty (ending the list). False when it is a plain new
@@ -411,6 +414,7 @@ impl ChatPanel {
         let chips = self.render_chips(cx);
         let attach = self.render_attach(cx);
         let model_control = self.render_model_control(cx);
+        let effort_control = self.render_effort_control(cx);
         let mode_button = permission_prompts.then(|| self.render_mode_button(cx));
         let send = self.render_send(busy, has_text, cx);
         let paste_target = cx.entity().downgrade();
@@ -508,6 +512,7 @@ impl ChatPanel {
                             .text_color(muted)
                             .child(attach)
                             .child(model_control)
+                            .children(effort_control)
                             .children(mode_button)
                             .child(div().flex_1())
                             .child(send),
@@ -606,100 +611,11 @@ impl ChatPanel {
         (!self.attachments.is_empty() || paste_chips > 0).then(|| chips.into_any_element())
     }
 
-    /// The model menu, or the field typing a model's name in its place.
+    /// The model list box (every model the agent offers, typed to filter), or the field typing a
+    /// model's name in its place.
     fn render_model_control(&self, cx: &mut Context<Self>) -> AnyElement {
-        if self.session.read(cx).listed_models.is_none() {
-            self.session.update(cx, |s, cx| s.want_models(cx));
-        }
-        let session = self.session.read(cx);
-        let model = session.chat.model.clone().or_else(|| session.model.clone()).unwrap_or_else(|| "default model".into());
-        let w_model = self.session.downgrade();
-        let panel_for_menu = cx.entity().downgrade();
-        // The backend's own names (aliases, each the latest of its family), the names typed in
-        // before, and "Other model…" to type one. The running one is ticked; an alias shows
-        // what it stands for.
-        let models: Vec<String> = session.backend.capabilities().models.clone();
-        // Every model the agent lists, when it lists them: the menu then offers those instead.
-        let listed: Vec<ModelOption> = session.listed_models.clone().unwrap_or_default();
-        let recent: Vec<String> = cx.global::<crate::AppSettings>().0.borrow().recent_models.clone();
-        // What was picked (an alias or a typed name), and what it runs as.
-        let (picked, running_as) = (session.model.clone(), session.chat.model.clone());
-        let model_button = Button::new("model")
-            .xsmall()
-            .ghost()
-            .label(short_model(&model))
-            .tooltip("Model")
-            .dropdown_menu(move |menu, window, cx| {
-                use gpui_kit::component::menu::PopupMenuItem;
-                let mut menu = menu;
-                let is = |m: &str| match (&picked, &running_as) {
-                    (Some(p), _) => p == m,
-                    (None, Some(r)) => r.contains(m),
-                    (None, None) => false,
-                };
-                // The agent's own list: those on their own first, then a submenu per family, in
-                // the agent's order.
-                let mut families: Vec<&str> = Vec::new();
-                for m in &listed {
-                    if m.family.is_empty() {
-                        let (w, id) = (w_model.clone(), m.id.clone());
-                        menu = menu.item(PopupMenuItem::new(m.label.clone()).checked(is(&m.id)).on_click(move |_, _, cx| {
-                            let _ = w.update(cx, |s, cx| s.set_model(&id, cx));
-                        }));
-                    } else if !families.contains(&m.family.as_str()) {
-                        families.push(&m.family);
-                    }
-                }
-                for family in families {
-                    let members: Vec<ModelOption> = listed.iter().filter(|m| m.family == family).cloned().collect();
-                    let current = members.iter().any(|m| is(&m.id));
-                    let w = w_model.clone();
-                    let picked = picked.clone();
-                    let label = if current { format!("{family} ✓") } else { family.to_string() };
-                    menu = menu.submenu(label, window, cx, move |sub, _, _| {
-                        let mut sub = sub.scrollable(true).max_h(px(420.));
-                        for m in &members {
-                            let (w, id) = (w.clone(), m.id.clone());
-                            let checked = picked.as_deref() == Some(m.id.as_str());
-                            // Its name; with its id when another in the family has the same name.
-                            let twin = members.iter().filter(|o| o.label == m.label).count() > 1;
-                            let label = if twin { format!("{} ({})", m.label, m.id) } else { m.label.clone() };
-                            sub = sub.item(PopupMenuItem::new(label).checked(checked).on_click(move |_, _, cx| {
-                                let _ = w.update(cx, |s, cx| s.set_model(&id, cx));
-                            }));
-                        }
-                        sub
-                    });
-                }
-                for m in models.iter().filter(|_| listed.is_empty()) {
-                    let (w, m2) = (w_model.clone(), m.clone());
-                    let running = is(m);
-                    let label = match (&running_as, running) {
-                        (Some(r), true) if r != m => format!("{} ({})", capitalize(m), r),
-                        _ => capitalize(m),
-                    };
-                    menu = menu.item(PopupMenuItem::new(label).checked(running).on_click(move |_, _, cx| {
-                        let _ = w.update(cx, |s, cx| s.set_model(&m2, cx));
-                    }));
-                }
-                if !recent.is_empty() {
-                    menu = menu.separator();
-                    for m in &recent {
-                        let (w, m2) = (w_model.clone(), m.clone());
-                        menu = menu.item(PopupMenuItem::new(m.clone()).checked(picked.as_deref() == Some(m.as_str())).on_click(move |_, _, cx| {
-                            remember_model(&m2, cx);
-                            let _ = w.update(cx, |s, cx| s.set_model(&m2, cx));
-                        }));
-                    }
-                }
-                let panel = panel_for_menu.clone();
-                menu.separator().item(PopupMenuItem::new("Other model…").on_click(move |_, window, cx| {
-                    let _ = panel.update(cx, |p, cx| p.start_model_input(window, cx));
-                }))
-            });
-        // Typing a model name: the field takes the button's place.
-        match &self.model_input {
-            Some((input, _)) => div()
+        if let Some((input, _)) = &self.model_input {
+            return div()
                 .w(px(240.))
                 .capture_key_down(cx.listener(|p, ev: &KeyDownEvent, _, cx| {
                     if ev.keystroke.key == "escape" {
@@ -709,8 +625,183 @@ impl ChatPanel {
                     }
                 }))
                 .child(Input::new(input).xsmall())
+                .into_any_element();
+        }
+        let session = self.session.read(cx);
+        let model = session.chat.model.clone().or_else(|| session.model.clone()).unwrap_or_else(|| "default model".into());
+        match &self.model_select {
+            Some(select) => Select::new(&select.state)
+                .xsmall()
+                .appearance(false)
+                .w(px(190.))
+                .menu_width(px(340.))
+                .menu_max_h(px(420.))
+                .placeholder(short_model(&model))
+                .search_placeholder("Search models")
                 .into_any_element(),
-            None => model_button.into_any_element(),
+            None => div().text_xs().child(short_model(&model)).into_any_element(),
+        }
+    }
+
+    /// The variant of model `base` to run: `want` (effort, thinking, fast) if given, else the
+    /// nearest to the variant running now. `None` when the agent lists no variants of it.
+    fn variant_of(&self, base: &str, want: Option<(Option<String>, bool, bool)>, cx: &App) -> Option<String> {
+        let session = self.session.read(cx);
+        let listed = session.listed_models.as_deref().unwrap_or_default();
+        let current = session.model.as_deref().and_then(|m| listed.iter().find(|o| o.id == m));
+        let (effort, thinking, fast) = want.unwrap_or_else(|| current.map_or((None, false, false), |c| (c.effort.clone(), c.thinking, c.fast)));
+        keleuo_core::agent::pick_variant(listed, base, effort.as_deref(), thinking, fast).map(|m| m.id.clone())
+    }
+
+    /// Effort (and, where the model has them, thinking and fast): Claude Code's `--effort`, or
+    /// the variants of the Cursor model in use. Nothing when there is nothing to choose.
+    fn render_effort_control(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let session = self.session.read(cx);
+        let w = self.session.downgrade();
+        let levels = session.backend.efforts();
+        if !levels.is_empty() {
+            // An effort apart from the model.
+            let current = session.effort.clone();
+            let label = current.as_deref().map_or("Effort".to_string(), effort_name);
+            return Some(
+                Button::new("effort")
+                    .xsmall()
+                    .ghost()
+                    .label(label)
+                    .tooltip("Effort")
+                    .dropdown_menu(move |menu, _, _| {
+                        use gpui_kit::component::menu::PopupMenuItem;
+                        let w0 = w.clone();
+                        let mut menu = menu.item(PopupMenuItem::new("Default").checked(current.is_none()).on_click(move |_, _, cx| {
+                            let _ = w0.update(cx, |s, cx| s.set_effort(None, cx));
+                        }));
+                        for level in &levels {
+                            let (w, level) = (w.clone(), level.to_string());
+                            let checked = current.as_deref() == Some(level.as_str());
+                            menu = menu.item(PopupMenuItem::new(effort_name(&level)).checked(checked).on_click(move |_, _, cx| {
+                                let _ = w.update(cx, |s, cx| s.set_effort(Some(level.clone()), cx));
+                            }));
+                        }
+                        menu
+                    })
+                    .into_any_element(),
+            );
+        }
+        // Variants in the model ids.
+        let listed = session.listed_models.clone().unwrap_or_default();
+        let current = listed.iter().find(|m| Some(&m.id) == session.model.as_ref())?.clone();
+        let variants: Vec<ModelOption> = listed.iter().filter(|m| m.base == current.base).cloned().collect();
+        if variants.len() < 2 {
+            return None;
+        }
+        let mut efforts: Vec<Option<String>> = Vec::new();
+        for v in &variants {
+            if !efforts.contains(&v.effort) {
+                efforts.push(v.effort.clone());
+            }
+        }
+        efforts.sort_by_key(|e| e.as_deref().and_then(|e| keleuo_core::agent::EFFORT_ORDER.iter().position(|o| *o == e)).map_or(-1, |i| i as i32));
+        let thinking_choice = variants.iter().any(|v| v.thinking) && variants.iter().any(|v| !v.thinking);
+        let fast_choice = variants.iter().any(|v| v.fast) && variants.iter().any(|v| !v.fast);
+        let mut label = current.effort.as_deref().map_or("Default".to_string(), effort_name);
+        if current.thinking && thinking_choice {
+            label.push_str(" · Thinking");
+        }
+        if current.fast && fast_choice {
+            label.push_str(" · Fast");
+        }
+        let panel = cx.entity().downgrade();
+        Some(
+            Button::new("effort")
+                .xsmall()
+                .ghost()
+                .label(label)
+                .tooltip("Effort")
+                .dropdown_menu(move |menu, _, _| {
+                    use gpui_kit::component::menu::PopupMenuItem;
+                    let mut menu = menu;
+                    // Pick the variant nearest to the change.
+                    let choose = |effort: Option<String>, thinking: bool, fast: bool| {
+                        let (panel, w, base) = (panel.clone(), w.clone(), current.base.clone());
+                        move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+                            let Some(id) = panel.upgrade().and_then(|p| p.read(cx).variant_of(&base, Some((effort.clone(), thinking, fast)), cx)) else { return };
+                            let _ = w.update(cx, |s, cx| s.set_model(&id, cx));
+                        }
+                    };
+                    for e in &efforts {
+                        let name = e.as_deref().map_or("Default".to_string(), effort_name);
+                        menu = menu.item(PopupMenuItem::new(name).checked(*e == current.effort).on_click(choose(e.clone(), current.thinking, current.fast)));
+                    }
+                    if thinking_choice || fast_choice {
+                        menu = menu.separator();
+                    }
+                    if thinking_choice {
+                        menu = menu.item(PopupMenuItem::new("Thinking").checked(current.thinking).on_click(choose(current.effort.clone(), !current.thinking, current.fast)));
+                    }
+                    if fast_choice {
+                        menu = menu.item(PopupMenuItem::new("Fast").checked(current.fast).on_click(choose(current.effort.clone(), current.thinking, !current.fast)));
+                    }
+                    menu
+                })
+                .into_any_element(),
+        )
+    }
+
+    /// Tests: focus the model list box (keys then reach it).
+    pub fn test_focus_model_select(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.sync_model_select(window, cx);
+        if let Some(select) = &self.model_select {
+            select.state.update(cx, |s, cx| s.focus(window, cx));
+        }
+    }
+
+    /// Keep the model list box in step with the agent's models (asked once, off the UI thread),
+    /// the names typed in before, and the model in use; built again only when one changes.
+    pub(super) fn sync_model_select(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.session.read(cx).listed_models.is_none() {
+            self.session.update(cx, |s, cx| s.want_models(cx));
+        }
+        let session = self.session.read(cx);
+        let listed: Vec<ModelOption> = match session.listed_models.as_deref() {
+            Some(m) if !m.is_empty() => m.to_vec(),
+            // Not listed (yet): the backend's own short list.
+            _ => session.backend.capabilities().models.iter().map(|m| ModelOption { id: m.clone(), label: capitalize(m), family: "Models".into(), ..Default::default() }).collect(),
+        };
+        let recent: Vec<String> = cx.global::<crate::AppSettings>().0.borrow().recent_models.clone();
+        let picked = session.model.clone().or_else(|| session.chat.model.clone()).unwrap_or_default();
+        // The list shows models, not their variants (the effort control picks those).
+        let picked = listed.iter().find(|m| m.id == picked).map_or(picked, |m| m.base.clone());
+        let (groups, selected) = model_groups(&bases(&listed), &recent, &picked);
+        let key = format!("{picked}|{}|{}", listed.len(), recent.join(","));
+        if self.model_select.as_ref().is_some_and(|s| s.key == key) {
+            return;
+        }
+        match &self.model_select {
+            Some(select) => select.state.update(cx, |state, cx| {
+                state.set_items(SearchableVec::new(groups), window, cx);
+                state.set_selected_index(selected, window, cx);
+            }),
+            None => {
+                let state = cx.new(|cx| SelectState::new(SearchableVec::new(groups), selected, window, cx).searchable(true));
+                let sub = cx.subscribe_in(&state, window, |p, _, ev: &SelectEvent<SearchableVec<SelectGroup<ModelItem>>>, window, cx| {
+                    let SelectEvent::Confirm(Some(id)) = ev else { return };
+                    if id.as_ref() == OTHER_MODEL {
+                        p.start_model_input(window, cx);
+                        return;
+                    }
+                    let id = id.to_string();
+                    if cx.global::<crate::AppSettings>().0.borrow().recent_models.contains(&id) {
+                        remember_model(&id, cx);
+                    }
+                    // A model with variants: the one nearest the variant in use.
+                    let id = p.variant_of(&id, None, cx).unwrap_or(id);
+                    p.session.update(cx, |s, cx| s.set_model(&id, cx));
+                });
+                self.model_select = Some(ModelSelect { state, key: String::new(), _sub: sub });
+            }
+        }
+        if let Some(select) = &mut self.model_select {
+            select.key = key;
         }
     }
 
@@ -843,6 +934,103 @@ fn take_paste(item: &ClipboardItem, paste_target: &WeakEntity<ChatPanel>, window
 }
 
 /// Keep a typed model name among the recent ones, saved.
+/// An effort level as the menus say it.
+fn effort_name(effort: &str) -> String {
+    match effort {
+        "xhigh" => "Extra high".into(),
+        other => capitalize(other),
+    }
+}
+
+/// The models of a list of variants, once each, in the list's order: each named by the
+/// shortest of its variants' names (some differ by a note like "1M").
+fn bases(listed: &[ModelOption]) -> Vec<ModelOption> {
+    let mut out: Vec<ModelOption> = Vec::new();
+    for m in listed {
+        let base = if m.base.is_empty() { &m.id } else { &m.base };
+        let label = if m.base_label.is_empty() { &m.label } else { &m.base_label };
+        match out.iter_mut().find(|o| &o.id == base) {
+            Some(o) if label.len() < o.label.len() => o.label = label.clone(),
+            Some(_) => {}
+            None => out.push(ModelOption { id: base.clone(), label: label.clone(), family: m.family.clone(), base: base.clone(), base_label: label.clone(), ..Default::default() }),
+        }
+    }
+    out
+}
+
+/// The value of "Other model…" (no model is called that).
+const OTHER_MODEL: &str = "\u{0}other";
+
+/// The model list box's state, and what it was built from (to build it again on a change).
+pub(super) struct ModelSelect {
+    state: Entity<SelectState<SearchableVec<SelectGroup<ModelItem>>>>,
+    key: String,
+    _sub: Subscription,
+}
+
+/// A model in the list box: its name, with its id beside it when that says more; found by
+/// either.
+#[derive(Clone)]
+pub(super) struct ModelItem {
+    id: SharedString,
+    label: SharedString,
+}
+
+impl SearchableListItem for ModelItem {
+    type Value = SharedString;
+
+    fn title(&self) -> SharedString {
+        self.label.clone()
+    }
+
+    fn render(&self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+        let muted = cx.theme().muted_foreground;
+        let same = self.label.to_lowercase() == self.id.to_lowercase() || self.id.as_ref() == OTHER_MODEL;
+        div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(self.label.clone())
+            .when(!same, |d| d.child(div().text_xs().text_color(muted).truncate().child(self.id.clone())))
+    }
+
+    fn value(&self) -> &SharedString {
+        &self.id
+    }
+
+    fn matches(&self, query: &str) -> bool {
+        let q = query.to_lowercase();
+        self.label.to_lowercase().contains(&q) || self.id.to_lowercase().contains(&q)
+    }
+}
+
+/// The list box's groups: the agent's families in its order (models of none under "Suggested"),
+/// the names typed in before, then "Other model…"; and where `picked` is in them.
+fn model_groups(listed: &[ModelOption], recent: &[String], picked: &str) -> (Vec<SelectGroup<ModelItem>>, Option<IndexPath>) {
+    let mut groups: Vec<SelectGroup<ModelItem>> = Vec::new();
+    for m in listed {
+        let family = if m.family.is_empty() { "Suggested" } else { m.family.as_str() };
+        let item = ModelItem { id: m.id.clone().into(), label: m.label.clone().into() };
+        match groups.iter_mut().find(|g| g.title.as_ref() == family) {
+            Some(g) => g.items.push(item),
+            None => groups.push(SelectGroup::new(family.to_string()).item(item)),
+        }
+    }
+    let typed: Vec<ModelItem> = recent
+        .iter()
+        .filter(|r| !listed.iter().any(|m| &m.id == *r))
+        .map(|r| ModelItem { id: r.clone().into(), label: r.clone().into() })
+        .collect();
+    if !typed.is_empty() {
+        groups.push(SelectGroup::new("Typed before").items(typed));
+    }
+    groups.push(SelectGroup::new("More").item(ModelItem { id: OTHER_MODEL.into(), label: "Other model…".into() }));
+    let selected = groups.iter().enumerate().find_map(|(section, g)| {
+        g.items.iter().position(|i| i.id.as_ref() == picked).map(|row| IndexPath::new(row).section(section))
+    });
+    (groups, selected)
+}
+
 pub(super) fn remember_model(name: &str, cx: &mut App) {
     let settings = cx.global::<crate::AppSettings>().0.clone();
     settings.borrow_mut().remember_model(name);
@@ -857,6 +1045,44 @@ pub(super) fn short_model(model: &str) -> String {
 pub(super) fn capitalize(s: &str) -> String {
     let mut c = s.chars();
     c.next().map(|f| f.to_uppercase().collect::<String>() + c.as_str()).unwrap_or_default()
+}
+
+#[cfg(test)]
+mod model_list_tests {
+    use super::*;
+
+    #[::core::prelude::v1::test]
+    fn variants_show_as_one_model() {
+        let v = |id: &str, base: &str, label: &str| ModelOption { id: id.into(), base: base.into(), base_label: label.into(), label: label.into(), family: "GPT".into(), ..Default::default() };
+        let listed = [v("gpt-5.5-high", "gpt-5.5", "GPT-5.5 1M"), v("gpt-5.5-low", "gpt-5.5", "GPT-5.5"), v("gpt-5-mini", "gpt-5-mini", "GPT-5 Mini")];
+        let models: Vec<(String, String)> = bases(&listed).into_iter().map(|m| (m.id, m.label)).collect();
+        assert_eq!(models, [("gpt-5.5".to_string(), "GPT-5.5".to_string()), ("gpt-5-mini".into(), "GPT-5 Mini".into())]);
+        assert_eq!(effort_name("xhigh"), "Extra high");
+    }
+
+    #[::core::prelude::v1::test]
+    fn models_group_by_family_with_typed_names_and_other_last() {
+        let m = |id: &str, family: &str| ModelOption { id: id.into(), label: id.to_uppercase(), family: family.into(), ..Default::default() };
+        let listed = [m("auto", ""), m("gpt-5", "GPT"), m("grok-4", "Grok"), m("gpt-5-mini", "GPT")];
+        let recent = ["my-model".to_string(), "grok-4".to_string()];
+        let (groups, selected) = model_groups(&listed, &recent, "gpt-5-mini");
+        let shape: Vec<(String, Vec<String>)> =
+            groups.iter().map(|g| (g.title.to_string(), g.items.iter().map(|i| i.id.to_string()).collect())).collect();
+        assert_eq!(
+            shape,
+            [
+                ("Suggested".into(), vec!["auto".into()]),
+                ("GPT".into(), vec!["gpt-5".into(), "gpt-5-mini".into()]),
+                ("Grok".into(), vec!["grok-4".into()]),
+                ("Typed before".into(), vec!["my-model".into()]),
+                ("More".into(), vec![OTHER_MODEL.into()]),
+            ]
+        );
+        assert_eq!(selected, Some(IndexPath::new(1).section(1)));
+        // Found by name or by id.
+        let item = &groups[2].items[0];
+        assert!(item.matches("GROK") && item.matches("grok-4") && !item.matches("gpt"));
+    }
 }
 
 #[cfg(test)]

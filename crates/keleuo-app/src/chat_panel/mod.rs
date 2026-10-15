@@ -77,6 +77,8 @@ pub struct ChatPanel {
     pastes: Vec<String>,
     /// "Other model…": a field for a model name in place of the model button.
     model_input: Option<(Entity<InputState>, Subscription)>,
+    /// The model list box (see `sync_model_select`).
+    model_select: Option<composer::ModelSelect>,
     /// What a message starting with `/` can name (skills, commands, the agent's own), read
     /// when the first `/` is typed.
     slash_choices: Option<Rc<Vec<keleuo_core::slash::Choice>>>,
@@ -212,6 +214,7 @@ impl ChatPanel {
             attachments: Vec::new(),
             pastes: Vec::new(),
             model_input: None,
+            model_select: None,
             slash_choices: None,
             slash_ix: 0,
             slash_query: String::new(),
@@ -776,6 +779,7 @@ impl Render for ChatPanel {
             .children(self.render_thinking(cx))
             .child({
                 let slash = self.render_slash(cx);
+                self.sync_model_select(window, cx);
                 self.render_composer(slash, window, cx)
             }))
             .children(self.render_views(cx))

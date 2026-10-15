@@ -177,9 +177,75 @@ fn parse_models(text: &str) -> Vec<ModelOption> {
                 return None;
             }
             let label = label.split(" (current").next().unwrap_or(label).trim();
-            Some(ModelOption { id: id.into(), label: label.into(), family: family(id).into() })
+            let (base, effort, thinking, fast) = variant(id);
+            Some(ModelOption {
+                id: id.into(),
+                label: label.into(),
+                family: family(id).into(),
+                base_label: base_label(label),
+                base,
+                effort,
+                thinking,
+                fast,
+            })
         })
         .collect()
+}
+
+/// The effort words Cursor puts in its model ids.
+const EFFORTS: [&str; 7] = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
+
+/// A model id as its model and variant: `gpt-5.3-codex-high-fast` is `gpt-5.3-codex` at high
+/// effort, fast; `claude-opus-5-thinking-high` and `claude-4.6-opus-high-thinking` both name
+/// a thinking variant at high effort.
+fn variant(id: &str) -> (String, Option<String>, bool, bool) {
+    let mut parts: Vec<&str> = id.split('-').collect();
+    let fast = parts.len() > 1 && parts.last() == Some(&"fast");
+    if fast {
+        parts.pop();
+    }
+    let (mut effort, mut thinking) = (None, false);
+    // Effort and "thinking" come last, in either order.
+    for _ in 0..2 {
+        match parts.last() {
+            Some(&"thinking") if parts.len() > 1 => {
+                thinking = true;
+                parts.pop();
+            }
+            Some(e) if parts.len() > 1 && effort.is_none() && EFFORTS.contains(e) => {
+                effort = Some(e.to_string());
+                parts.pop();
+                // `extra-high` is xhigh (`gpt-5.5-extra-high`).
+                if effort.as_deref() == Some("high") && parts.len() > 1 && parts.last() == Some(&"extra") {
+                    parts.pop();
+                    effort = Some("xhigh".into());
+                }
+            }
+            _ => break,
+        }
+    }
+    (parts.join("-"), effort, thinking, fast)
+}
+
+/// A model's name without its variant's words ("Codex 5.3 Low Fast" is "Codex 5.3"), and
+/// without the invisible characters some of Cursor's names carry; a note in brackets at the
+/// end stays ("Claude Fable 5 1M Max (NO ZDR)" is "Claude Fable 5 1M (NO ZDR)").
+fn base_label(label: &str) -> String {
+    const WORDS: [&str; 11] = ["none", "no", "minimal", "low", "medium", "high", "extra", "xhigh", "max", "fast", "thinking"];
+    let label: String = label.chars().filter(|c| !matches!(c, '\u{200b}' | '\u{200c}' | '\u{200d}' | '\u{feff}')).collect();
+    let (name, note) = match label.trim_end().strip_suffix(')').and_then(|l| l.rsplit_once(" (")) {
+        Some((name, note)) => (name.to_string(), Some(note.to_string())),
+        None => (label.clone(), None),
+    };
+    let mut words: Vec<&str> = name.split_whitespace().collect();
+    while words.len() > 1 && words.last().is_some_and(|w| WORDS.contains(&w.to_lowercase().as_str())) {
+        words.pop();
+    }
+    let name = words.join(" ");
+    match note {
+        Some(note) => format!("{name} ({note})"),
+        None => name,
+    }
 }
 
 /// The family a model id belongs to, for the menu ("" for Auto, which stands alone).
@@ -445,6 +511,7 @@ mod tests {
             Tip: use --model <id> (or /model <id> in interactive mode) to switch.\n";
         let models = parse_models(text);
         let got: Vec<(&str, &str, &str)> = models.iter().map(|m| (m.id.as_str(), m.label.as_str(), m.family.as_str())).collect();
+        assert_eq!((models[1].base.as_str(), models[1].effort.as_deref(), models[1].base_label.as_str()), ("gpt-5.3-codex", Some("low"), "Codex 5.3"));
         assert_eq!(
             got,
             [
@@ -457,6 +524,30 @@ mod tests {
                 ("muse-spark-1.3", "Muse Spark", "Other"),
             ]
         );
+    }
+
+    #[test]
+    fn a_model_id_is_its_model_and_variant() {
+        let v = |id: &str| {
+            let (b, e, t, f) = variant(id);
+            (b, e.unwrap_or_default(), t, f)
+        };
+        assert_eq!(v("gpt-5.3-codex-high-fast"), ("gpt-5.3-codex".into(), "high".into(), false, true));
+        assert_eq!(v("gpt-5.3-codex"), ("gpt-5.3-codex".into(), "".into(), false, false));
+        assert_eq!(v("claude-opus-5-thinking-high"), ("claude-opus-5".into(), "high".into(), true, false));
+        assert_eq!(v("claude-4.6-opus-high-thinking"), ("claude-4.6-opus".into(), "high".into(), true, false));
+        assert_eq!(v("claude-4.5-sonnet-thinking"), ("claude-4.5-sonnet".into(), "".into(), true, false));
+        assert_eq!(v("grok-4.7-low-fast"), ("grok-4.7".into(), "low".into(), false, true));
+        assert_eq!(v("composer-2.5-fast"), ("composer-2.5".into(), "".into(), false, true));
+        assert_eq!(v("gpt-5-mini"), ("gpt-5-mini".into(), "".into(), false, false));
+        assert_eq!(v("auto"), ("auto".into(), "".into(), false, false));
+        assert_eq!(base_label("Codex 5.3 Extra High Fast"), "Codex 5.3");
+        assert_eq!(base_label("Claude Opus 5 1M Thinking"), "Claude Opus 5 1M");
+        assert_eq!(base_label("Grok 4.7  Low Fast"), "Grok 4.7");
+        assert_eq!(base_label("Grok 4.7 Low Fast\u{200b}\u{200b}"), "Grok 4.7");
+        assert_eq!(base_label("Claude Fable 5 1M Max Thinking (NO ZDR)"), "Claude Fable 5 1M (NO ZDR)");
+        assert_eq!(base_label("Claude Haiku 5.5 Low No Thinking"), "Claude Haiku 5.5");
+        assert_eq!(v("gpt-5.5-extra-high-fast"), ("gpt-5.5".into(), "xhigh".into(), false, true));
     }
 
     #[test]
@@ -649,5 +740,20 @@ mod tests {
         eprintln!("{} models", models.len());
         assert!(models.len() > 20);
         assert!(models.iter().any(|m| m.family == "Grok"));
+        let mut bases: Vec<(String, Vec<String>)> = Vec::new();
+        for m in &models {
+            match bases.iter_mut().find(|(b, _)| *b == m.base) {
+                Some((_, labels)) => {
+                    if !labels.contains(&m.base_label) {
+                        labels.push(m.base_label.clone());
+                    }
+                }
+                None => bases.push((m.base.clone(), vec![m.base_label.clone()])),
+            }
+        }
+        eprintln!("{} models", bases.len());
+        for (b, labels) in &bases {
+            eprintln!("  {b:32} {labels:?}");
+        }
     }
 }
