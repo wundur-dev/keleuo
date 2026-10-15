@@ -41,6 +41,7 @@ icon_assets!(
         FolderPlus,
         FileDiff,
         MessageCircleQuestionMark,
+        CornerDownRight,
     ]
 );
 

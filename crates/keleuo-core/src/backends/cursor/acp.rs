@@ -17,6 +17,8 @@
 //!   its default for next time.
 //! - `session/load` streams the chat again as updates; Keleuo has it already (from Cursor's
 //!   record), so they are not shown.
+//! - A `session/prompt` sent while one runs stops that one (its reply says `cancelled`) and
+//!   runs the new one: a message is not added to a running turn (see `takes_mid_turn`).
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -131,6 +133,11 @@ impl Agent for CursorAcpAgent {
 
     fn takes_images(&self) -> bool {
         true
+    }
+
+    /// A second prompt stops the running one rather than joining it (see the module's notes).
+    fn takes_mid_turn(&self) -> bool {
+        false
     }
 
     fn answer_permission(&mut self, request_id: &str, allow: bool, input: &Value) -> std::io::Result<()> {

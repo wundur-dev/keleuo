@@ -1329,12 +1329,36 @@ impl Workspace {
                 window,
                 cx,
             ),
-            "send" | "allow" | "deny" => {
+            "send" | "allow" | "deny" | "stop" => {
                 let text = arg.replace("\\n", "\n");
                 self.session.update(cx, |s, cx| match cmd {
                     "send" => s.send(&text, cx),
+                    // As the Stop button does.
+                    "stop" => s.interrupt(cx),
                     c => s.answer_first(c == "allow", cx),
                 });
+            }
+            "waiting" => {
+                // The messages waiting for the agent, one per line as `id: text` (tests).
+                let s = self.session.read(cx);
+                let list: Vec<String> = s.waiting().map(|w| format!("{}: {} ({} images)", w.id, w.preview(60), w.images.len())).collect();
+                let paused = if s.waiting_paused() { " (paused)" } else { "" };
+                // And the person's messages in the chat, in order: what the agent got.
+                let said: Vec<&str> = s
+                    .chat
+                    .items
+                    .iter()
+                    .filter_map(|i| match i {
+                        keleuo_core::conversation::Item::User(t) => Some(t.as_str()),
+                        _ => None,
+                    })
+                    .collect();
+                return format!("{} waiting{paused}, busy={}, said={said:?}{}{}", list.len(), s.chat.busy, if list.is_empty() { "" } else { "\n" }, list.join("\n"));
+            }
+            "send-now" | "unqueue" => {
+                // Send waiting message `arg` (its id) now, or drop it (tests).
+                let Ok(id) = arg.parse::<u64>() else { return "an id, please".into() };
+                self.session.update(cx, |s, cx| if cmd == "send-now" { s.send_waiting_now(id, cx) } else { s.remove_waiting(id, cx) });
             }
             "new-file" | "new-folder" => {
                 // In the folder `arg` (relative to the project), else at its root.

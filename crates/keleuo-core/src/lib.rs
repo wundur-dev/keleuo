@@ -15,7 +15,8 @@
 //! - [`links`]: `path:line` references in text, resolved to project files;
 //! - [`symbols`]: a quick definition index for go to definition and outlines;
 //! - [`web`]: what an address typed in the Web panel means;
-//! - [`compose`]: writing a message (lists that continue on Shift+Enter).
+//! - [`compose`]: writing a message (lists that continue on Shift+Enter);
+//! - [`outbox`]: messages sent while the agent works, waiting their turn.
 
 pub mod acp;
 pub mod agent;
@@ -31,6 +32,7 @@ pub mod images;
 pub mod host;
 pub mod links;
 pub mod markdown_marks;
+pub mod outbox;
 pub mod paste;
 pub mod platform;
 pub mod questions;

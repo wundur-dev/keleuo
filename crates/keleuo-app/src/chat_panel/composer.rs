@@ -412,6 +412,7 @@ impl ChatPanel {
         let queued = session.queued_count();
         let name = session.backend.name();
         let chips = self.render_chips(cx);
+        let waiting = self.render_waiting(cx);
         let attach = self.render_attach(cx);
         let model_control = self.render_model_control(cx);
         let effort_control = self.render_effort_control(cx);
@@ -427,6 +428,8 @@ impl ChatPanel {
             .px_4()
             .pb_3()
             .pt_1()
+            // Messages waiting for the agent to be free, above the box.
+            .children(waiting)
             // The `/` list, just above the box it completes.
             .children(slash.map(|s| div().w_full().max_w(px(COLUMN)).child(s)))
             .child(
@@ -519,6 +522,104 @@ impl ChatPanel {
                     ),
             )
             .into_any_element()
+    }
+
+    /// The messages sent while the agent works, in the order they go: each with its first
+    /// line (and its images), Send now and Remove. Each shows in the chat when it goes.
+    fn render_waiting(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let session = self.session.read(cx);
+        session.waiting().next()?;
+        let theme = cx.theme();
+        let (border, muted, fg, field) = (theme.border, theme.muted_foreground, theme.foreground, theme.secondary);
+        let name = session.backend.name();
+        let send_tip: SharedString = if !session.chat.busy {
+            "Send it now".into()
+        } else if session.takes_mid_turn() {
+            format!("Send it now: {name} reads it as it works").into()
+        } else {
+            format!("Stop {name}'s turn and send it").into()
+        };
+        let caption = if session.waiting_paused() {
+            "Stopped. These wait until you send them, or send another message.".to_string()
+        } else {
+            format!("Waiting for {name} to finish. Each goes when the turn before it ends.")
+        };
+        let mut rows = div()
+            .w_full()
+            .max_w(px(COLUMN))
+            .flex()
+            .flex_col()
+            .gap_1()
+            .pb_1()
+            .child(div().px_3().text_xs().text_color(muted).child(caption));
+        for w in session.waiting() {
+            let (id, n) = (w.id, w.id as usize);
+            let images = w.images.len();
+            let text = w.preview(200);
+            let label = match (text.is_empty(), images) {
+                (false, _) => text,
+                (true, 1) => "An image".to_string(),
+                (true, n) => format!("{n} images"),
+            };
+            let thumb = w.images.first().map(|path| {
+                div()
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .child(
+                        div()
+                            .size(px(22.))
+                            .rounded(px(5.))
+                            .overflow_hidden()
+                            .border_1()
+                            .border_color(border)
+                            .child(img(path.clone()).size_full().object_fit(ObjectFit::Cover)),
+                    )
+                    .when(images > 1, |d| d.child(div().text_xs().text_color(muted).child(format!("+{}", images - 1))))
+            });
+            let tip = send_tip.clone();
+            rows = rows.child(
+                div()
+                    .id(("waiting", n))
+                    .w_full()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .pl_3()
+                    .pr_1()
+                    .py(px(3.))
+                    .rounded(px(14.))
+                    .border_1()
+                    .border_color(border)
+                    .bg(field)
+                    .text_sm()
+                    .child(Icon::new(gpui_kit::assets::IconName::CornerDownRight).xsmall().text_color(muted))
+                    .children(thumb)
+                    .child(div().flex_1().min_w_0().truncate().text_color(fg).child(label))
+                    .child(
+                        Button::new(("waiting-send", n))
+                            .xsmall()
+                            .ghost()
+                            .label("Send now")
+                            .tooltip(tip)
+                            .on_click(cx.listener(move |p, _, _, cx| {
+                                p.session.update(cx, |s, cx| s.send_waiting_now(id, cx));
+                            })),
+                    )
+                    .child(
+                        Button::new(("waiting-remove", n))
+                            .xsmall()
+                            .ghost()
+                            .icon(gpui_kit::assets::IconName::Close)
+                            .tooltip("Remove")
+                            .on_click(cx.listener(move |p, _, _, cx| {
+                                p.session.update(cx, |s, cx| s.remove_waiting(id, cx));
+                            })),
+                    ),
+            );
+        }
+        Some(rows.into_any_element())
     }
 
     /// The images and long pastes waiting to go with the message, above the box.
