@@ -46,6 +46,7 @@ mod instance;
 mod pty;
 mod image_view;
 mod on_screen;
+mod native_spinner;
 mod sheet_tabs;
 mod skill_installer;
 mod settings_window;

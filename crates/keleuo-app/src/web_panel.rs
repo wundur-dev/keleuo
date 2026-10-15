@@ -371,6 +371,10 @@ thread_local! {
 
 /// One of the window's own overlays (a dialog, the session list peeking out) is open or closed:
 /// web views hide meanwhile, since they would draw over it.
+pub fn is_covered() -> bool {
+    COVERED.with(Cell::get)
+}
+
 pub fn set_covered(covered: bool) {
     if COVERED.with(|c| c.replace(covered)) == covered {
         return;

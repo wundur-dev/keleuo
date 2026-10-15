@@ -115,6 +115,8 @@ pub struct ChatPanel {
     pulse: Entity<Pulse>,
     /// Where the working line goes, as last laid out (window coordinates).
     working_slot: Rc<std::cell::Cell<Option<Bounds<Pixels>>>>,
+    /// The working line's spinner, the system's own where there is one.
+    native_spinner: crate::native_spinner::NativeSpinner,
     /// The Chat and Terminal view tabs.
     views: Rc<StripState>,
     _subs: Vec<Subscription>,
@@ -187,6 +189,7 @@ impl ChatPanel {
                         async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
                             let mut wait = TICK;
                             let mut ticks: u32 = 0;
+                            let native = crate::native_spinner::NativeSpinner::available();
                             loop {
                                 cx.background_executor().timer(wait).await;
                                 let alive = this.update(cx, |p, cx| {
@@ -199,13 +202,15 @@ impl ChatPanel {
                                         // The working line turns on every tick, drawn apart from
                                         // the chat; the chat's own clocks (running calls, agents)
                                         // move once a second.
-                                        if p.working_label(cx).is_some() {
+                                        // The system turns its own spinner: the ticker only
+                                        // moves the clocks, once a second.
+                                        if !native && p.working_label(cx).is_some() {
                                             p.pulse.update(cx, |pulse, cx| {
                                                 pulse.0 = pulse.0.wrapping_add(1);
                                                 cx.notify();
                                             });
                                         }
-                                        if ticks.is_multiple_of(TICKS_PER_SECOND) {
+                                        if native || ticks.is_multiple_of(TICKS_PER_SECOND) {
                                             cx.notify();
                                         }
                                     }
@@ -215,7 +220,7 @@ impl ChatPanel {
                                     (still, shown)
                                 });
                                 match alive {
-                                    Ok((true, shown)) => wait = if shown { TICK } else { UNSEEN_TICK },
+                                    Ok((true, shown)) => wait = if shown && !native { TICK } else { UNSEEN_TICK },
                                     _ => break,
                                 }
                             }
@@ -259,6 +264,7 @@ impl ChatPanel {
             busy_since: None,
             pulse: cx.new(|_| Pulse(0)),
             working_slot: Default::default(),
+            native_spinner: Default::default(),
             ticker: None,
             on_screen: Default::default(),
             views: Rc::new(StripState::default()),

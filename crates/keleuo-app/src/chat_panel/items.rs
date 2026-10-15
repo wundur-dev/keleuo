@@ -2,6 +2,7 @@
 //! end-of-turn card, compaction marks, agents' reports, the thinking and asking lines.
 
 use super::*;
+use crate::native_spinner::NativeSpinner;
 
 impl ChatPanel {
     /// The divider where the context was compacted, its summary on request.
@@ -710,47 +711,6 @@ impl ChatPanel {
         out
     }
 
-    /// The interface waits on a question before it is up: Trust / Don't trust for the folder
-    /// question, else a pointer to the terminal.
-    /// While the agent thinks, before its first text or tool call: a shimmering line above the
-    /// composer, so a quiet stretch reads as work in progress rather than a stall.
-    /// While the agent works: a quiet spinner, what it is doing and for how long ("Thinking ·
-    /// 3m 02s"), in the message box beside the stop button. Not while it waits on the person
-    /// (a prompt shows that), nor in Terminal (its interface shows its own).
-    pub(super) fn render_working(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let session = self.session.read(cx);
-        if !session.chat.busy || session.chat.needs_input() || session.view == View::Terminal {
-            return None;
-        }
-        // A streaming text item means the answer is being written.
-        let answering = matches!(session.chat.items.last(), Some(Item::Assistant { streaming: true, .. }));
-        let doing = match session.chat.status.as_deref() {
-            _ if answering => "Writing",
-            None | Some("thinking" | "working" | "sending" | "requesting") => "Thinking",
-            Some(_) => "Working",
-        };
-        let muted = cx.theme().muted_foreground;
-        let label = match self.busy_since.map(|t| format_elapsed(t.elapsed())) {
-            Some(e) => format!("{doing} · {e}"),
-            None => doing.to_string(),
-        };
-        Some(
-            div()
-                .flex_none()
-                .flex()
-                .items_center()
-                .gap_1()
-                .text_xs()
-                .text_color(muted)
-                .child(self.spinner(muted).xsmall())
-                .child(label)
-                .into_any_element(),
-        )
-    }
-
-    /// The same at the foot of the conversation, as a chat app shows it: a spinner and grey
-    /// words under the last message ("Thinking · 12s", or the tool running), while the agent
-    /// works.
     /// What the working line says ("Thinking · 12s", or the tool running), or `None` when it
     /// does not show (idle, a question waiting, the Terminal view).
     pub(super) fn working_label(&self, cx: &App) -> Option<String> {
@@ -791,7 +751,7 @@ impl ChatPanel {
         let label = self.working_label(cx)?;
         if self.agent.is_some() {
             let muted = cx.theme().muted_foreground;
-            return Some(working_line(label, spinner_at(self.pulse.read(cx).0, muted), muted).into_any_element());
+            return Some(working_line(label, spinner_at(self.pulse.read(cx).0, muted).small().into_any_element(), muted).into_any_element());
         }
         let slot = self.working_slot.clone();
         Some(
@@ -813,7 +773,18 @@ impl ChatPanel {
         let bounds = self.working_slot.get()?;
         let label = self.working_label(cx)?;
         let muted = cx.theme().muted_foreground;
-        let spinner = spinner_at(self.pulse.read(cx).0, muted);
+        // The system's own spinner where there is one (it turns without a frame drawn), laid
+        // over a gap of its size; else one drawn here, turned by the ticker.
+        let spinner = if NativeSpinner::available() {
+            let native = self.native_spinner.clone();
+            div()
+                .flex_none()
+                .size(px(16.))
+                .child(canvas(|_, _, _| {}, move |b, _, window, _| native.paint(b, window)).size_full())
+                .into_any_element()
+        } else {
+            spinner_at(self.pulse.read(cx).0, muted).small().into_any_element()
+        };
         Some(
             deferred(
                 anchored().position_mode(AnchoredPositionMode::Window).position(bounds.origin).child(
@@ -913,6 +884,8 @@ impl ChatPanel {
         )
     }
 
+    /// The interface waits on a question before it is up: Trust / Don't trust for the folder
+    /// question, else a pointer to the terminal.
     pub(super) fn render_asking(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let session = self.session.read(cx);
         let asking = session.asking?;
@@ -1103,7 +1076,7 @@ mod run_pill_tests {
 const WORKING_LINE_HEIGHT: f32 = 28.;
 
 /// A spinner and grey words, in the conversation's column.
-fn working_line(label: String, spinner: Icon, muted: Hsla) -> Div {
+fn working_line(label: String, spinner: AnyElement, muted: Hsla) -> Div {
     div().flex_none().w_full().h(px(WORKING_LINE_HEIGHT)).flex().justify_center().px_4().pb_2().child(
         div()
             .w_full()
@@ -1114,7 +1087,7 @@ fn working_line(label: String, spinner: Icon, muted: Hsla) -> Div {
             .gap_2()
             .text_size(px(13.))
             .text_color(muted)
-            .child(spinner.small())
+            .child(spinner)
             .child(div().min_w_0().truncate().child(label)),
     )
 }
