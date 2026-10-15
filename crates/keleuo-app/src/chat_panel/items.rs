@@ -171,8 +171,8 @@ impl ChatPanel {
         let amber = theme.yellow;
         // The turn's summary reads the turn; agents it left in the background are not done yet.
         let chat = &self.session.read(cx).chat;
-        let agents_on = chat.running_agents().any(|a| a.background)
-            && chat.last_summary().is_some_and(|last| std::ptr::eq(last, s));
+        let background = chat.running_agents().filter(|a| a.background).count();
+        let agents_on = background > 0 && chat.last_summary().is_some_and(|last| std::ptr::eq(last, s));
         let tone = match s.status {
             _ if agents_on => theme.magenta,
             summary::Status::Done => theme.green,
@@ -310,7 +310,7 @@ impl ChatPanel {
                                             .text_color(muted)
                                             .child(command.clone()),
                                     )
-                                    .child(run_pill(SharedString::from(format!("sum-run-{key}-{n}")), command, panel.clone(), cx)),
+                                    .child(run_pill(SharedString::from(format!("sum-run-{key}-{n}")), command, background, panel.clone(), cx)),
                             )
                         })
                         .into_any_element()
@@ -512,6 +512,7 @@ impl ChatPanel {
             // which runs it (without the `!`) in a terminal tab of the session's folder.
             .code_block_actions({
                 let panel = entity.clone();
+                let session = self.session.clone();
                 move |block, _, cx| {
                 let code = block.code();
                 let lang = block.lang().unwrap_or_else(|| "code".into());
@@ -525,7 +526,10 @@ impl ChatPanel {
                     .text_size(px(11.))
                     .text_color(muted)
                     .child(lang)
-                    .when_some(command, |d, command| d.child(run_pill("run-code", command, panel.clone(), cx)))
+                    .when_some(command, |d, command| {
+                        let background = session.read(cx).chat.running_agents().filter(|a| a.background).count();
+                        d.child(run_pill("run-code", command, background, panel.clone(), cx))
+                    })
                     .child(
                         Button::new("copy-code")
                             .xsmall()
@@ -969,18 +973,12 @@ pub(super) fn hover_actions(group: SharedString, key: String, text: String, mute
 
 /// A green Run pill, so it reads as a button at a glance (brighter under the pointer, darker
 /// while pressed): runs `command` in a terminal tab of the session's folder.
-pub(super) fn run_pill(id: impl Into<ElementId>, command: String, panel: WeakEntity<ChatPanel>, cx: &App) -> Stateful<Div> {
+pub(super) fn run_pill(id: impl Into<ElementId>, command: String, background: usize, panel: WeakEntity<ChatPanel>, cx: &App) -> Stateful<Div> {
     let theme = cx.theme();
     // Keleuo's own restart quits the app, and with it the agents working in the background:
-    // amber, and it says so, while there are any.
-    let stops = if restarts_keleuo(&command) {
-        panel
-            .upgrade()
-            .map(|p| p.read(cx).session.read(cx).chat.running_agents().filter(|a| a.background).count())
-            .unwrap_or(0)
-    } else {
-        0
-    };
+    // amber, and it says so, while there are any. The caller counts them (`background`): this
+    // runs while the panel is being drawn, and reading the panel from here panics.
+    let stops = if restarts_keleuo(&command) { background } else { 0 };
     let (go, go_hover, go_active) = if stops > 0 {
         (theme.warning, theme.warning_hover, theme.warning_active)
     } else {
@@ -1034,6 +1032,12 @@ fn restarts_keleuo(command: &str) -> bool {
 
 #[cfg(test)]
 mod run_pill_tests {
+    use crate::agent_session::AgentSession;
+    use crate::chat_panel::ChatPanel;
+    use gpui_kit::{AppContext, TestAppContext};
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
     #[::core::prelude::v1::test]
     fn keleuos_restart_is_told_from_other_commands() {
         assert!(super::restarts_keleuo("./scripts/restart"));
@@ -1041,5 +1045,34 @@ mod run_pill_tests {
         assert!(super::restarts_keleuo("scripts/restart --release"));
         assert!(!super::restarts_keleuo("cargo test"));
         assert!(!super::restarts_keleuo("echo ./scripts/restart"));
+    }
+
+    /// The Run pill is drawn while its panel is being drawn, so the panel is leased then:
+    /// reading the panel from inside it panics (gpui's double lease). Drawn inside the panel's
+    /// own update, as its render draws the message.
+    #[gpui_kit::test]
+    fn restart_pill_is_drawn_while_its_panel_is_leased(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        cx.update(|cx| {
+            cx.set_global(crate::AppSettings(std::rc::Rc::new(std::cell::RefCell::new(keleuo_core::settings::Settings::load(None)))));
+            cx.set_global(crate::backends::Backends(crate::backends::registry()));
+        });
+        let mut panel = None;
+        cx.update(|cx| {
+            let backend = crate::backends::backend(None, cx);
+            gpui_kit::open_window(Default::default(), cx, |window, cx| {
+                let session = cx.new(|_| AgentSession::new(Arc::new(keleuo_core::host::LocalHost), backend, PathBuf::from("/")));
+                let p = cx.new(|cx| ChatPanel::new(session, window, cx));
+                panel = Some(p.clone());
+                p
+            })
+            .unwrap();
+        });
+        let panel = panel.unwrap();
+        cx.update(|cx| {
+            panel.update(cx, |_, cx| {
+                let _ = super::run_pill("restart", "./scripts/restart".into(), 0, panel.downgrade(), cx);
+            });
+        });
     }
 }
