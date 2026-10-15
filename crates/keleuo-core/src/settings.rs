@@ -179,6 +179,10 @@ pub struct Settings {
     pub continue_on_start: Vec<String>,
     /// Turn summaries by a language model server (off until set up).
     pub summaries: crate::summary::Config,
+    /// Settings this build does not know (written by a newer one), kept as they are so
+    /// saving does not drop them.
+    #[serde(flatten)]
+    pub unknown: serde_json::Map<String, serde_json::Value>,
     #[serde(skip)]
     path: Option<PathBuf>,
 }
@@ -293,6 +297,20 @@ pub fn encode_folder(folder: &std::path::Path) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn settings_from_a_newer_build_survive_a_save() {
+        let path = std::env::temp_dir().join(format!("keleuo-settings-unknown-{}.json", std::process::id()));
+        std::fs::write(&path, r#"{"appearance":"dark","from_the_future":{"on":true}}"#).unwrap();
+        let mut s = Settings::load(Some(path.clone()));
+        assert_eq!(s.appearance, "dark");
+        s.appearance = "light".into();
+        s.save().unwrap();
+        let saved: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(saved["appearance"], "light");
+        assert_eq!(saved["from_the_future"]["on"], true);
+        let _ = std::fs::remove_file(&path);
+    }
+
 
     #[test]
     fn prefs_are_on_unless_turned_off() {
