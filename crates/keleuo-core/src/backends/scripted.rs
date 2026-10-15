@@ -16,6 +16,18 @@ use crate::host::Host;
 
 pub const ID: &str = "scripted";
 
+/// What a `stream N` reply is made of, in turn.
+const STREAM_PIECES: [&str; 8] = [
+    "Looking at `crates/keleuo-app/src/chat_panel/mod.rs` first, ",
+    "the list is synced on every revision and the last few items are measured again.\n\n",
+    "- `sync_list` splices the tail\n- `render_entry` builds each visible item\n",
+    "- the ticker redraws once a second while something runs\n\n",
+    "Then `crates/keleuo-core/src/conversation.rs`, where events are applied: ",
+    "a text delta appends to the streaming item and bumps the revision.\n\n",
+    "```rust\nfn apply(&mut self, e: Event) -> Applied {\n    self.revision += 1;\n}\n```\n\n",
+    "So each piece that arrives draws the chat once more. ",
+];
+
 /// The fake backend. `step`: the pause between events (zero in unit tests, slower when a
 /// person is watching the window).
 pub struct ScriptedBackend {
@@ -162,10 +174,27 @@ impl Turn {
             std::thread::sleep(Duration::from_secs(secs));
         }
         send(Event::TextStart);
-        for word in ["Working ", "on: ", &self.text] {
-            send(Event::TextDelta(word.to_string()));
-        }
-        send(Event::Text { text: format!("Working on: {}", self.text), parent: None });
+        // "stream N": a long reply in N pieces, as an agent writes one (paragraphs, file paths,
+        // lists, code), to measure the chat while it streams.
+        let pieces = self.text.strip_prefix("stream ").and_then(|r| r.split_whitespace().next()?.parse::<usize>().ok());
+        let said = match pieces {
+            Some(n) => {
+                let mut said = String::new();
+                for i in 0..n {
+                    let piece = STREAM_PIECES[i % STREAM_PIECES.len()];
+                    said.push_str(piece);
+                    send(Event::TextDelta(piece.to_string()));
+                }
+                said
+            }
+            None => {
+                for word in ["Working ", "on: ", &self.text] {
+                    send(Event::TextDelta(word.to_string()));
+                }
+                format!("Working on: {}", self.text)
+            }
+        };
+        send(Event::Text { text: said, parent: None });
         send(Event::ToolCall {
             id: tool.clone(),
             name: "edit".into(),

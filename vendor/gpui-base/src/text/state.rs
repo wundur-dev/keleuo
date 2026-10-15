@@ -42,6 +42,9 @@ const MAX_COALESCED_UPDATES_PER_PARSE: usize = 64;
 // Preserve exact first-layout height for small documents while bounding the
 // amount of source parsed synchronously on the UI thread.
 const MAX_SYNC_FULL_REPLACE_BYTES: usize = 4 * 1024;
+/// The most text an append parses on the UI thread: the document's last block,
+/// which is parsed again with it, and the appended text.
+const MAX_SYNC_APPEND_BYTES: usize = 8 * 1024;
 // Repaint a streamed fade at about 30 fps, not at the display refresh rate.
 const STREAM_FADE_TICK: Duration = Duration::from_millis(33);
 
@@ -503,6 +506,43 @@ impl TextViewState {
             pending_text: text.to_string(),
             markdown_extensions: self.markdown_extensions.clone(),
         };
+
+        // A small append onto a document already parsed to its end: parsed here,
+        // so the frame that brought the text shows it. Handed to the background
+        // parser it shows a frame later, and that second frame redrew the whole
+        // view around it for every streamed piece. The background parser is
+        // still sent the append, to keep its own document in step; its result
+        // for this revision is dropped as already committed.
+        if append
+            && self.format == TextViewFormat::Markdown
+            && self.parsed_error.is_none()
+            && self.committed_revision + 1 == self.revision
+            && self.full_update_revision <= self.committed_revision
+        {
+            let document = &self.parsed_content.document;
+            let tail = document
+                .blocks
+                .last()
+                .and_then(|block| block.span())
+                .map_or(0, |span| document.source.len().saturating_sub(span.start));
+            if tail + text.len() <= MAX_SYNC_APPEND_BYTES
+                && let Ok(content) =
+                    parse_content(self.format, self.parsed_content.clone(), &update_options)
+            {
+                self.splice_appended_blocks(&content.document);
+                self.reconcile_range_highlights(&content.document, self.revision, true);
+                self.stream_fade.record(
+                    &self.parsed_content.document,
+                    &content.document,
+                    Instant::now(),
+                );
+                self.parsed_content = content;
+                self.compatible_layout_update = true;
+                _ = self.tx.try_send(update_options);
+                cx.notify();
+                return;
+            }
+        }
 
         // Keep small full replacements synchronous so their first layout has
         // the exact content height. Larger replacements use the existing
