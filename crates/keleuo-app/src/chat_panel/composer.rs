@@ -2,6 +2,9 @@
 //! model picker, and lists that continue on Shift+Enter.
 
 use super::*;
+use gpui_kit::component::IndexPath;
+use gpui_kit::component::select::{SearchableVec, Select, SelectEvent, SelectGroup, SelectState};
+use gpui_kit::component::searchable_list::SearchableListItem;
 
 /// Shift+Enter on a list line in the message box: the next item's marker on the new line, or
 /// the marker taken away on an item left empty (ending the list). False when it is a plain new
@@ -606,100 +609,11 @@ impl ChatPanel {
         (!self.attachments.is_empty() || paste_chips > 0).then(|| chips.into_any_element())
     }
 
-    /// The model menu, or the field typing a model's name in its place.
+    /// The model list box (every model the agent offers, typed to filter), or the field typing a
+    /// model's name in its place.
     fn render_model_control(&self, cx: &mut Context<Self>) -> AnyElement {
-        if self.session.read(cx).listed_models.is_none() {
-            self.session.update(cx, |s, cx| s.want_models(cx));
-        }
-        let session = self.session.read(cx);
-        let model = session.chat.model.clone().or_else(|| session.model.clone()).unwrap_or_else(|| "default model".into());
-        let w_model = self.session.downgrade();
-        let panel_for_menu = cx.entity().downgrade();
-        // The backend's own names (aliases, each the latest of its family), the names typed in
-        // before, and "Other model…" to type one. The running one is ticked; an alias shows
-        // what it stands for.
-        let models: Vec<String> = session.backend.capabilities().models.clone();
-        // Every model the agent lists, when it lists them: the menu then offers those instead.
-        let listed: Vec<ModelOption> = session.listed_models.clone().unwrap_or_default();
-        let recent: Vec<String> = cx.global::<crate::AppSettings>().0.borrow().recent_models.clone();
-        // What was picked (an alias or a typed name), and what it runs as.
-        let (picked, running_as) = (session.model.clone(), session.chat.model.clone());
-        let model_button = Button::new("model")
-            .xsmall()
-            .ghost()
-            .label(short_model(&model))
-            .tooltip("Model")
-            .dropdown_menu(move |menu, window, cx| {
-                use gpui_kit::component::menu::PopupMenuItem;
-                let mut menu = menu;
-                let is = |m: &str| match (&picked, &running_as) {
-                    (Some(p), _) => p == m,
-                    (None, Some(r)) => r.contains(m),
-                    (None, None) => false,
-                };
-                // The agent's own list: those on their own first, then a submenu per family, in
-                // the agent's order.
-                let mut families: Vec<&str> = Vec::new();
-                for m in &listed {
-                    if m.family.is_empty() {
-                        let (w, id) = (w_model.clone(), m.id.clone());
-                        menu = menu.item(PopupMenuItem::new(m.label.clone()).checked(is(&m.id)).on_click(move |_, _, cx| {
-                            let _ = w.update(cx, |s, cx| s.set_model(&id, cx));
-                        }));
-                    } else if !families.contains(&m.family.as_str()) {
-                        families.push(&m.family);
-                    }
-                }
-                for family in families {
-                    let members: Vec<ModelOption> = listed.iter().filter(|m| m.family == family).cloned().collect();
-                    let current = members.iter().any(|m| is(&m.id));
-                    let w = w_model.clone();
-                    let picked = picked.clone();
-                    let label = if current { format!("{family} ✓") } else { family.to_string() };
-                    menu = menu.submenu(label, window, cx, move |sub, _, _| {
-                        let mut sub = sub.scrollable(true).max_h(px(420.));
-                        for m in &members {
-                            let (w, id) = (w.clone(), m.id.clone());
-                            let checked = picked.as_deref() == Some(m.id.as_str());
-                            // Its name; with its id when another in the family has the same name.
-                            let twin = members.iter().filter(|o| o.label == m.label).count() > 1;
-                            let label = if twin { format!("{} ({})", m.label, m.id) } else { m.label.clone() };
-                            sub = sub.item(PopupMenuItem::new(label).checked(checked).on_click(move |_, _, cx| {
-                                let _ = w.update(cx, |s, cx| s.set_model(&id, cx));
-                            }));
-                        }
-                        sub
-                    });
-                }
-                for m in models.iter().filter(|_| listed.is_empty()) {
-                    let (w, m2) = (w_model.clone(), m.clone());
-                    let running = is(m);
-                    let label = match (&running_as, running) {
-                        (Some(r), true) if r != m => format!("{} ({})", capitalize(m), r),
-                        _ => capitalize(m),
-                    };
-                    menu = menu.item(PopupMenuItem::new(label).checked(running).on_click(move |_, _, cx| {
-                        let _ = w.update(cx, |s, cx| s.set_model(&m2, cx));
-                    }));
-                }
-                if !recent.is_empty() {
-                    menu = menu.separator();
-                    for m in &recent {
-                        let (w, m2) = (w_model.clone(), m.clone());
-                        menu = menu.item(PopupMenuItem::new(m.clone()).checked(picked.as_deref() == Some(m.as_str())).on_click(move |_, _, cx| {
-                            remember_model(&m2, cx);
-                            let _ = w.update(cx, |s, cx| s.set_model(&m2, cx));
-                        }));
-                    }
-                }
-                let panel = panel_for_menu.clone();
-                menu.separator().item(PopupMenuItem::new("Other model…").on_click(move |_, window, cx| {
-                    let _ = panel.update(cx, |p, cx| p.start_model_input(window, cx));
-                }))
-            });
-        // Typing a model name: the field takes the button's place.
-        match &self.model_input {
-            Some((input, _)) => div()
+        if let Some((input, _)) = &self.model_input {
+            return div()
                 .w(px(240.))
                 .capture_key_down(cx.listener(|p, ev: &KeyDownEvent, _, cx| {
                     if ev.keystroke.key == "escape" {
@@ -709,8 +623,75 @@ impl ChatPanel {
                     }
                 }))
                 .child(Input::new(input).xsmall())
+                .into_any_element();
+        }
+        let session = self.session.read(cx);
+        let model = session.chat.model.clone().or_else(|| session.model.clone()).unwrap_or_else(|| "default model".into());
+        match &self.model_select {
+            Some(select) => Select::new(&select.state)
+                .xsmall()
+                .appearance(false)
+                .w(px(190.))
+                .menu_width(px(340.))
+                .menu_max_h(px(420.))
+                .placeholder(short_model(&model))
+                .search_placeholder("Search models")
                 .into_any_element(),
-            None => model_button.into_any_element(),
+            None => div().text_xs().child(short_model(&model)).into_any_element(),
+        }
+    }
+
+    /// Tests: focus the model list box (keys then reach it).
+    pub fn test_focus_model_select(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.sync_model_select(window, cx);
+        if let Some(select) = &self.model_select {
+            select.state.update(cx, |s, cx| s.focus(window, cx));
+        }
+    }
+
+    /// Keep the model list box in step with the agent's models (asked once, off the UI thread),
+    /// the names typed in before, and the model in use; built again only when one changes.
+    pub(super) fn sync_model_select(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.session.read(cx).listed_models.is_none() {
+            self.session.update(cx, |s, cx| s.want_models(cx));
+        }
+        let session = self.session.read(cx);
+        let listed: Vec<ModelOption> = match session.listed_models.as_deref() {
+            Some(m) if !m.is_empty() => m.to_vec(),
+            // Not listed (yet): the backend's own short list.
+            _ => session.backend.capabilities().models.iter().map(|m| ModelOption { id: m.clone(), label: capitalize(m), family: "Models".into() }).collect(),
+        };
+        let recent: Vec<String> = cx.global::<crate::AppSettings>().0.borrow().recent_models.clone();
+        let picked = session.model.clone().or_else(|| session.chat.model.clone()).unwrap_or_default();
+        let (groups, selected) = model_groups(&listed, &recent, &picked);
+        let key = format!("{picked}|{}|{}", listed.len(), recent.join(","));
+        if self.model_select.as_ref().is_some_and(|s| s.key == key) {
+            return;
+        }
+        match &self.model_select {
+            Some(select) => select.state.update(cx, |state, cx| {
+                state.set_items(SearchableVec::new(groups), window, cx);
+                state.set_selected_index(selected, window, cx);
+            }),
+            None => {
+                let state = cx.new(|cx| SelectState::new(SearchableVec::new(groups), selected, window, cx).searchable(true));
+                let sub = cx.subscribe_in(&state, window, |p, _, ev: &SelectEvent<SearchableVec<SelectGroup<ModelItem>>>, window, cx| {
+                    let SelectEvent::Confirm(Some(id)) = ev else { return };
+                    if id.as_ref() == OTHER_MODEL {
+                        p.start_model_input(window, cx);
+                        return;
+                    }
+                    let id = id.to_string();
+                    if cx.global::<crate::AppSettings>().0.borrow().recent_models.contains(&id) {
+                        remember_model(&id, cx);
+                    }
+                    p.session.update(cx, |s, cx| s.set_model(&id, cx));
+                });
+                self.model_select = Some(ModelSelect { state, key: String::new(), _sub: sub });
+            }
+        }
+        if let Some(select) = &mut self.model_select {
+            select.key = key;
         }
     }
 
@@ -843,6 +824,79 @@ fn take_paste(item: &ClipboardItem, paste_target: &WeakEntity<ChatPanel>, window
 }
 
 /// Keep a typed model name among the recent ones, saved.
+/// The value of "Other model…" (no model is called that).
+const OTHER_MODEL: &str = "\u{0}other";
+
+/// The model list box's state, and what it was built from (to build it again on a change).
+pub(super) struct ModelSelect {
+    state: Entity<SelectState<SearchableVec<SelectGroup<ModelItem>>>>,
+    key: String,
+    _sub: Subscription,
+}
+
+/// A model in the list box: its name, with its id beside it when that says more; found by
+/// either.
+#[derive(Clone)]
+pub(super) struct ModelItem {
+    id: SharedString,
+    label: SharedString,
+}
+
+impl SearchableListItem for ModelItem {
+    type Value = SharedString;
+
+    fn title(&self) -> SharedString {
+        self.label.clone()
+    }
+
+    fn render(&self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+        let muted = cx.theme().muted_foreground;
+        let same = self.label.to_lowercase() == self.id.to_lowercase() || self.id.as_ref() == OTHER_MODEL;
+        div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(self.label.clone())
+            .when(!same, |d| d.child(div().text_xs().text_color(muted).truncate().child(self.id.clone())))
+    }
+
+    fn value(&self) -> &SharedString {
+        &self.id
+    }
+
+    fn matches(&self, query: &str) -> bool {
+        let q = query.to_lowercase();
+        self.label.to_lowercase().contains(&q) || self.id.to_lowercase().contains(&q)
+    }
+}
+
+/// The list box's groups: the agent's families in its order (models of none under "Suggested"),
+/// the names typed in before, then "Other model…"; and where `picked` is in them.
+fn model_groups(listed: &[ModelOption], recent: &[String], picked: &str) -> (Vec<SelectGroup<ModelItem>>, Option<IndexPath>) {
+    let mut groups: Vec<SelectGroup<ModelItem>> = Vec::new();
+    for m in listed {
+        let family = if m.family.is_empty() { "Suggested" } else { m.family.as_str() };
+        let item = ModelItem { id: m.id.clone().into(), label: m.label.clone().into() };
+        match groups.iter_mut().find(|g| g.title.as_ref() == family) {
+            Some(g) => g.items.push(item),
+            None => groups.push(SelectGroup::new(family.to_string()).item(item)),
+        }
+    }
+    let typed: Vec<ModelItem> = recent
+        .iter()
+        .filter(|r| !listed.iter().any(|m| &m.id == *r))
+        .map(|r| ModelItem { id: r.clone().into(), label: r.clone().into() })
+        .collect();
+    if !typed.is_empty() {
+        groups.push(SelectGroup::new("Typed before").items(typed));
+    }
+    groups.push(SelectGroup::new("More").item(ModelItem { id: OTHER_MODEL.into(), label: "Other model…".into() }));
+    let selected = groups.iter().enumerate().find_map(|(section, g)| {
+        g.items.iter().position(|i| i.id.as_ref() == picked).map(|row| IndexPath::new(row).section(section))
+    });
+    (groups, selected)
+}
+
 pub(super) fn remember_model(name: &str, cx: &mut App) {
     let settings = cx.global::<crate::AppSettings>().0.clone();
     settings.borrow_mut().remember_model(name);
@@ -857,6 +911,35 @@ pub(super) fn short_model(model: &str) -> String {
 pub(super) fn capitalize(s: &str) -> String {
     let mut c = s.chars();
     c.next().map(|f| f.to_uppercase().collect::<String>() + c.as_str()).unwrap_or_default()
+}
+
+#[cfg(test)]
+mod model_list_tests {
+    use super::*;
+
+    #[::core::prelude::v1::test]
+    fn models_group_by_family_with_typed_names_and_other_last() {
+        let m = |id: &str, family: &str| ModelOption { id: id.into(), label: id.to_uppercase(), family: family.into() };
+        let listed = [m("auto", ""), m("gpt-5", "GPT"), m("grok-4", "Grok"), m("gpt-5-mini", "GPT")];
+        let recent = ["my-model".to_string(), "grok-4".to_string()];
+        let (groups, selected) = model_groups(&listed, &recent, "gpt-5-mini");
+        let shape: Vec<(String, Vec<String>)> =
+            groups.iter().map(|g| (g.title.to_string(), g.items.iter().map(|i| i.id.to_string()).collect())).collect();
+        assert_eq!(
+            shape,
+            [
+                ("Suggested".into(), vec!["auto".into()]),
+                ("GPT".into(), vec!["gpt-5".into(), "gpt-5-mini".into()]),
+                ("Grok".into(), vec!["grok-4".into()]),
+                ("Typed before".into(), vec!["my-model".into()]),
+                ("More".into(), vec![OTHER_MODEL.into()]),
+            ]
+        );
+        assert_eq!(selected, Some(IndexPath::new(1).section(1)));
+        // Found by name or by id.
+        let item = &groups[2].items[0];
+        assert!(item.matches("GROK") && item.matches("grok-4") && !item.matches("gpt"));
+    }
 }
 
 #[cfg(test)]

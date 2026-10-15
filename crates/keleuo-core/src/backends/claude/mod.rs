@@ -82,6 +82,29 @@ impl Backend for ClaudeBackend {
         Box::new(ClaudeCode::new())
     }
 
+    /// Claude Code cannot list its models, so this is Keleuo's own list, kept by hand: the
+    /// aliases (each the latest of its family), then model ids by generation. Any other name
+    /// can still be typed in.
+    fn list_models(&self, _host: &dyn Host) -> Vec<crate::agent::ModelOption> {
+        let m = |id: &str, label: &str, family: &str| crate::agent::ModelOption { id: id.into(), label: label.into(), family: family.into() };
+        vec![
+            m("fable", "Fable (latest)", "Aliases"),
+            m("opus", "Opus (latest)", "Aliases"),
+            m("sonnet", "Sonnet (latest)", "Aliases"),
+            m("haiku", "Haiku (latest)", "Aliases"),
+            m("claude-fable-5-1", "Claude Fable 5.1", "Claude 5"),
+            m("claude-opus-5-5", "Claude Opus 5.5", "Claude 5"),
+            m("claude-sonnet-5-5", "Claude Sonnet 5.5", "Claude 5"),
+            m("claude-haiku-5-5", "Claude Haiku 5.5", "Claude 5"),
+            m("claude-opus-4-8", "Claude Opus 4.8", "Claude 4"),
+            m("claude-opus-4-7", "Claude Opus 4.7", "Claude 4"),
+            m("claude-opus-4-6", "Claude Opus 4.6", "Claude 4"),
+            m("claude-sonnet-4-6", "Claude Sonnet 4.6", "Claude 4"),
+            m("claude-sonnet-4-5", "Claude Sonnet 4.5", "Claude 4"),
+            m("claude-haiku-4-5", "Claude Haiku 4.5", "Claude 4"),
+        ]
+    }
+
     fn skills(&self, host: &dyn Host, project: &Path) -> crate::skills::Catalog {
         skills::discover(host, project, skills::claude_home(host).as_deref()).into_neutral()
     }
