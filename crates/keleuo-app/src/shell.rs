@@ -1314,6 +1314,8 @@ impl Shell {
             Some((theme.warning, "Asking something in the terminal"))
         } else if s.chat.busy || s.waiting_for.is_some() {
             Some((theme.blue, "Working"))
+        } else if s.chat.running_agents().any(|a| a.background) {
+            Some((theme.magenta, "Agents still working in the background"))
         } else if s.unseen && ix != self.active {
             Some((theme.foreground, "Something new"))
         } else {

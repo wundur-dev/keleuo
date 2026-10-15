@@ -854,6 +854,7 @@ impl Render for ChatPanel {
                     )),
             )
             .children(self.render_working_line(cx))
+            .children(self.render_background_agents(cx))
             .children(self.render_asking(cx))
             .child({
                 let slash = self.render_slash(cx);
