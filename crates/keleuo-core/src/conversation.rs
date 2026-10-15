@@ -965,35 +965,61 @@ fn plural(n: usize, word: &str) -> String {
     if n == 1 { format!("1 {word}") } else { format!("{n} {word}s") }
 }
 
-/// How many calls of one tool in a row the chat shows as one group.
-pub const TOOL_RUN: usize = 3;
+/// How many tool calls in a row the chat shows as one group.
+pub const TOOL_RUN: usize = 2;
+
+/// Whether a call can be folded into a group at all: a failed call and an edit with its diff
+/// stay in view (what went wrong, and the work itself).
+pub fn foldable(t: &ToolCall) -> bool {
+    !t.is_error && t.diff.is_none()
+}
 
 /// The run of tool calls item `ix` belongs to, when it is in one: [`TOOL_RUN`] or more
-/// [`Item::Tool`]s in a row with the same name, each one `groupable` (a subagent's card or a
-/// call with a fix to offer stays on its own).
+/// [`Item::Tool`]s in a row, of any tools, each one [`foldable`] and `groupable` (a
+/// subagent's card or a call with a fix to offer stays on its own). The agent's text between
+/// them is what ends a run.
 pub fn tool_run(items: &[Item], ix: usize, groupable: impl Fn(&ToolCall) -> bool) -> Option<std::ops::Range<usize>> {
-    let name = match items.get(ix)? {
-        Item::Tool(t) if groupable(t) => t.name.as_str(),
-        _ => return None,
-    };
-    let member = |i: &Item| matches!(i, Item::Tool(t) if t.name == name && groupable(t));
+    let member = |i: &Item| matches!(i, Item::Tool(t) if foldable(t) && groupable(t));
+    if !member(items.get(ix)?) {
+        return None;
+    }
     let start = items[..ix].iter().rposition(|i| !member(i)).map_or(0, |p| p + 1);
     let end = items[ix..].iter().position(|i| !member(i)).map_or(items.len(), |p| ix + p);
     (end - start >= TOOL_RUN).then_some(start..end)
 }
 
-/// What a group of `n` calls of `tool` is called: "4 commands", "3 files read".
-pub fn tool_run_label(tool: &str, n: usize) -> String {
-    let what = match tool {
-        "Bash" | "Shell" => "commands",
-        "Read" => "files read",
-        "Edit" | "MultiEdit" | "Write" => "edits",
-        "Grep" | "Glob" => "searches",
-        "WebFetch" => "pages fetched",
-        "WebSearch" => "web searches",
-        _ => return format!("{n} {tool} calls"),
-    };
-    format!("{n} {what}")
+/// What a group of calls is called, tool by tool in the order they first ran:
+/// "3 commands, 2 reads, 1 search".
+pub fn tool_run_label<'a>(tools: impl IntoIterator<Item = &'a str>) -> String {
+    let mut counts: Vec<(&'static str, &'static str, String, usize)> = Vec::new();
+    for tool in tools {
+        let (one, many): (&'static str, &'static str) = match tool {
+            "Bash" | "Shell" | "BashOutput" => ("command", "commands"),
+            "Read" => ("read", "reads"),
+            "Edit" | "MultiEdit" | "Write" | "StrReplace" => ("edit", "edits"),
+            "Grep" | "Glob" | "LS" => ("search", "searches"),
+            "WebFetch" => ("fetch", "fetches"),
+            "WebSearch" => ("web search", "web searches"),
+            "TodoWrite" => ("to-do update", "to-do updates"),
+            _ => ("", ""),
+        };
+        // Tools without a word of their own count under their name.
+        let key = if one.is_empty() { tool.to_string() } else { one.to_string() };
+        match counts.iter_mut().find(|c| c.2 == key) {
+            Some(c) => c.3 += 1,
+            None => counts.push((one, many, key, 1)),
+        }
+    }
+    counts
+        .iter()
+        .map(|(one, many, name, n)| match (one.is_empty(), *n) {
+            (false, 1) => format!("1 {one}"),
+            (false, n) => format!("{n} {many}"),
+            (true, 1) => format!("1 {name} call"),
+            (true, n) => format!("{n} {name} calls"),
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 #[cfg(test)]
@@ -1036,28 +1062,35 @@ mod tool_run_tests {
     }
 
     #[test]
-    fn three_or_more_of_one_tool_in_a_row_make_a_group() {
+    fn calls_in_a_row_make_a_group_whatever_the_tool() {
+        let mut failed = tool("x", "Bash");
+        if let Item::Tool(t) = &mut failed {
+            t.is_error = true;
+        }
         let items = vec![
             Item::User("go".into()),
             tool("a", "Bash"),
-            tool("b", "Bash"),
+            tool("b", "Read"),
             tool("c", "Bash"),
-            tool("d", "Read"),
+            Item::Assistant { text: "so".into(), streaming: false },
+            tool("d", "Bash"),
+            failed,
             tool("e", "Bash"),
-            tool("f", "Bash"),
+            tool("f", "Grep"),
         ];
         let all = |_: &ToolCall| true;
         for ix in 1..=3 {
             assert_eq!(tool_run(&items, ix, all), Some(1..4));
         }
-        // A different tool ends the run; two in a row are no group.
-        assert_eq!(tool_run(&items, 4, all), None);
+        // Text ends a run; a failed call stays out and splits it; one alone is no group.
         assert_eq!(tool_run(&items, 5, all), None);
+        assert_eq!(tool_run(&items, 6, all), None);
+        assert_eq!(tool_run(&items, 7, all), Some(7..9));
         assert_eq!(tool_run(&items, 0, all), None);
         // A call that is not groupable splits the run.
         assert_eq!(tool_run(&items, 1, |t: &ToolCall| t.id != "b"), None);
-        assert_eq!(tool_run_label("Bash", 3), "3 commands");
-        assert_eq!(tool_run_label("Frobnicate", 4), "4 Frobnicate calls");
+        assert_eq!(tool_run_label(["Bash", "Read", "Bash", "Grep"]), "2 commands, 1 read, 1 search");
+        assert_eq!(tool_run_label(["Frobnicate", "Frobnicate"]), "2 Frobnicate calls");
     }
 }
 

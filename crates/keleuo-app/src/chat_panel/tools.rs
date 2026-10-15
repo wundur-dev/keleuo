@@ -227,13 +227,13 @@ impl ChatPanel {
         col.into_any_element()
     }
 
-    /// The header of a run of one tool's calls (`run`, items of the chat shown): how many, the
-    /// latest one, whether one runs or failed, and how long they took. A click opens or closes
+    /// The header of a run of tool calls (`run`, items of the chat shown): how many of each,
+    /// the latest one, whether one runs, and how long they took. A click opens or closes
     /// the group (its calls are entries of their own below it).
     pub(super) fn render_tool_group(&self, run: std::ops::Range<usize>, key: String, open: bool, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
-        let (fg, muted, border, card_bg, hover, green, red) =
-            (theme.foreground, theme.muted_foreground, theme.border, theme.secondary, theme.secondary_hover, theme.green, theme.red);
+        let (fg, muted, border, card_bg, hover, green) =
+            (theme.foreground, theme.muted_foreground, theme.border, theme.secondary, theme.secondary_hover, theme.green);
         let tools: Vec<ToolCall> = {
             let chat = &self.session.read(cx).chat;
             let items = match &self.agent {
@@ -249,11 +249,9 @@ impl ChatPanel {
         };
         let Some(latest) = tools.last() else { return div().into_any_element() };
         let running = tools.iter().any(ToolCall::running);
-        let failed = tools.iter().filter(|t| t.is_error).count();
+        // Failed calls stay out of groups (see `foldable`), so a group either runs or is done.
         let status = if running {
             self.spinner(muted).xsmall().into_any_element()
-        } else if failed > 0 {
-            Icon::new(IconName::CircleX).xsmall().text_color(red).into_any_element()
         } else {
             Icon::new(IconName::Check).xsmall().text_color(green).into_any_element()
         };
@@ -282,9 +280,8 @@ impl ChatPanel {
                     .flex_none()
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(fg)
-                    .child(keleuo_core::conversation::tool_run_label(&latest.name, tools.len())),
+                    .child(keleuo_core::conversation::tool_run_label(tools.iter().map(|t| t.name.as_str()))),
             )
-            .when(failed > 0, |d| d.child(div().flex_none().text_color(red).child(format!("{failed} failed"))))
             .child(
                 div()
                     .flex_1()

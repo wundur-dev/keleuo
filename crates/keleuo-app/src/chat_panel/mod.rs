@@ -387,7 +387,7 @@ impl ChatPanel {
             // In view (or about to be): read it.
             self.load_earlier(from, to, cx);
         }
-        // In a run of one tool's calls: the first entry is the group's header, the others show
+        // In a run of tool calls: the first entry is the group's header, the others show
         // only while it is open (closed, they take no room, but the last keeps the bottom gap).
         let mut member = false;
         let mut group = None;
@@ -460,7 +460,7 @@ impl ChatPanel {
             .into_any_element()
     }
 
-    /// The run of one tool's calls item `ix` is in (see [`keleuo_core::conversation::tool_run`]),
+    /// The run of tool calls item `ix` is in (see [`keleuo_core::conversation::tool_run`]),
     /// and the key its open state is kept under.
     fn tool_group(&self, ix: usize, cx: &App) -> Option<(std::ops::Range<usize>, String)> {
         let chat = &self.session.read(cx).chat;
