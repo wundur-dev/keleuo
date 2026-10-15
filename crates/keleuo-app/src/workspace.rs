@@ -14,7 +14,7 @@ use gpui_kit::component::dock::{
     BasePanelView, DockArea, DockAreaState, DockEvent, DockLayout, DockPlacement, DockSkin,
     InsertTarget, PanelBuildContext, PanelId, PanelInfo, PanelStyle, panel_handle, register_panel,
 };
-use gpui_kit::component::{ActiveTheme, Icon, IconName, Placement, Sizable, WindowExt};
+use gpui_kit::component::{ActiveTheme, Placement, WindowExt};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 use keleuo_core::host::Host;
@@ -628,7 +628,8 @@ impl Workspace {
         self.show_panel(PanelId::from(self.changes.entity_id()), window, cx);
     }
 
-    fn show_panel(&mut self, id: PanelId, window: &mut Window, cx: &mut Context<Self>) {
+    /// Show a panel, unfolding the sidebar if it is in there and folded.
+    pub fn show_panel(&mut self, id: PanelId, window: &mut Window, cx: &mut Context<Self>) {
         let left_closed = self
             .dock
             .read(cx)
@@ -1559,57 +1560,19 @@ impl Workspace {
         "ok".into()
     }
 
-    // ----- rendering -----
-
-    /// The thin strip shown when the sidebar dock is folded: one icon per list.
-    fn render_strip(&self, cx: &mut Context<Self>) -> AnyElement {
-        let theme = cx.theme();
-        let (bg, border, muted, hover) = (
-            theme.sidebar,
-            theme.border,
-            theme.muted_foreground,
-            theme.secondary_hover,
-        );
-        let items: [(Icon, &'static str, PanelId); 4] = [
-            (Icon::new(IconName::FolderOpen), "Files", PanelId::from(self.files.entity_id())),
-            (Icon::new(IconName::BookOpen), "Skills", PanelId::from(self.skills.entity_id())),
-            (
-                Icon::new(gpui_kit::assets::IconName::FileDiff),
-                "Changes: what this turn changed",
-                PanelId::from(self.changes.entity_id()),
-            ),
-            (Icon::new(IconName::Bot), "Agent: subagents", PanelId::from(self.agent_side.entity_id())),
-        ];
-        let mut col = div()
-            .w(px(34.))
-            .h_full()
-            .flex_none()
-            .flex()
-            .flex_col()
-            .items_center()
-            .gap_1()
-            .pt_1()
-            .bg(bg)
-            .border_r_1()
-            .border_color(border);
-        for (i, (icon, tip, id)) in items.into_iter().enumerate() {
-            col = col.child(
-                div()
-                    .id(("strip", i))
-                    .size(px(26.))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded_sm()
-                    .hover(|d| d.bg(hover))
-                    .child(icon.small().text_color(muted))
-                    .tooltip(move |window, cx| {
-                        gpui_kit::component::tooltip::Tooltip::new(tip).build(window, cx)
-                    })
-                    .on_click(cx.listener(move |ws, _, window, cx| ws.show_panel(id, window, cx))),
-            );
-        }
-        col.into_any_element()
+    /// The tool panels this session's layout has, by name, for the title bar's Tool panels
+    /// menu: the way to one of them in one step while the sidebar is folded (the icon strip
+    /// that used to stand beside the folded sidebar is gone).
+    pub fn tool_panels(&self, cx: &App) -> Vec<(&'static str, PanelId)> {
+        [
+            ("Files", PanelId::from(self.files.entity_id())),
+            ("Skills", PanelId::from(self.skills.entity_id())),
+            ("Changes", PanelId::from(self.changes.entity_id())),
+            ("Agent", PanelId::from(self.agent_side.entity_id())),
+        ]
+        .into_iter()
+        .filter(|(_, id)| self.in_dock(*id, cx))
+        .collect()
     }
 }
 
@@ -1638,8 +1601,6 @@ impl Render for Workspace {
         if self.host.is_remote() {
             place = format!("{}: {place}", self.host.label());
         }
-        let left_open = self.dock.read(cx).is_dock_open(DockPlacement::Left);
-
         let _ = (muted, place);
 
         div()
@@ -1684,7 +1645,6 @@ impl Render for Workspace {
                     .flex_1()
                     .min_h_0()
                     .flex()
-                    .when(!left_open, |d| d.child(self.render_strip(cx)))
                     .child(div().flex_1().min_w_0().h_full().child(self.dock.clone())),
             )
     }

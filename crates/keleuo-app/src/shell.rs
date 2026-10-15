@@ -1779,6 +1779,23 @@ impl Render for Shell {
             self.name(self.active, cx)
         };
         let has_session = !self.tabs.is_empty() && self.browser.is_none();
+        // The tool panels by name, each opening the sidebar on it: what the icon strip beside
+        // the folded sidebar did.
+        let tools_menu = {
+            let ws = self.active_workspace().map(|w| w.downgrade());
+            let tools = self.active_workspace().map(|w| w.read(cx).tool_panels(cx)).unwrap_or_default();
+            move |mut menu: PopupMenu, _: &mut Window, _: &mut Context<PopupMenu>| {
+                for (name, id) in tools.iter().copied() {
+                    let ws = ws.clone();
+                    menu = menu.item(PopupMenuItem::new(name).on_click(move |_, window, cx| {
+                        if let Some(ws) = ws.as_ref() {
+                            let _ = ws.update(cx, |w, cx| w.show_panel(id, window, cx));
+                        }
+                    }));
+                }
+                menu
+            }
+        };
         // The whole menu (Appearance in it), from a button at the right end, as Chrome has it.
         let menu_button = gpui_kit::component::button::Button::new("t-menu")
             .icon(Icon::new(gpui_kit::assets::IconName::EllipsisVertical))
@@ -1826,8 +1843,9 @@ impl Render for Shell {
                                     .on_click(to_ws(|w, win, cx| w.new_terminal(win, cx))),
                             )
                             .child(
-                                button("t-sidebar", Icon::new(IconName::PanelLeft), "Tool panels (Cmd+B)")
-                                    .on_click(to_ws(|w, win, cx| w.toggle_sidebar_pub(win, cx))),
+                                button("t-sidebar", Icon::new(IconName::PanelLeft), "Tool panels (Cmd+B; right-click for one)")
+                                    .on_click(to_ws(|w, win, cx| w.toggle_sidebar_pub(win, cx)))
+                                    .context_menu(tools_menu),
                             )
                             .child(
                                 button("t-split", Icon::new(IconName::PanelRight), "Split the shown file or terminal (Cmd+\\)")
