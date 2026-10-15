@@ -37,7 +37,42 @@ pub enum Spend {
     /// Dollars (`estimated`: from token counts and published prices).
     Cost { total: f64, turn: Option<f64>, estimated: bool },
     /// How full the context window is after the last turn.
-    Context { percent: u32, tokens: u64, window: u64 },
+    Context { percent: u32, tokens: u64, window: u64, fill: Fill },
+}
+
+/// How close a session's context is to where its agent compacts it by itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Fill {
+    Room,
+    /// From 70% of the way to the compaction point.
+    Filling,
+    /// From 90%: the agent compacts soon.
+    Nearly,
+}
+
+impl Fill {
+    pub fn of(tokens: u64, compacts_at: u64) -> Self {
+        match tokens * 100 / compacts_at.max(1) {
+            90.. => Fill::Nearly,
+            70.. => Fill::Filling,
+            _ => Fill::Room,
+        }
+    }
+}
+
+/// How much of its context a session uses, after the last turn.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ContextUse {
+    pub tokens: u64,
+    pub window: u64,
+    /// Where the agent compacts by itself (a little short of the window).
+    pub compacts_at: u64,
+}
+
+impl ContextUse {
+    pub fn fill(&self) -> Fill {
+        Fill::of(self.tokens, self.compacts_at)
+    }
 }
 
 impl Spend {
@@ -462,10 +497,30 @@ impl AgentSession {
                 estimated: self.chat.cost_estimated,
             });
         }
+        let used = self.context_use()?;
+        let ContextUse { tokens, window, .. } = used;
+        Some(Spend::Context { percent: ((tokens * 100) / window.max(1)) as u32, tokens, window, fill: used.fill() })
+    }
+
+    /// How much of its context the session uses: the window as the agent reported it, else
+    /// as Keleuo knows the model. `None` before a turn has ended, or when the agent says nothing.
+    pub fn context_use(&self) -> Option<ContextUse> {
         let tokens = self.chat.last_turn_tokens?.0;
-        let model = self.chat.model.clone().or_else(|| self.model.clone())?;
-        let window = self.backend.context_window(&model)?;
-        Some(Spend::Context { percent: ((tokens * 100) / window.max(1)) as u32, tokens, window })
+        let window = match self.chat.context_window {
+            Some(w) => w,
+            None => {
+                let model = self.chat.model.clone().or_else(|| self.model.clone())?;
+                self.backend.context_window(&model)?
+            }
+        };
+        (tokens > 0 && window > 0).then(|| ContextUse { tokens, window, compacts_at: self.backend.compacts_at(window) })
+    }
+
+    /// Ask the agent to compact its context now, when it can be asked.
+    pub fn compact(&mut self, cx: &mut Context<Self>) {
+        if let Some(command) = self.backend.compact_command() {
+            self.send(command, cx);
+        }
     }
 
     // ----- questions before the interface is up -----
@@ -1721,4 +1776,20 @@ fn copy_images_to(host: &dyn keleuo_core::host::Host, images: &[PathBuf]) -> Vec
             Some(there)
         })
         .collect()
+}
+
+#[cfg(test)]
+mod fill_tests {
+    use super::Fill;
+
+    /// Measured against where the agent compacts, not the whole window.
+    #[test]
+    fn the_context_turns_amber_then_red_on_the_way_to_compaction() {
+        let at = 167_000; // a 200k window, compacting 33k short of it
+        assert_eq!(Fill::of(100_000, at), Fill::Room);
+        assert_eq!(Fill::of(117_000, at), Fill::Filling);
+        assert_eq!(Fill::of(151_000, at), Fill::Nearly);
+        assert_eq!(Fill::of(190_000, at), Fill::Nearly);
+        assert_eq!(Fill::of(5, 0), Fill::Nearly);
+    }
 }

@@ -59,6 +59,8 @@ pub enum Event {
     /// Images a tool call returned (a Read of an image file), as files in the session's image
     /// folder: shown with the call.
     ToolImages { id: String, images: Vec<PathBuf> },
+    /// The model's context window, in tokens, as the agent reported it.
+    ContextWindow(u64),
     /// The agent asks before doing something.
     Permission { request_id: String, tool: String, summary: String, description: Option<String>, input: Value },
     /// A subagent began (`id` is the tool call that started it).
@@ -486,6 +488,14 @@ pub trait Backend: Send + Sync {
     }
     /// The context window of `model`, in tokens, when known.
     fn context_window(&self, _model: &str) -> Option<u64> {
+        None
+    }
+    /// Where in a `window`-token context the agent compacts by itself, in tokens.
+    fn compacts_at(&self, window: u64) -> u64 {
+        window
+    }
+    /// The message that asks it to compact now, when it has one.
+    fn compact_command(&self) -> Option<&'static str> {
         None
     }
     /// Whether the agent has been told it may work in `project` (its own record), when known.

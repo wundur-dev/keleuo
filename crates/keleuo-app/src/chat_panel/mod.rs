@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use gpui_kit::component::input::{Enter, Escape, IndentInline, MoveDown, MoveUp, InlineToken, TextDecoration, TextDecorationCollection, TextareaMode, InlineTokenContext, Input, InputContent, InputEvent, InputState, Textarea, TextareaState};
 
-use crate::agent_session::{Asking, Spend, View};
+use crate::agent_session::{Asking, Fill, Spend, View};
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::menu::DropdownMenu;
 use crate::sheet_tabs::{self, Joined, Palette, StripState};
@@ -40,7 +40,6 @@ pub enum ChatPanelEvent {
     OpenFile(PathBuf, Option<u32>),
     /// Open the file as a diff of what the session changed in it.
     OpenDiff(PathBuf),
-    NewSession,
     /// The session's tab was closed.
     Closed,
     /// Its tab became the shown one.
@@ -514,7 +513,9 @@ impl ChatPanel {
         }
         // Cost when billed per use (or the setting says so), else how full the context is.
         let setting = cx.global::<crate::AppSettings>().0.borrow().cost_display.clone();
-        let (spend, spend_tip) = match session.spend(cx) {
+        let current = session.spend(cx);
+        let showing_context = matches!(current, Some(Spend::Context { .. }));
+        let (spend, spend_tip) = match current {
             Some(Spend::Cost { total, turn, estimated }) => {
                 // "~": worked out from token counts and published prices.
                 let est = if estimated { "~" } else { "" };
@@ -526,17 +527,26 @@ impl ChatPanel {
                 )
             }
             // How much of the model's context the conversation fills: "180k of 1M context".
-            Some(Spend::Context { percent, tokens, window }) if tokens > 0 && window > 0 => (
+            Some(Spend::Context { tokens, window, fill, .. }) => (
                 Some(format!("{} of {} context", short_tokens(tokens), short_tokens(window))),
-                if percent > 100 {
-                    "The conversation as of the last request, against the model's context window (over 100%: the agent will compact it)"
-                } else {
-                    "The conversation as of the last request, against the model's context window"
+                match fill {
+                    Fill::Room => "The conversation as of the last request, against the model's context window",
+                    Fill::Filling => "The conversation as of the last request, against the model's context window: filling up",
+                    Fill::Nearly => "The conversation as of the last request, against the model's context window: the agent compacts it soon",
                 },
             ),
-            Some(Spend::Context { percent, .. }) => (Some(format!("{percent}% of context")), ""),
             None => (None, ""),
         };
+        // Amber, then red, on the way to where the agent compacts by itself.
+        let used = session.context_use();
+        let fill = used.map(|u| u.fill()).unwrap_or(Fill::Room);
+        let spend_color = match fill {
+            Fill::Filling if showing_context => theme.warning,
+            Fill::Nearly if showing_context => theme.danger,
+            _ => muted,
+        };
+        let compact = session.backend.compact_command().is_some();
+        let offer_compact = compact && fill != Fill::Room;
         let spend_tip = format!(
             "{spend_tip}. Cost shows: {}. Click to change.",
             match setting.as_str() {
@@ -545,8 +555,8 @@ impl ChatPanel {
                 _ => "auto (only when billed per use)",
             }
         );
-        let backend_name = session.backend.name();
         let weak = cx.entity().downgrade();
+        let weak_session = self.session.downgrade();
         // As tall as a tool panel's title bar, a hairline under it.
         div()
             .h(px(crate::dock_skin::HEADER_HEIGHT))
@@ -577,6 +587,7 @@ impl ChatPanel {
                         .rounded_sm()
                         .cursor_pointer()
                         .hover(|d| d.bg(hover))
+                        .text_color(spend_color)
                         .child(spend)
                         .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(spend_tip.clone()).build(w, cx))
                         .on_click(|_, window, cx| {
@@ -593,24 +604,33 @@ impl ChatPanel {
                         }),
                 )
             })
-            .child(
-                div()
-                    .id("new-chat")
-                    .px_1()
-                    .rounded_sm()
-                    .cursor_pointer()
-                    .hover(|d| d.bg(hover))
-                    .flex()
-                    .items_center()
-                    .gap_1()
-                    .child(Icon::new(IconName::Plus).xsmall())
-                    .child("New session")
-                    .tooltip(move |w, cx| {
-                        gpui_kit::component::tooltip::Tooltip::new(format!("New {backend_name} session (Cmd+N)"))
+            // Once the context fills up, compacting is a click away (agents that can be asked).
+            .when(offer_compact, |d| {
+                let session = self.session.downgrade();
+                d.child(
+                    div()
+                        .id("compact")
+                        .flex_none()
+                        .px_2()
+                        .rounded_full()
+                        .border_1()
+                        .border_color(spend_color)
+                        .text_color(spend_color)
+                        .text_size(px(12.))
+                        .cursor_pointer()
+                        .hover(|d| d.bg(hover))
+                        .child("Compact")
+                        .tooltip(|w, cx| {
+                            gpui_kit::component::tooltip::Tooltip::new(
+                                "Summarise the conversation so far to free up context (sends /compact; waits for the turn to end)",
+                            )
                             .build(w, cx)
-                    })
-                    .on_click(cx.listener(|_, _, _, cx| cx.emit(ChatPanelEvent::NewSession))),
-            )
+                        })
+                        .on_click(move |_, _, cx| {
+                            let _ = session.update(cx, |s, cx| s.compact(cx));
+                        }),
+                )
+            })
             .child(
                 Button::new("chat-options")
                     .icon(IconName::Ellipsis)
@@ -619,6 +639,7 @@ impl ChatPanel {
                     .tab_stop(false)
                     .dropdown_menu(move |menu, _, _| {
                         let weak = weak.clone();
+                        let session = weak_session.clone();
                         menu.item(
                             gpui_kit::component::menu::PopupMenuItem::new("Copy conversation (Cmd+Alt+C)").on_click(
                                 move |_, window, cx| {
@@ -626,6 +647,13 @@ impl ChatPanel {
                                 },
                             ),
                         )
+                        .when(compact, |menu| {
+                            menu.item(gpui_kit::component::menu::PopupMenuItem::new("Compact the context").on_click(
+                                move |_, _, cx| {
+                                    let _ = session.update(cx, |s, cx| s.compact(cx));
+                                },
+                            ))
+                        })
                     }),
             )
             .into_any_element()

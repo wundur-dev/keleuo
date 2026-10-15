@@ -25,7 +25,7 @@ use keleuo_core::host::{Host, LocalHost};
 use crate::AppSettings;
 use keleuo_core::settings::SavedSession;
 use crate::actions::*;
-use crate::agent_session::{AgentSession, SessionEvent};
+use crate::agent_session::{AgentSession, Fill, SessionEvent, Spend};
 use crate::attention::{self, Action, Need};
 use crate::browser::{Browser, BrowserEvent, OpenSession};
 use crate::panels::{self, start_tab_rename};
@@ -832,7 +832,6 @@ impl Shell {
         let session = ws.read(cx).session.clone();
         let subs = vec![
             cx.subscribe_in(&ws, window, |shell, ws, ev: &WorkspaceEvent, window, cx| match ev {
-                WorkspaceEvent::NewSession => shell.new_session(window, cx),
                 WorkspaceEvent::AgentEdited(path) => shell.edited(ws.clone(), path.clone(), window, cx),
             }),
             // The row's name, dot, activity and cost follow the session; its conversation id,
@@ -1346,7 +1345,15 @@ impl Shell {
             let summary = (!s.chat.busy && !s.chat.needs_input() && crate::summaries_on(cx))
                 .then(|| s.chat.last_summary().cloned())
                 .flatten();
-            let cost = s.spend(cx).map(|sp| sp.short());
+            // A context filling up shows amber, then red, as in the session's header.
+            let cost = s.spend(cx).map(|sp| {
+                let color = match sp {
+                    Spend::Context { fill: Fill::Filling, .. } => cx.theme().warning,
+                    Spend::Context { fill: Fill::Nearly, .. } => cx.theme().danger,
+                    _ => cx.theme().muted_foreground,
+                };
+                (sp.short(), color)
+            });
             let short_id = s.chat.session_id.clone();
             let dot = self.dot(ix, cx);
             let key = self.key(ix);
@@ -1396,7 +1403,7 @@ impl Shell {
                                     .items_center()
                                     .gap_1()
                                     .child(div().flex_1().min_w_0().truncate().text_sm().text_color(fg).child(title))
-                                    .children(cost.map(|c| div().flex_none().text_size(px(10.5)).text_color(muted).child(c))),
+                                    .children(cost.map(|(c, color)| div().flex_none().text_size(px(10.5)).text_color(color).child(c))),
                             )
                             .child(
                                 div()

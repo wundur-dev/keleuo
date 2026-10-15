@@ -142,8 +142,6 @@ pub fn register_panels(cx: &mut App) {
 }
 
 pub enum WorkspaceEvent {
-    /// Start a new session (pick a folder).
-    NewSession,
     /// This session's Claude wrote or edited a file.
     AgentEdited(PathBuf),
 }
@@ -262,7 +260,6 @@ impl Workspace {
                     ws.open(path.clone(), *line, false, true, window, cx)
                 }
                 ChatPanelEvent::OpenDiff(path) => ws.open_diff(path.clone(), None, window, cx),
-                ChatPanelEvent::NewSession => cx.emit(WorkspaceEvent::NewSession),
                 ChatPanelEvent::OpenAgent(id) => ws.open_agent(id.clone(), window, cx),
                 ChatPanelEvent::OpenWeb(url) => ws.open_web(url.clone(), window, cx),
                 ChatPanelEvent::RunCommand(command) => ws.run_in_terminal(command.clone(), window, cx),
@@ -762,7 +759,6 @@ impl Workspace {
                 ChatPanelEvent::OpenWeb(url) => ws.open_web(url.clone(), window, cx),
                 ChatPanelEvent::RunCommand(command) => ws.run_in_terminal(command.clone(), window, cx),
                 ChatPanelEvent::ShowChanges => ws.show_changes(window, cx),
-                ChatPanelEvent::NewSession => cx.emit(WorkspaceEvent::NewSession),
                 ChatPanelEvent::Activated => ws.touch_code(panel.entity_id()),
                 ChatPanelEvent::Closed => {
                     ws.agent_views.retain(|v| v.entity_id() != panel.entity_id());

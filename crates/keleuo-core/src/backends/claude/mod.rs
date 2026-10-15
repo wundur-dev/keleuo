@@ -298,6 +298,16 @@ impl Backend for ClaudeBackend {
         Some(pricing::context_window(model))
     }
 
+    /// Claude Code keeps room for the summary and the reply: it compacts about 33,000 tokens
+    /// short of the window (its `/context` calls it the autocompact buffer).
+    fn compacts_at(&self, window: u64) -> u64 {
+        window.saturating_sub(33_000).max(window / 2)
+    }
+
+    fn compact_command(&self) -> Option<&'static str> {
+        Some("/compact")
+    }
+
     fn running(&self, host: &dyn Host, own_pid: u32) -> Vec<Running> {
         if host.is_remote() {
             return Vec::new();

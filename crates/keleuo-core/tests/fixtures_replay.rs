@@ -398,3 +398,20 @@ fn the_context_is_the_last_requests_not_the_turns_total() {
     });
     assert_eq!(ended, Some(12_000));
 }
+
+/// The window is the one Claude Code reports in `modelUsage`, not Keleuo's guess from the
+/// model's name; a subagent's smaller model does not shrink it.
+#[test]
+fn the_context_window_is_the_one_claude_code_reports() {
+    let result = r#"{"type":"result","subtype":"success","is_error":false,"duration_ms":1000,"num_turns":1,"result":"done","session_id":"s1","usage":{"input_tokens":4,"output_tokens":7},"modelUsage":{"claude-haiku-4-5":{"inputTokens":10,"contextWindow":200000},"claude-opus-5-5":{"inputTokens":40,"contextWindow":1000000}}}"#;
+    let mut chat = Conversation::default();
+    apply_lines(&mut chat, &mut Mapper::new(""), result);
+    assert_eq!(chat.context_window, Some(1_000_000));
+    assert!(chat.last_turn_tokens.is_some());
+
+    // An older Claude Code without it: nothing reported, Keleuo's guess stands in.
+    let mut chat = Conversation::default();
+    let old = r#"{"type":"result","subtype":"success","is_error":false,"result":"done","session_id":"s1","usage":{"input_tokens":4,"output_tokens":7}}"#;
+    apply_lines(&mut chat, &mut Mapper::new(""), old);
+    assert_eq!(chat.context_window, None);
+}
