@@ -121,6 +121,12 @@ impl Backend for ClaudeBackend {
         skills::discover(host, project, skills::claude_home(host).as_deref()).into_neutral()
     }
 
+    fn skill_folders(&self, host: &dyn Host, project: &Path, scope: crate::skill_install::Scope) -> Vec<PathBuf> {
+        match scope {
+            crate::skill_install::Scope::Project => vec![project.join(".claude/skills")],
+            crate::skill_install::Scope::User => skills::claude_home(host).map(|h| vec![h.join("skills")]).unwrap_or_default(),
+        }
+    }
     fn create_skill(&self, host: &dyn Host, project: &Path, name: &str) -> std::io::Result<PathBuf> {
         skills::create_project_skill(host, project, name)
     }

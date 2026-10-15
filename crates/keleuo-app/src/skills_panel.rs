@@ -6,6 +6,7 @@ use crate::panels::{LIST_TEXT, ROW_HEIGHT};
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use gpui_kit::component::menu::{ContextMenuExt, PopupMenuItem};
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{ActiveTheme, Icon, Sizable};
 use gpui_kit::prelude::*;
@@ -26,6 +27,8 @@ pub struct SkillsPanel {
     backend: Arc<dyn Backend>,
     project: PathBuf,
     catalog: Option<Arc<Catalog>>,
+    /// What Keleuo installed (to say where a skill came from, and to update or remove it).
+    installed: Arc<keleuo_core::skill_install::Record>,
     collapsed: HashSet<String>,
     pub selected: Option<PathBuf>,
     _task: Option<Task<()>>,
@@ -37,6 +40,7 @@ impl SkillsPanel {
     pub fn new(host: Arc<dyn Host>, backend: Arc<dyn Backend>, project: PathBuf, cx: &mut Context<Self>) -> Self {
         let mut this = Self {
             focus: cx.focus_handle(),
+            installed: Arc::new(keleuo_core::skill_install::Record::default()),
             host,
             backend,
             project,
@@ -57,10 +61,13 @@ impl SkillsPanel {
         let project = self.project.clone();
         self._task = Some(
             cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
-                let catalog = cx
-                    .background_spawn(async move { backend.skills(host.as_ref(), &project) })
+                let (catalog, installed) = cx
+                    .background_spawn(async move {
+                        (backend.skills(host.as_ref(), &project), keleuo_core::skill_install::Record::load())
+                    })
                     .await;
                 let _ = this.update(cx, |panel, cx| {
+                    panel.installed = Arc::new(installed);
                     if panel.catalog.is_none() {
                         for g in catalog.groups.iter().filter(|g| g.folded) {
                             panel.collapsed.insert(g.key.clone());
@@ -77,6 +84,57 @@ impl SkillsPanel {
                 });
             }),
         );
+    }
+
+    /// Open the installer for this project (`source`: fetch it at once, to update a skill).
+    pub fn install_from_git(&mut self, source: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+        let me = cx.entity().downgrade();
+        crate::skill_installer::open(
+            self.host.clone(),
+            self.project.clone(),
+            source,
+            move |cx| {
+                let _ = me.update(cx, |p, cx| p.refresh(None, cx));
+            },
+            window,
+            cx,
+        );
+    }
+
+    /// The machine this panel's skills are on, as the install record names it.
+    fn host_name(&self) -> String {
+        if self.host.is_remote() { self.host.label() } else { "local".into() }
+    }
+
+    /// Remove a skill Keleuo installed, once the person says so: every copy it made.
+    fn remove_installed(&mut self, skill: keleuo_core::skill_install::Installed, window: &mut Window, cx: &mut Context<Self>) {
+        let dirs: Vec<String> = skill.copies.iter().map(|c| c.dir.display().to_string()).collect();
+        let edited = keleuo_core::skill_install::edited_copies(self.host.as_ref(), &skill);
+        let mut detail = format!("This deletes:\n{}", dirs.join("\n"));
+        if !edited.is_empty() {
+            detail.push_str("\n\nEdited since it was installed, so your changes go too.");
+        }
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            &format!("Remove the {} skill?", skill.name),
+            Some(&detail),
+            &[PromptButton::Ok("Remove".into()), PromptButton::Cancel("Cancel".into())],
+            cx,
+        );
+        let host = self.host.clone();
+        cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            if answer.await.ok() != Some(0) {
+                return;
+            }
+            let result = cx.background_spawn(async move { keleuo_core::skill_install::remove(host.as_ref(), &skill) }).await;
+            let _ = this.update(cx, |panel, cx| {
+                if let Err(e) = result {
+                    eprintln!("keleuo: could not remove the skill: {e:#}");
+                }
+                panel.refresh(None, cx);
+            });
+        })
+        .detach();
     }
 
     pub fn new_skill(&mut self, cx: &mut Context<Self>) {
@@ -137,9 +195,13 @@ impl SkillsPanel {
                     Kind::Command => format!("/{}", e.name),
                     _ => e.name.clone(),
                 };
-                let description = SharedString::from(e.description.clone());
-                col = col.child(
-                    div()
+                let from = self.installed.holding(&self.host_name(), &e.path).cloned();
+                let description = SharedString::from(match &from {
+                    Some(i) => format!("{}\n\nInstalled from {} on {}", e.description, i.source, i.installed).trim().to_string(),
+                    None => e.description.clone(),
+                });
+                let me = cx.entity().downgrade();
+                let row = div()
                         .id(SharedString::from(e.path.to_string_lossy().to_string()))
                         .h(px(ROW_HEIGHT))
                         .pl(px(18.))
@@ -160,11 +222,39 @@ impl SkillsPanel {
                             panel.selected = Some(entry.path.clone());
                             cx.emit(SkillsEvent::Open(entry.clone()));
                             cx.notify();
-                        })),
-                );
+                        }))
+                        ;
+                // Installed by Keleuo: update it from its source, or remove it.
+                col = col.child(match from {
+                    None => row.into_any_element(),
+                    Some(installed) => row
+                            .context_menu(move |menu, _, _| {
+                                let (a, b) = (me.clone(), me.clone());
+                                let (upd, rem) = (installed.clone(), installed.clone());
+                                let source = update_source(&upd);
+                                menu.item(PopupMenuItem::new(format!("Update from {}…", upd.source)).on_click(move |_, window, cx| {
+                                    let _ = a.update(cx, |p, cx| p.install_from_git(Some(source.clone()), window, cx));
+                                }))
+                                .item(PopupMenuItem::new("Remove…").on_click(move |_, window, cx| {
+                                    let _ = b.update(cx, |p, cx| p.remove_installed(rem.clone(), window, cx));
+                                }))
+                            })
+                            .into_any_element(),
+                });
             }
         }
         col.into_any_element()
+    }
+}
+
+/// What to fetch to update `skill`: its repository and folder (`owner/repo/path` on GitHub).
+fn update_source(skill: &keleuo_core::skill_install::Installed) -> String {
+    match skill.url.strip_prefix("https://github.com/") {
+        Some(repo) => {
+            let repo = repo.trim_end_matches(".git");
+            if skill.path.is_empty() { repo.to_string() } else { format!("{repo}/{}", skill.path) }
+        }
+        None => skill.url.clone(),
     }
 }
 

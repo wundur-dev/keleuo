@@ -81,6 +81,9 @@ impl Backend for CursorBackend {
         skills::discover(host, project)
     }
 
+    fn skill_folders(&self, host: &dyn Host, project: &Path, scope: crate::skill_install::Scope) -> Vec<PathBuf> {
+        skills::folders(host, project, scope)
+    }
     fn create_skill(&self, host: &dyn Host, project: &Path, name: &str) -> std::io::Result<PathBuf> {
         skills::create(host, project, name)
     }

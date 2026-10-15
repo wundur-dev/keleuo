@@ -1117,6 +1117,7 @@ impl Shell {
                 crate::image_view::show(PathBuf::from(arg), cx);
                 "ok".into()
             }
+            "installer" => return Some(crate::skill_installer::test_command(arg, cx)),
             "close-image" => {
                 crate::image_view::close(cx);
                 "ok".into()
@@ -1924,7 +1925,8 @@ impl Render for Shell {
         let folder_rename = self.render_folder_rename(cx);
         // Web pages are native views over the window: they hide while an overlay is open.
         crate::web_panel::set_covered(
-            self.folder_rename.is_some() || (self.folded && self.peek && !self.tabs.is_empty()) || crate::image_view::is_open(cx),
+            self.folder_rename.is_some() || (self.folded && self.peek && !self.tabs.is_empty()) || crate::image_view::is_open(cx)
+                || crate::skill_installer::is_open(cx),
         );
         // The folded list, peeking out over the content until the pointer leaves it.
         let peek = (self.folded && self.peek && !self.tabs.is_empty()).then(|| {
@@ -1951,6 +1953,9 @@ impl Render for Shell {
             .capture_key_down(cx.listener(|_, ev: &KeyDownEvent, _, cx| {
                 if ev.keystroke.key == "escape" && crate::image_view::is_open(cx) {
                     crate::image_view::close(cx);
+                    cx.stop_propagation();
+                } else if ev.keystroke.key == "escape" && crate::skill_installer::is_open(cx) {
+                    crate::skill_installer::close(cx);
                     cx.stop_propagation();
                 }
             }))
@@ -2036,6 +2041,7 @@ impl Render for Shell {
                     .children(peek),
             )
             .children(folder_rename)
+            .children(crate::skill_installer::render(cx))
             .children(crate::image_view::render(cx))
     }
 }

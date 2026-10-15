@@ -1490,6 +1490,11 @@ impl Workspace {
                 };
                 self.show_panel(id, window, cx);
             }
+            "install-skills" => {
+                // Tests: open the skill installer on a source, fetching it.
+                let src = (!arg.is_empty()).then(|| arg.to_string());
+                self.skills.update(cx, |p, cx| p.install_from_git(src, window, cx));
+            }
             "fold" => self.toggle_sidebar(window, cx),
             "reset" => self.reset_layout(window, cx),
             "zoom" => {

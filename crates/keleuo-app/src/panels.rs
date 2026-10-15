@@ -270,6 +270,12 @@ impl Panel for SkillsPanel {
     }
     fn toolbar_buttons(&mut self, _: &mut Window, cx: &mut Context<Self>) -> Option<Vec<Button>> {
         Some(vec![
+            Button::new("install-skills")
+                .ghost()
+                .xsmall()
+                .icon(gpui_kit::assets::IconName::Download)
+                .tooltip("Install skills from git")
+                .on_click(cx.listener(|s, _, window, cx| s.install_from_git(None, window, cx))),
             Button::new("new-skill")
                 .ghost()
                 .xsmall()

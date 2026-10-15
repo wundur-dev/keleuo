@@ -118,6 +118,10 @@ pub trait Host: Send + Sync {
     fn rename(&self, _from: &Path, _to: &Path) -> io::Result<()> {
         Err(io::Error::new(io::ErrorKind::Unsupported, "this host cannot rename"))
     }
+    /// Remove the folder `path` and everything in it.
+    fn remove_dir_all(&self, _path: &Path) -> io::Result<()> {
+        Err(io::Error::new(io::ErrorKind::Unsupported, "this host cannot remove folders"))
+    }
     /// Make `link` a folder that is `target`: a symbolic link, or on Windows a directory
     /// junction (which needs no administrator rights).
     fn link_dir(&self, _target: &Path, _link: &Path) -> io::Result<()> {
@@ -264,6 +268,10 @@ impl Host for LocalHost {
 
     fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
         std::fs::rename(from, to)
+    }
+
+    fn remove_dir_all(&self, path: &Path) -> io::Result<()> {
+        std::fs::remove_dir_all(path)
     }
 
     fn link_dir(&self, target: &Path, link: &Path) -> io::Result<()> {
@@ -534,6 +542,10 @@ impl Host for SshHost {
 
     fn link_dir(&self, target: &Path, link: &Path) -> io::Result<()> {
         self.run(&format!("ln -s {} {}", q(target), q(link)), None).map(|_| ())
+    }
+
+    fn remove_dir_all(&self, path: &Path) -> io::Result<()> {
+        self.run(&format!("rm -rf {}", q(path)), None).map(|_| ())
     }
 
     fn exists(&self, path: &Path) -> bool {

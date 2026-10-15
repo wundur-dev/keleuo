@@ -358,6 +358,11 @@ pub trait Backend: Send + Sync {
     fn skills(&self, _host: &dyn Host, _project: &Path) -> Catalog {
         Catalog::default()
     }
+    /// The folders this agent reads skills from for `scope`, the one a skill is installed into
+    /// first (see [`crate::skill_install`]); empty when it has no skills.
+    fn skill_folders(&self, _host: &dyn Host, _project: &Path, _scope: crate::skill_install::Scope) -> Vec<PathBuf> {
+        Vec::new()
+    }
     /// Create a project skill from a template; returns the file.
     fn create_skill(&self, _host: &dyn Host, _project: &Path, _name: &str) -> std::io::Result<PathBuf> {
         Err(std::io::Error::other("this agent has no skills"))
