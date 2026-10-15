@@ -6,6 +6,7 @@ use gpui_kit::component::setting::{
     NumberFieldOptions, SettingField, SettingGroup, SettingItem, SettingPage, Settings as SettingsView,
 };
 use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_kit::component::{ActiveTheme, IconName, Sizable};
 use gpui_kit::prelude::*;
@@ -256,34 +257,58 @@ fn notifications() -> SettingPage {
 /// The models the summary server offers, as last asked (for the model list).
 #[derive(Default)]
 struct ServerModels {
-    /// The address they were asked of.
-    endpoint: String,
+    /// The address and key they were asked with.
+    asked: (String, String),
     /// `None` while asking.
     answer: Option<Result<Vec<String>, String>>,
 }
 impl Global for ServerModels {}
 
-/// Ask the summary server for its models when its address changed since last asked.
+/// Ask the summary server for its models when its address or key changed since last asked.
 fn refresh_models(cx: &mut Context<SettingsWindow>) {
-    let endpoint = get(cx, |s| s.summaries.endpoint.trim().to_string());
-    if cx.try_global::<ServerModels>().is_some_and(|m| m.endpoint == endpoint) || endpoint.is_empty() {
+    let asked = get(cx, |s| (s.summaries.endpoint.trim().to_string(), s.summaries.api_key.trim().to_string()));
+    if cx.try_global::<ServerModels>().is_some_and(|m| m.asked == asked) || asked.0.is_empty() {
         return;
     }
-    cx.set_global(ServerModels { endpoint: endpoint.clone(), answer: None });
+    cx.set_global(ServerModels { asked: asked.clone(), answer: None });
     cx.spawn(async move |_, cx: &mut AsyncApp| {
-        let asked = endpoint.clone();
+        let (endpoint, key) = asked.clone();
         let answer = cx
             .background_executor()
-            .spawn(async move { keleuo_core::summary::models(&asked).map_err(|e| format!("{e:#}")) })
+            .spawn(async move { keleuo_core::summary::models(&endpoint, &key).map_err(|e| format!("{e:#}")) })
             .await;
         cx.update(|cx| {
-            if cx.global::<ServerModels>().endpoint == endpoint {
-                cx.set_global(ServerModels { endpoint, answer: Some(answer) });
+            if cx.global::<ServerModels>().asked == asked {
+                cx.set_global(ServerModels { asked, answer: Some(answer) });
                 cx.refresh_windows();
             }
         });
     })
     .detach();
+}
+
+/// The server's key: masked, with a button to show it.
+struct KeyField {
+    input: Entity<InputState>,
+    _changed: Subscription,
+}
+
+fn api_key_field() -> SettingField<SharedString> {
+    SettingField::render(|_, window: &mut Window, cx: &mut App| {
+        let field = window.use_keyed_state("summary-api-key", cx, |window, cx| {
+            let key = get(cx, |s| s.summaries.api_key.clone());
+            let input = cx.new(|cx| InputState::new(window, cx).masked(true).placeholder("None").default_value(key));
+            let _changed = cx.subscribe(&input, |_, input, ev: &InputEvent, cx| {
+                if let InputEvent::Change = ev {
+                    let key = input.read(cx).value().trim().to_string();
+                    change(cx, |s| s.summaries.api_key = key);
+                }
+            });
+            KeyField { input, _changed }
+        });
+        let input = field.read(cx).input.clone();
+        div().w(px(240.)).child(Input::new(&input).mask_toggle())
+    })
 }
 
 /// Open the summary prompt in the window's editor (the shown session's, when it is on this
@@ -300,7 +325,8 @@ fn edit_prompt(cx: &mut App) {
                 let ws = shell.upgrade().and_then(|s| s.read(cx).active_workspace());
                 match ws {
                     Some(w) if !w.read(cx).host().is_remote() => {
-                        w.update(cx, |w, cx| w.open(path.clone(), None, false, true, window, cx));
+                        // At a line: Markdown opens in the editor rather than rendered.
+                        w.update(cx, |w, cx| w.open(path.clone(), Some(1), false, true, window, cx));
                         window.activate_window();
                         true
                     }
@@ -341,6 +367,8 @@ fn summaries() -> SettingPage {
                     .default_value("http://localhost:1234"),
                 )
                 .description("Its address, such as http://192.168.1.20:1234 (LM Studio) or http://localhost:11434 (Ollama)."),
+                SettingItem::new("Key", api_key_field())
+                    .description("For servers that want one (sent as a bearer token). Kept in Keleuo's settings file."),
                 SettingItem::new(
                     "Model",
                     SettingField::render(|_, _, cx: &mut App| {

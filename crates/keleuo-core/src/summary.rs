@@ -35,6 +35,8 @@ pub struct Config {
     pub endpoint: String,
     /// The model's id on that server.
     pub model: String,
+    /// A key for servers that want one, sent as a bearer token; empty for none.
+    pub api_key: String,
     /// Send the paths of the files the turn changed.
     pub include_files: bool,
     /// Send one line per tool call (its name and what it was about, never its output).
@@ -49,6 +51,7 @@ impl Default for Config {
             enabled: false,
             endpoint: "http://localhost:1234".into(),
             model: String::new(),
+            api_key: String::new(),
             include_files: true,
             include_tools: false,
             thinking: false,
@@ -159,12 +162,13 @@ impl TurnText {
 
     /// The message for the model.
     fn prompt(&self) -> String {
-        let mut out = format!("The person asked:\n{}\n\nThe agent said:\n{}\n", self.ask, self.replies);
+        let list = |lines: &[String]| lines.iter().map(|l| format!("- `{l}`")).collect::<Vec<_>>().join("\n");
+        let mut out = format!("## The person asked\n\n{}\n\n## The agent said\n\n{}\n", self.ask, self.replies);
         if !self.files.is_empty() {
-            out.push_str(&format!("\nFiles changed in this turn:\n{}\n", self.files.join("\n")));
+            out.push_str(&format!("\n## Files changed in this turn\n\n{}\n", list(&self.files)));
         }
         if !self.tools.is_empty() {
-            out.push_str(&format!("\nTools the agent used:\n{}\n", self.tools.join("\n")));
+            out.push_str(&format!("\n## Tools the agent used\n\n{}\n", list(&self.tools)));
         }
         out
     }
@@ -192,16 +196,48 @@ fn said(chat: &Conversation, from: usize) -> Option<(String, String, Vec<String>
 }
 
 /// The instructions the model gets, unless the person changed them (see [`prompt_file`]).
-pub const DEFAULT_PROMPT: &str = "You summarise one turn of a coding agent's work for the person who asked for it, so they can see at a glance what happened. Answer with JSON matching the schema, nothing else.
+pub const DEFAULT_PROMPT: &str = r#"# Summarise a coding agent's turn
 
-- status: \"done\" when the request was carried out; \"needs_you\" when the agent asks a question, offers a choice, or waits for the person to do something; \"failed\" when it could not do it; \"partial\" when some of it is done and some is not.
-- headline: what happened, in at most 12 words. Plain words, no file paths, no final period.
-- changed: what changed, as the person would describe it (the behaviour, not the file names), at most 5 items. Empty when nothing changed.
-- checked: how the work was verified (tests, builds, running it), only when the agent says so. Empty otherwise.
-- needs_you: questions, decisions and actions waiting on the person (a restart to run, something to push, a question to answer). Empty when none.
+You summarise **one turn** of a coding agent's work for the person who asked for it, so they can
+see at a glance what happened without reading the whole reply.
 
-Each item is at most 15 words. Use only what the text says; never invent results.
-";
+Answer with **JSON only**, matching the schema. No prose before or after it.
+
+## Fields
+
+- **`status`**, one of:
+  - `done`: the request was carried out.
+  - `needs_you`: the agent asks a question, offers a choice, or waits for the person to do
+    something.
+  - `failed`: it could not do what was asked.
+  - `partial`: some of it is done and some is not.
+- **`headline`**: what happened, in at most 12 words. Plain words, no file paths, no final
+  period.
+- **`changed`**: what changed, as the person would describe it: the behaviour, not the file
+  names. At most 5 items. Empty when nothing changed.
+- **`checked`**: how the work was verified (tests, builds, running it), only when the agent
+  says so. Empty otherwise.
+- **`needs_you`**: questions, decisions and actions waiting on the person: a restart to run,
+  something to push, a question to answer. Empty when none.
+
+## Rules
+
+1. Each item is **at most 15 words**.
+2. Use only what the text says. **Never invent** results, checks or changes.
+3. Prefer the agent's final words: the end of a turn says what was finished and what is left.
+
+## Example
+
+```json
+{
+  "status": "needs_you",
+  "headline": "Fixed the missing Skills tab in restored layouts",
+  "changed": ["Restored layouts get the Skills tab when the agent has skills"],
+  "checked": ["Tests and clippy pass", "Release build done"],
+  "needs_you": ["Restart onto the new build", "Push the branch"]
+}
+```
+"#;
 
 /// The person's own instructions for the model, a Markdown file in Keleuo's settings folder;
 /// [`DEFAULT_PROMPT`] while there is none. The summary's fields stay as they are whatever it
@@ -317,7 +353,7 @@ pub fn summarize(config: &Config, turn: &TurnText) -> Result<TurnSummary> {
     let agent = agent(Duration::from_secs(if config.thinking { 300 } else { 120 }));
     let instructions = prompt();
     let send = |structured: bool| -> Result<Value> {
-        let mut res = agent.post(&url).send_json(request(config, turn, &instructions, structured))?;
+        let mut res = with_key(agent.post(&url), &config.api_key).send_json(request(config, turn, &instructions, structured))?;
         Ok(res.body_mut().read_json::<Value>()?)
     };
     let response = match send(true) {
@@ -329,10 +365,18 @@ pub fn summarize(config: &Config, turn: &TurnText) -> Result<TurnSummary> {
     parse(&response)
 }
 
+/// A request with the server's key, when there is one.
+fn with_key<B>(req: ureq::RequestBuilder<B>, key: &str) -> ureq::RequestBuilder<B> {
+    match key.trim() {
+        "" => req,
+        key => req.header("Authorization", format!("Bearer {key}")),
+    }
+}
+
 /// The models the server offers (blocking).
-pub fn models(endpoint: &str) -> Result<Vec<String>> {
+pub fn models(endpoint: &str, api_key: &str) -> Result<Vec<String>> {
     let url = format!("{}/models", base(endpoint));
-    let v: Value = agent(Duration::from_secs(5)).get(&url).call()?.body_mut().read_json()?;
+    let v: Value = with_key(agent(Duration::from_secs(5)).get(&url), api_key).call()?.body_mut().read_json()?;
     let mut ids: Vec<String> = v["data"]
         .as_array()
         .map(|a| a.iter().filter_map(|m| m["id"].as_str().map(str::to_string)).collect())
@@ -421,7 +465,7 @@ mod tests {
         assert_eq!(t.replies, long.trim());
         assert_eq!(t.key(), TurnText::of(&chat, chat.turn_start(), &config).unwrap().key());
         let prompt = t.prompt();
-        assert!(prompt.contains("The person asked:\nexplain") && !prompt.contains("Tools the agent used"));
+        assert!(prompt.contains("## The person asked\n\nexplain") && !prompt.contains("Tools the agent used"));
     }
 
     #[test]
@@ -463,12 +507,12 @@ mod tests {
             model: std::env::var("KELEUO_SUMMARY_MODEL").unwrap(),
             ..Config::default()
         };
-        println!("models: {:?}", models(&config.endpoint).unwrap());
+        println!("models: {:?}", models(&config.endpoint, &config.api_key).unwrap());
         let turn = TurnText {
-            ask: "why is the skills tab missing again?".into(),
-            replies: "The saved layout for this folder has no Skills panel, and restoring it skips the default layout. The fix is in workspace.rs: a restored layout now gets the Skills tab when the agent has skills. Tests and clippy pass and the release build is done. Committed on cursor-skills; I haven't pushed it. I haven't run it in the app yet, so the restart is the first real check.".into(),
+            ask: "calc.py has a bug in add. Fix it and check it.".into(),
+            replies: "add was subtracting: return a - b. I changed it to return a + b and ran python3 -c 'from calc import add; print(add(2,3))', which printed 5. I didn't commit it. Do you also want a divide function?".into(),
             tools: Vec::new(),
-            files: vec!["crates/keleuo-app/src/workspace.rs".into()],
+            files: vec!["calc.py".into()],
         };
         let t = std::time::Instant::now();
         let s = summarize(&config, &turn).unwrap();
