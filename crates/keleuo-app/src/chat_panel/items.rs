@@ -625,7 +625,10 @@ impl ChatPanel {
                 // and the message reads as the head of its turn).
                 Item::User(text) => {
                     let copy = paste::without_markers(text);
-                    let mark = key.strip_prefix("main").and_then(|n| n.parse().ok()).and_then(|n| self.delivery_mark(n, cx));
+                    let bubble = match key.strip_prefix("main").and_then(|n| n.parse().ok()) {
+                        Some(n) => self.delivery_tint(n, user_bg, cx),
+                        None => user_bg,
+                    };
                     let group = SharedString::from(format!("user-{key}-{ix}"));
                     div()
                         .group(group.clone())
@@ -641,13 +644,11 @@ impl ChatPanel {
                                 .px_3()
                                 .py_2()
                                 .rounded(px(18.))
-                                .bg(user_bg)
+                                .bg(bubble)
                                 .text_sm()
                                 .line_height(rems(1.45))
                                 .text_color(fg)
-                                .child(self.render_user_text(&format!("{key}-{ix}"), text, cx))
-                                // Small, in the corner, under the words.
-                                .children(mark.map(|m| div().flex().justify_end().mr(px(-6.)).mb(px(-4.)).child(m))),
+                                .child(self.render_user_text(&format!("{key}-{ix}"), text, cx)),
                         )
                         .into_any_element()
                 }
@@ -715,31 +716,23 @@ impl ChatPanel {
         out
     }
 
-    /// In the corner of the person's last message, small: a check once the agent has it (it
-    /// echoed it, its prompt hook ran, or it began working), a cross if it failed first.
-    /// Nothing while it is on its way.
-    pub(super) fn delivery_mark(&self, ix: usize, cx: &App) -> Option<AnyElement> {
+    /// The person's last message's colour, once the agent has it: its grey turned faintly
+    /// green (it echoed it, its prompt hook ran, or it began working), faintly red if it
+    /// failed first; plain grey while it is on its way, and for every earlier message.
+    pub(super) fn delivery_tint(&self, ix: usize, grey: Hsla, cx: &App) -> Hsla {
         if self.agent.is_some() {
-            return None;
+            return grey;
         }
         let chat = &self.session.read(cx).chat;
         if chat.turn_start() != ix {
-            return None;
+            return grey;
         }
         let theme = cx.theme();
-        let (icon, color, tip) = match chat.delivery? {
-            Delivery::Sending => return None,
-            Delivery::Seen => (IconName::Check, theme.success, "The agent has this message"),
-            Delivery::Failed => (IconName::CircleX, theme.danger, "Not delivered: the agent stopped before it took this message"),
-        };
-        Some(
-            div()
-                .id(("delivery", ix))
-                .flex_none()
-                .child(Icon::new(icon).xsmall().text_color(color.opacity(0.8)))
-                .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(tip).build(w, cx))
-                .into_any_element(),
-        )
+        match chat.delivery {
+            Some(Delivery::Seen) => crate::sheet_tabs::mix(grey, theme.success, 0.12),
+            Some(Delivery::Failed) => crate::sheet_tabs::mix(grey, theme.danger, 0.12),
+            _ => grey,
+        }
     }
 
     /// What the working line says ("Thinking · 12s", or the tool running), or `None` when it
