@@ -168,12 +168,15 @@ impl ChatPanel {
             }
             summary::State::Ready(s) => s,
         };
+        let amber = theme.yellow;
         let tone = match s.status {
             summary::Status::Done => theme.green,
-            summary::Status::NeedsYou => theme.yellow,
-            summary::Status::Failed => theme.red,
             summary::Status::Partial => theme.blue,
+            summary::Status::Failed => theme.red,
+            summary::Status::Waiting => amber,
         };
+        let (green, red, hover) = (theme.green, theme.red, theme.secondary_hover);
+        let panel = cx.entity().downgrade();
         let mut card = card.child(
             div()
                 .flex()
@@ -201,28 +204,100 @@ impl ChatPanel {
                         .child(s.headline.clone()),
                 ),
         );
-        for (title, list) in [("Changed", &s.changed), ("Checked", &s.checked), ("Needs you", &s.needs_you)] {
-            if list.is_empty() {
-                continue;
-            }
-            let mut items = div().flex_1().min_w_0().flex().flex_col().gap(px(3.));
-            for line in list {
-                items = items.child(
+        // A section: its title in the left column, its rows beside it.
+        let section = |title: &'static str, color: Hsla, rows: Vec<AnyElement>| {
+            div()
+                .flex()
+                .gap_3()
+                .child(div().flex_none().w(px(76.)).text_size(px(13.)).text_color(color).child(title))
+                .child(div().flex_1().min_w_0().flex().flex_col().gap(px(3.)).children(rows))
+        };
+        // A row that came from a piece of the reply: a click shows that piece in the chat.
+        let row = |id: String, mark: AnyElement, text: String, source: Option<&summary::Source>| {
+            let target = source.map(|s| s.text.clone());
+            div()
+                .id(SharedString::from(id))
+                .flex()
+                .gap_2()
+                .px_1()
+                .mx(px(-4.))
+                .rounded(px(4.))
+                .text_color(fg)
+                .child(div().flex_none().w(px(14.)).flex().justify_center().child(mark))
+                .child(div().flex_1().min_w_0().child(text))
+                .when_some(target, |d, target| {
+                    let panel = panel.clone();
+                    d.cursor_pointer().hover(|d| d.bg(hover)).on_click(move |_, _, cx| {
+                        let _ = panel.update(cx, |p, cx| p.reveal_text(&target, cx));
+                    })
+                })
+        };
+        let bullet = || div().text_color(muted).child("•").into_any_element();
+        let key = s.headline.len();
+        if !s.changed.is_empty() {
+            let rows = s.changed.iter().enumerate().map(|(n, c)| row(format!("sum-ch-{key}-{n}"), bullet(), c.clone(), None).into_any_element()).collect();
+            card = card.child(section("Changed", muted, rows));
+        }
+        if !s.checked.is_empty() {
+            let rows = s
+                .checked
+                .iter()
+                .enumerate()
+                .map(|(n, c)| {
+                    let mark = match c.outcome {
+                        summary::Outcome::Passed => Icon::new(IconName::Check).xsmall().text_color(green).into_any_element(),
+                        summary::Outcome::Failed => Icon::new(IconName::CircleX).xsmall().text_color(red).into_any_element(),
+                        summary::Outcome::NotRun => Icon::new(IconName::Minus).xsmall().text_color(muted).into_any_element(),
+                        summary::Outcome::Unknown => div().text_color(muted).child("?").into_any_element(),
+                    };
+                    let what = match c.outcome {
+                        summary::Outcome::NotRun => format!("{} · not run", c.what),
+                        summary::Outcome::Unknown => format!("{} · result not given", c.what),
+                        _ => c.what.clone(),
+                    };
+                    row(format!("sum-chk-{key}-{n}"), mark, what, c.source.as_ref()).into_any_element()
+                })
+                .collect();
+            card = card.child(section("Checked", muted, rows));
+        }
+        if !s.needs_you.is_empty() {
+            let rows = s
+                .needs_you
+                .iter()
+                .enumerate()
+                .map(|(n, t)| {
+                    let dot = div().mt(px(7.)).size(px(6.)).rounded_full().bg(amber).into_any_element();
+                    let command = t.source.as_ref().and_then(|s| s.command.clone());
                     div()
                         .flex()
-                        .gap_2()
-                        .text_color(fg)
-                        .child(div().flex_none().text_color(muted).child("•"))
-                        .child(div().flex_1().min_w_0().child(line.clone())),
-                );
-            }
-            card = card.child(
-                div()
-                    .flex()
-                    .gap_3()
-                    .child(div().flex_none().w(px(76.)).text_size(px(13.)).text_color(muted).child(title))
-                    .child(items),
-            );
+                        .flex_col()
+                        .gap(px(3.))
+                        .child(row(format!("sum-todo-{key}-{n}"), dot, t.text.clone(), t.source.as_ref()))
+                        // The agent's own command for it, to run from here: shown as it runs.
+                        .when_some(command, |d, command| {
+                            d.child(
+                                div()
+                                    .ml(px(22.))
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .truncate()
+                                            .font_family(MONO)
+                                            .text_size(px(12.))
+                                            .text_color(muted)
+                                            .child(command.clone()),
+                                    )
+                                    .child(run_pill(SharedString::from(format!("sum-run-{key}-{n}")), command, panel.clone(), cx)),
+                            )
+                        })
+                        .into_any_element()
+                })
+                .collect();
+            card = card.child(section("Needs you", amber, rows));
         }
         card.into_any_element()
     }
@@ -422,11 +497,7 @@ impl ChatPanel {
                 let code = block.code();
                 let lang = block.lang().unwrap_or_else(|| "code".into());
                 let muted = cx.theme().muted_foreground;
-                let theme = cx.theme();
-                let (go, go_hover, go_active) = (theme.success, theme.success_hover, theme.success_active);
-                // The dark theme's green is light: dark text on it reads, its own green does not.
-                let go_fg = if theme.is_dark() { theme.background } else { theme.success_foreground };
-                let command = shell_command(&code);
+                let command = keleuo_core::conversation::shell_command(&code);
                 let panel = panel.clone();
                 div()
                     .flex()
@@ -435,34 +506,7 @@ impl ChatPanel {
                     .text_size(px(11.))
                     .text_color(muted)
                     .child(lang)
-                    .when_some(command, |d, command| {
-                        // A green pill, so it reads as a button at a glance: brighter under the
-                        // pointer, darker while pressed.
-                        d.child(
-                            div()
-                                .id("run-code")
-                                .h(px(20.))
-                                .px(px(8.))
-                                .flex()
-                                .items_center()
-                                .gap(px(4.))
-                                .rounded(px(10.))
-                                .bg(go)
-                                .text_color(go_fg)
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .shadow_xs()
-                                .cursor_pointer()
-                                .hover(|d| d.bg(go_hover).shadow_sm())
-                                .active(|d| d.bg(go_active))
-                                .child(Icon::new(gpui_kit::assets::IconName::Play).xsmall().text_color(go_fg))
-                                .child("Run")
-                                .tooltip(|w, cx| gpui_kit::component::tooltip::Tooltip::new("Run it in a terminal in this folder").build(w, cx))
-                                .on_click(move |_, _, cx| {
-                                    let text = command.clone();
-                                    let _ = panel.update(cx, |_, cx| cx.emit(ChatPanelEvent::RunCommand(text)));
-                                }),
-                        )
-                    })
+                    .when_some(command, |d, command| d.child(run_pill("run-code", command, panel.clone(), cx)))
                     .child(
                         Button::new("copy-code")
                             .xsmall()
@@ -764,25 +808,35 @@ pub(super) fn hover_actions(group: SharedString, key: String, text: String, mute
         )
 }
 
-/// A code block that is one shell command written as for the agent's shell (`! git push`): the
-/// command, without the `!`.
-pub(super) fn shell_command(code: &str) -> Option<String> {
-    let mut lines = code.lines().map(str::trim).filter(|l| !l.is_empty());
-    let first = lines.next()?;
-    let command = first.strip_prefix('!')?.trim();
-    (lines.next().is_none() && !command.is_empty()).then(|| command.to_string())
-}
-
-#[cfg(test)]
-mod shell_command_tests {
-    use super::shell_command;
-
-    #[test]
-    fn one_bang_line_is_a_command() {
-        assert_eq!(shell_command("! git push -u origin main\n").as_deref(), Some("git push -u origin main"));
-        assert_eq!(shell_command("!ls").as_deref(), Some("ls"));
-        assert_eq!(shell_command("ls -la"), None);
-        assert_eq!(shell_command("! a\n! b"), None, "several commands: copy them instead");
-        assert_eq!(shell_command("!"), None);
-    }
+/// A green Run pill, so it reads as a button at a glance (brighter under the pointer, darker
+/// while pressed): runs `command` in a terminal tab of the session's folder.
+pub(super) fn run_pill(id: impl Into<ElementId>, command: String, panel: WeakEntity<ChatPanel>, cx: &App) -> Stateful<Div> {
+    let theme = cx.theme();
+    let (go, go_hover, go_active) = (theme.success, theme.success_hover, theme.success_active);
+    // The dark theme's green is light: dark text on it reads, its own green does not.
+    let go_fg = if theme.is_dark() { theme.background } else { theme.success_foreground };
+    div()
+        .id(id)
+        .flex_none()
+        .h(px(20.))
+        .px(px(8.))
+        .flex()
+        .items_center()
+        .gap(px(4.))
+        .rounded(px(10.))
+        .bg(go)
+        .text_size(px(11.))
+        .text_color(go_fg)
+        .font_weight(FontWeight::SEMIBOLD)
+        .shadow_xs()
+        .cursor_pointer()
+        .hover(|d| d.bg(go_hover).shadow_sm())
+        .active(|d| d.bg(go_active))
+        .child(Icon::new(gpui_kit::assets::IconName::Play).xsmall().text_color(go_fg))
+        .child("Run")
+        .tooltip(|w, cx| gpui_kit::component::tooltip::Tooltip::new("Run it in a terminal in this folder").build(w, cx))
+        .on_click(move |_, _, cx| {
+            let text = command.clone();
+            let _ = panel.update(cx, |_, cx| cx.emit(ChatPanelEvent::RunCommand(text)));
+        })
 }

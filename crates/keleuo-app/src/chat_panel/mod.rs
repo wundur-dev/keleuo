@@ -479,6 +479,20 @@ impl ChatPanel {
         Some((run, key))
     }
 
+    /// Scroll to the reply that holds `text` (the latest one, in the list shown).
+    pub(super) fn reveal_text(&mut self, text: &str, cx: &mut Context<Self>) {
+        let chat = &self.session.read(cx).chat;
+        let items = match &self.agent {
+            Some(id) => chat.agent(id).map(|a| a.items.as_slice()).unwrap_or_default(),
+            None => chat.items.as_slice(),
+        };
+        let found = items.iter().rposition(|i| matches!(i, Item::Assistant { text: t, .. } if t.contains(text)));
+        if let Some(ix) = found {
+            self.list.scroll_to(ListOffset { item_ix: ix, offset_in_item: px(0.) });
+            cx.notify();
+        }
+    }
+
     pub fn focus_input(&self, window: &mut Window, cx: &mut App) {
         self.input.update(cx, |s, cx| s.focus(window, cx));
     }

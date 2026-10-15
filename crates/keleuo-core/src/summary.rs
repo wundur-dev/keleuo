@@ -66,23 +66,96 @@ impl Config {
     }
 }
 
-/// How the turn ended.
+/// How the work went (whether something waits on the person is apart: [`TurnSummary::needs_you`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Status {
     Done,
-    NeedsYou,
-    Failed,
     Partial,
+    Failed,
+    /// The agent stopped on a question and cannot go on without an answer (also read from
+    /// summaries kept before there was a list of what needs the person).
+    #[serde(alias = "needs_you")]
+    Waiting,
 }
 
 impl Status {
     pub fn label(self) -> &'static str {
         match self {
             Status::Done => "Done",
-            Status::NeedsYou => "Needs you",
-            Status::Failed => "Failed",
             Status::Partial => "Partly done",
+            Status::Failed => "Failed",
+            Status::Waiting => "Waiting on you",
+        }
+    }
+}
+
+/// How a check came out.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Outcome {
+    Passed,
+    Failed,
+    NotRun,
+    /// The agent did not say.
+    Unknown,
+}
+
+/// Where in the agent's reply an item comes from: the piece's text (to find it in the chat)
+/// and, for a `!` command block, the command (to run it).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Source {
+    pub text: String,
+    #[serde(default)]
+    pub command: Option<String>,
+}
+
+/// How the work was checked, and how that came out.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(from = "CheckIn")]
+pub struct Check {
+    pub what: String,
+    pub outcome: Outcome,
+    pub source: Option<Source>,
+}
+
+/// Something waiting on the person.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(from = "TodoIn")]
+pub struct Todo {
+    pub text: String,
+    pub source: Option<Source>,
+}
+
+/// A check as kept: in full, or a plain line (kept before checks had outcomes).
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum CheckIn {
+    Full { what: String, outcome: Outcome, #[serde(default)] source: Option<Source> },
+    Plain(String),
+}
+
+impl From<CheckIn> for Check {
+    fn from(c: CheckIn) -> Self {
+        match c {
+            CheckIn::Full { what, outcome, source } => Check { what, outcome, source },
+            CheckIn::Plain(what) => Check { what, outcome: Outcome::Unknown, source: None },
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum TodoIn {
+    Full { text: String, #[serde(default)] source: Option<Source> },
+    Plain(String),
+}
+
+impl From<TodoIn> for Todo {
+    fn from(t: TodoIn) -> Self {
+        match t {
+            TodoIn::Full { text, source } => Todo { text, source },
+            TodoIn::Plain(text) => Todo { text, source: None },
         }
     }
 }
@@ -95,9 +168,9 @@ pub struct TurnSummary {
     #[serde(default)]
     pub changed: Vec<String>,
     #[serde(default)]
-    pub checked: Vec<String>,
+    pub checked: Vec<Check>,
     #[serde(default)]
-    pub needs_you: Vec<String>,
+    pub needs_you: Vec<Todo>,
 }
 
 /// A turn's summary in the chat, as it comes.
@@ -113,8 +186,10 @@ pub enum State {
 pub struct TurnText {
     /// The person's message.
     pub ask: String,
-    /// Everything the agent said, in order.
+    /// Everything the agent said, in order (the cache key is made of it).
     pub replies: String,
+    /// The same, in tagged pieces, as the model gets it (see [`pieces`]).
+    pub pieces: Vec<Piece>,
     /// One line per tool call, when asked for.
     pub tools: Vec<String>,
     /// The changed files' paths (relative to the project), when asked for.
@@ -126,6 +201,7 @@ impl TurnText {
     /// it needs no summary: nothing said, or a short answer with no tool calls.
     pub fn of(chat: &Conversation, from: usize, config: &Config) -> Option<TurnText> {
         let (ask, replies, tools) = said(chat, from)?;
+        let pieces = pieces(&replies);
         if replies.is_empty() || (tools.is_empty() && replies.chars().count() < SHORT_REPLY) {
             return None;
         }
@@ -140,7 +216,7 @@ impl TurnText {
             Vec::new()
         };
         let tools = if config.include_tools { tools.into_iter().map(|t| cut(&t, 120)).take(MAX_LINES).collect() } else { Vec::new() };
-        Some(TurnText { ask, replies, tools, files })
+        Some(TurnText { ask, replies, pieces, tools, files })
     }
 
     /// The key of the turn starting at `from` (see [`Self::key`]), whatever was sent with it.
@@ -163,7 +239,8 @@ impl TurnText {
     /// The message for the model.
     fn prompt(&self) -> String {
         let list = |lines: &[String]| lines.iter().map(|l| format!("- `{l}`")).collect::<Vec<_>>().join("\n");
-        let mut out = format!("## The person asked\n\n{}\n\n## The agent said\n\n{}\n", self.ask, self.replies);
+        let said: Vec<String> = self.pieces.iter().map(|p| format!("[{}] {}", p.tag, p.text)).collect();
+        let mut out = format!("## The person asked\n\n{}\n\n## The agent said\n\n{}\n", self.ask, said.join("\n\n"));
         if !self.files.is_empty() {
             out.push_str(&format!("\n## Files changed in this turn\n\n{}\n", list(&self.files)));
         }
@@ -195,6 +272,92 @@ fn said(chat: &Conversation, from: usize) -> Option<(String, String, Vec<String>
     Some((head(&ask, MAX_ASK), tail(&replies.join("\n\n"), MAX_REPLIES), tools))
 }
 
+/// A piece of what the agent said, tagged so the model can point at it: `P3` a paragraph or
+/// list item, `C1` a `!` command block (only those can be run from the summary).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Piece {
+    pub tag: String,
+    pub text: String,
+    pub command: Option<String>,
+}
+
+/// Cut `replies` into pieces: paragraphs, list items and code blocks (a fence is kept whole).
+/// Numbered from the start; when there is too much, the earliest go (the end says what was
+/// finished and what is left).
+pub fn pieces(replies: &str) -> Vec<Piece> {
+    let mut blocks: Vec<String> = Vec::new();
+    let mut cur: Vec<&str> = Vec::new();
+    let mut fence: Option<&str> = None;
+    let flush = |cur: &mut Vec<&str>, blocks: &mut Vec<String>| {
+        let text = cur.join("\n").trim().to_string();
+        if !text.is_empty() {
+            blocks.push(text);
+        }
+        cur.clear();
+    };
+    for line in replies.lines() {
+        let t = line.trim_start();
+        if let Some(open) = fence {
+            cur.push(line);
+            if t.starts_with(open) {
+                fence = None;
+                flush(&mut cur, &mut blocks);
+            }
+            continue;
+        }
+        if t.starts_with("```") || t.starts_with("~~~") {
+            flush(&mut cur, &mut blocks);
+            fence = Some(if t.starts_with("```") { "```" } else { "~~~" });
+            cur.push(line);
+            continue;
+        }
+        if t.is_empty() {
+            flush(&mut cur, &mut blocks);
+            continue;
+        }
+        let indent = line.len() - t.len();
+        let item = t.starts_with("- ") || t.starts_with("* ") || t.split_once(". ").is_some_and(|(n, _)| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()));
+        if item && indent < 4 {
+            flush(&mut cur, &mut blocks);
+        }
+        cur.push(line);
+    }
+    flush(&mut cur, &mut blocks);
+    let (mut p, mut c) = (0, 0);
+    let mut out: Vec<Piece> = blocks
+        .into_iter()
+        .map(|text| {
+            let command = fenced_command(&text);
+            let tag = if command.is_some() {
+                c += 1;
+                format!("C{c}")
+            } else {
+                p += 1;
+                format!("P{p}")
+            };
+            Piece { tag, text, command }
+        })
+        .collect();
+    let mut total: usize = out.iter().map(|p| p.text.chars().count()).sum();
+    while total > MAX_REPLIES && out.len() > 1 {
+        total -= out.remove(0).text.chars().count();
+    }
+    if let Some(only) = out.first_mut().filter(|_| total > MAX_REPLIES) {
+        only.text = tail(&only.text, MAX_REPLIES);
+    }
+    out
+}
+
+/// A fenced block holding one `!` command: the command.
+fn fenced_command(block: &str) -> Option<String> {
+    let lines: Vec<&str> = block.lines().collect();
+    let fence = |l: &str| l.trim_start().starts_with("```") || l.trim_start().starts_with("~~~");
+    if lines.len() < 3 || !fence(lines[0]) || !fence(lines[lines.len() - 1]) {
+        return None;
+    }
+    crate::conversation::shell_command(&lines[1..lines.len() - 1].join("\n"))
+}
+
 /// The instructions the model gets, unless the person changed them (see [`prompt_file`]).
 pub const DEFAULT_PROMPT: &str = r#"# Summarise a coding agent's turn
 
@@ -203,22 +366,35 @@ see at a glance what happened without reading the whole reply.
 
 Answer with **JSON only**, matching the schema. No prose before or after it.
 
+## The agent's reply
+
+What the agent said comes in tagged pieces: `[P3]` is a paragraph or list item, `[C1]` a
+command the agent gave the person to run. Use the tags to point at where an item comes from.
+
 ## Fields
 
-- **`status`**, one of:
-  - `done`: the request was carried out.
-  - `needs_you`: the agent asks a question, offers a choice, or waits for the person to do
-    something.
-  - `failed`: it could not do what was asked.
+- **`status`**: how the work went, one of:
+  - `done`: what was asked is carried out (even when there are steps left for the person).
   - `partial`: some of it is done and some is not.
+  - `failed`: it could not do what was asked.
+  - `waiting`: the agent stopped on a question and cannot go on without an answer.
 - **`headline`**: what happened, in at most 12 words. Plain words, no file paths, no final
   period.
 - **`changed`**: what changed, as the person would describe it: the behaviour, not the file
   names. At most 5 items. Empty when nothing changed.
-- **`checked`**: how the work was verified (tests, builds, running it), only when the agent
-  says so. Empty otherwise.
-- **`needs_you`**: questions, decisions and actions waiting on the person: a restart to run,
-  something to push, a question to answer. Empty when none.
+- **`checked`**: how the work was verified, only when the agent says so. Each has:
+  - `what`: the check (tests, a build, running it), in a few words.
+  - `outcome`: `passed`, `failed`, `not_run` or `unknown`. Use `unknown` whenever the agent
+    does not say how it came out; never assume it passed.
+  - `source`: the tag of the piece that reports it, or `""`.
+- **`needs_you`**: questions, decisions and actions waiting on the person: a command to run,
+  something to push, a question to answer. Each has:
+  - `text`: what to do or answer, in a few words.
+  - `source`: the tag of the piece it comes from (a `C` tag when there is a command for it),
+    or `""`.
+
+  One item per thing to do. A command belongs to its item as its `source`: never list the
+  command itself, or what it should print, as an item of its own.
 
 ## Rules
 
@@ -230,11 +406,14 @@ Answer with **JSON only**, matching the schema. No prose before or after it.
 
 ```json
 {
-  "status": "needs_you",
+  "status": "done",
   "headline": "Fixed the missing Skills tab in restored layouts",
   "changed": ["Restored layouts get the Skills tab when the agent has skills"],
-  "checked": ["Tests and clippy pass", "Release build done"],
-  "needs_you": ["Restart onto the new build", "Push the branch"]
+  "checked": [
+    { "what": "Unit tests", "outcome": "passed", "source": "P4" },
+    { "what": "In the app", "outcome": "not_run", "source": "P5" }
+  ],
+  "needs_you": [{ "text": "Restart onto the new build", "source": "C1" }]
 }
 ```
 "#;
@@ -274,16 +453,32 @@ pub fn reset_prompt() -> std::io::Result<()> {
     }
 }
 
-fn schema() -> Value {
-    let list = json!({ "type": "array", "items": { "type": "string" } });
+fn schema(tags: &[String]) -> Value {
+    let mut sources: Vec<Value> = tags.iter().map(|t| json!(t)).collect();
+    sources.push(json!(""));
+    let source = json!({ "type": "string", "enum": sources });
     json!({
         "type": "object",
         "properties": {
-            "status": { "type": "string", "enum": ["done", "needs_you", "failed", "partial"] },
+            "status": { "type": "string", "enum": ["done", "partial", "failed", "waiting"] },
             "headline": { "type": "string" },
-            "changed": list,
-            "checked": list,
-            "needs_you": list,
+            "changed": { "type": "array", "items": { "type": "string" } },
+            "checked": { "type": "array", "items": {
+                "type": "object",
+                "properties": {
+                    "what": { "type": "string" },
+                    "outcome": { "type": "string", "enum": ["passed", "failed", "not_run", "unknown"] },
+                    "source": source,
+                },
+                "required": ["what", "outcome", "source"],
+                "additionalProperties": false,
+            } },
+            "needs_you": { "type": "array", "items": {
+                "type": "object",
+                "properties": { "text": { "type": "string" }, "source": source },
+                "required": ["text", "source"],
+                "additionalProperties": false,
+            } },
         },
         "required": ["status", "headline", "changed", "checked", "needs_you"],
         "additionalProperties": false,
@@ -307,14 +502,51 @@ pub fn request(config: &Config, turn: &TurnText, instructions: &str, structured:
     if structured {
         body["response_format"] = json!({
             "type": "json_schema",
-            "json_schema": { "name": "turn_summary", "strict": true, "schema": schema() },
+            "json_schema": {
+                "name": "turn_summary",
+                "strict": true,
+                "schema": schema(&turn.pieces.iter().map(|p| p.tag.clone()).collect::<Vec<_>>()),
+            },
         });
     }
     body
 }
 
-/// The summary in a chat completion response.
-pub fn parse(response: &Value) -> Result<TurnSummary> {
+/// The model's answer, before its tags are turned into sources. Lenient: a server without
+/// structured output may give plain lines, or no tags.
+#[derive(Deserialize)]
+struct Answer {
+    status: Status,
+    headline: String,
+    #[serde(default)]
+    changed: Vec<String>,
+    #[serde(default)]
+    checked: Vec<AnswerCheck>,
+    #[serde(default)]
+    needs_you: Vec<AnswerTodo>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum AnswerCheck {
+    Full { what: String, #[serde(default = "unknown")] outcome: Outcome, #[serde(default)] source: String },
+    Plain(String),
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum AnswerTodo {
+    Full { text: String, #[serde(default)] source: String },
+    Plain(String),
+}
+
+fn unknown() -> Outcome {
+    Outcome::Unknown
+}
+
+/// The summary in a chat completion response; `pieces` are what the tags point at (a tag that
+/// is not one of them points nowhere).
+pub fn parse(response: &Value, pieces: &[Piece]) -> Result<TurnSummary> {
     let content = response["choices"][0]["message"]["content"].as_str().unwrap_or_default();
     if content.trim().is_empty() {
         let why = response["choices"][0]["finish_reason"].as_str().unwrap_or("no answer");
@@ -325,16 +557,52 @@ pub fn parse(response: &Value) -> Result<TurnSummary> {
         (Some(a), Some(b)) if b > a => &content[a..=b],
         _ => return Err(anyhow!("the model's answer was not JSON")),
     };
-    let mut s: TurnSummary = serde_json::from_str(json).context("the model's answer did not fit the summary's shape")?;
-    s.headline = one_line(&s.headline);
-    for list in [&mut s.changed, &mut s.checked, &mut s.needs_you] {
-        list.retain(|i| !i.trim().is_empty());
-        for i in list.iter_mut() {
-            *i = one_line(i);
+    let a: Answer = serde_json::from_str(json).context("the model's answer did not fit the summary's shape")?;
+    let source = |tag: &str| {
+        pieces.iter().find(|p| p.tag == tag.trim().trim_matches(['[', ']'])).map(|p| Source { text: p.text.clone(), command: p.command.clone() })
+    };
+    let lines = |list: Vec<String>| list.into_iter().map(|l| one_line(&l)).filter(|l| !l.is_empty()).take(5).collect::<Vec<_>>();
+    let checked = a
+        .checked
+        .into_iter()
+        .map(|c| match c {
+            AnswerCheck::Full { what, outcome, source: tag } => Check { what: one_line(&what), outcome, source: source(&tag) },
+            AnswerCheck::Plain(what) => Check { what: one_line(&what), outcome: Outcome::Unknown, source: None },
+        })
+        .filter(|c| !c.what.is_empty())
+        .take(5)
+        .collect();
+    let needs_you = a
+        .needs_you
+        .into_iter()
+        .map(|t| match t {
+            AnswerTodo::Full { text, source: tag } => Todo { text: one_line(&text), source: source(&tag) },
+            AnswerTodo::Plain(text) => Todo { text: one_line(&text), source: None },
+        })
+        .filter(|t| !t.text.is_empty())
+        .collect();
+    let needs_you = fold_commands(needs_you, pieces).into_iter().take(5).collect();
+    Ok(TurnSummary { status: a.status, headline: one_line(&a.headline), changed: lines(a.changed), checked, needs_you })
+}
+
+/// An item that is only one of the agent's commands written out joins the item before it, as
+/// that item's source (small models list the command apart from what it is for).
+fn fold_commands(items: Vec<Todo>, pieces: &[Piece]) -> Vec<Todo> {
+    let squash = |s: &str| s.chars().filter(|c| c.is_alphanumeric()).collect::<String>();
+    let mut out: Vec<Todo> = Vec::new();
+    for t in items {
+        let bare = squash(&t.text);
+        let command = pieces.iter().find(|p| p.command.as_deref().is_some_and(|c| !bare.is_empty() && squash(c) == bare));
+        match (command, out.last_mut()) {
+            (Some(p), Some(prev)) => {
+                if prev.source.as_ref().is_none_or(|s| s.command.is_none()) {
+                    prev.source = Some(Source { text: p.text.clone(), command: p.command.clone() });
+                }
+            }
+            _ => out.push(t),
         }
-        list.truncate(5);
     }
-    Ok(s)
+    out
 }
 
 /// `http://host:port` or `http://host:port/v1`, as the API's base.
@@ -362,7 +630,7 @@ pub fn summarize(config: &Config, turn: &TurnText) -> Result<TurnSummary> {
         r => r,
     }
     .with_context(|| format!("could not reach {}", base(&config.endpoint)))?;
-    parse(&response)
+    parse(&response, &turn.pieces)
 }
 
 /// A request with the server's key, when there is one.
@@ -476,19 +744,75 @@ mod tests {
     }
 
     #[test]
-    fn answers_are_read_strict_or_wrapped() {
+    fn replies_are_cut_into_tagged_pieces_and_bang_blocks_are_commands() {
+        let reply = "First paragraph\nstill first.\n\n- one\n- two\n\n```\n! ./scripts/restart\n```\n\n```rust\nfn x() {}\n\nfn y() {}\n```\nLast.";
+        let p = pieces(reply);
+        let tags: Vec<&str> = p.iter().map(|p| p.tag.as_str()).collect();
+        assert_eq!(tags, ["P1", "P2", "P3", "C1", "P4", "P5"]);
+        assert_eq!(p[0].text, "First paragraph\nstill first.");
+        assert_eq!(p[3].command.as_deref(), Some("./scripts/restart"));
+        assert!(p[4].text.contains("fn y()"), "a fence is kept whole, blank lines and all");
+        assert_eq!(p[4].command, None);
+    }
+
+    #[test]
+    fn answers_are_read_with_their_sources_strict_or_wrapped() {
         let answer = |content: &str| json!({ "choices": [{ "message": { "content": content }, "finish_reason": "stop" }] });
-        let s = parse(&answer(
-            r#"{"status":"needs_you","headline":"Fixed the tab.","changed":["a","  "],"checked":[],"needs_you":["Run the restart"]}"#,
-        ))
+        let p = pieces("Tests pass.\n\n```\n! ./scripts/restart\n```");
+        let s = parse(
+            &answer(
+                r#"{"status":"done","headline":"Fixed the tab.","changed":["a","  "],
+                "checked":[{"what":"tests","outcome":"passed","source":"P1"},{"what":"clippy","outcome":"unknown","source":""}],
+                "needs_you":[{"text":"Restart","source":"C1"},{"text":"Push","source":"P9"}]}"#,
+            ),
+            &p,
+        )
         .unwrap();
-        assert_eq!(s.status, Status::NeedsYou);
+        assert_eq!(s.status, Status::Done);
         assert_eq!(s.headline, "Fixed the tab");
         assert_eq!(s.changed, ["a"]);
-        let wrapped = parse(&answer("Here:\n```json\n{\"status\":\"done\",\"headline\":\"x\",\"changed\":[],\"checked\":[],\"needs_you\":[]}\n```")).unwrap();
-        assert_eq!(wrapped.status, Status::Done);
-        assert!(parse(&answer("")).is_err());
-        assert!(parse(&answer("no json here")).is_err());
+        assert_eq!(s.checked[0].outcome, Outcome::Passed);
+        assert_eq!(s.checked[0].source.as_ref().map(|s| s.text.as_str()), Some("Tests pass."));
+        assert_eq!(s.checked[1].source, None);
+        assert_eq!(s.needs_you[0].source.as_ref().and_then(|s| s.command.as_deref()), Some("./scripts/restart"));
+        assert_eq!(s.needs_you[1].source, None, "a tag that is not there points nowhere");
+        // Without structured output: plain lines are read, their outcome unknown.
+        let wrapped = parse(
+            &answer("Here:\n```json\n{\"status\":\"done\",\"headline\":\"x\",\"changed\":[],\"checked\":[\"ran tests\"],\"needs_you\":[\"push\"]}\n```"),
+            &p,
+        )
+        .unwrap();
+        assert_eq!(wrapped.checked[0].outcome, Outcome::Unknown);
+        assert_eq!(wrapped.needs_you[0].text, "push");
+        assert!(parse(&answer(""), &p).is_err());
+        assert!(parse(&answer("no json here"), &p).is_err());
+    }
+
+    #[test]
+    fn a_command_listed_apart_joins_the_item_it_is_for() {
+        let p = pieces("Check it:\n\n```\n! python3 -c \"print(6)\"\n```");
+        let items = vec![
+            Todo { text: "Check the new function".into(), source: None },
+            Todo { text: "! python3 -c \"print(6)\"".into(), source: None },
+            Todo { text: "Expected output is 6".into(), source: None },
+        ];
+        let out = fold_commands(items, &p);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].source.as_ref().and_then(|s| s.command.as_deref()), Some("python3 -c \"print(6)\""));
+    }
+
+    #[test]
+    fn summaries_kept_in_the_old_shape_still_read() {
+        let old: TurnSummary = serde_json::from_str(
+            r#"{"status":"needs_you","headline":"h","changed":[],"checked":["Ran tests"],"needs_you":["Restart"]}"#,
+        )
+        .unwrap();
+        assert_eq!(old.status, Status::Waiting);
+        assert_eq!(old.checked[0], Check { what: "Ran tests".into(), outcome: Outcome::Unknown, source: None });
+        assert_eq!(old.needs_you[0].text, "Restart");
+        // And the new shape goes round.
+        let back: TurnSummary = serde_json::from_str(&serde_json::to_string(&old).unwrap()).unwrap();
+        assert_eq!(back, old);
     }
 
     #[test]
@@ -496,6 +820,8 @@ mod tests {
         assert_eq!(base("http://h:1234"), "http://h:1234/v1");
         assert_eq!(base("http://h:1234/v1/"), "http://h:1234/v1");
     }
+
+    const REPLY: &str = "I added `multiply(a, b)` to `calc.py`, returning `a * b`, below `add`. I haven't run it. You need to check it yourself.\n\n```\n! python3 -B -c \"from calc import multiply; print(multiply(2, 3), multiply(-4, 5))\"\n```\n\nThe expected output is `6 -20`.";
 
     /// Against a real server: KELEUO_SUMMARY_ENDPOINT=http://host:1234 KELEUO_SUMMARY_MODEL=…
     #[test]
@@ -509,8 +835,9 @@ mod tests {
         };
         println!("models: {:?}", models(&config.endpoint, &config.api_key).unwrap());
         let turn = TurnText {
-            ask: "calc.py has a bug in add. Fix it and check it.".into(),
-            replies: "add was subtracting: return a - b. I changed it to return a + b and ran python3 -c 'from calc import add; print(add(2,3))', which printed 5. I didn't commit it. Do you also want a divide function?".into(),
+            ask: "Add a multiply(a, b) function to calc.py. Do not run it: tell me to check it.".into(),
+            pieces: pieces(REPLY),
+            replies: REPLY.into(),
             tools: Vec::new(),
             files: vec!["calc.py".into()],
         };

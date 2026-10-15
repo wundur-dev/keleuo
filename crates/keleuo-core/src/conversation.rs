@@ -1026,6 +1026,15 @@ fn plural(n: usize, word: &str) -> String {
     if n == 1 { format!("1 {word}") } else { format!("{n} {word}s") }
 }
 
+/// A code block that is one shell command written as for the agent's shell (`! git push`): the
+/// command, without the `!`.
+pub fn shell_command(code: &str) -> Option<String> {
+    let mut lines = code.lines().map(str::trim).filter(|l| !l.is_empty());
+    let first = lines.next()?;
+    let command = first.strip_prefix('!')?.trim();
+    (lines.next().is_none() && !command.is_empty()).then(|| command.to_string())
+}
+
 /// How many tool calls in a row the chat shows as one group.
 pub const TOOL_RUN: usize = 2;
 
@@ -1364,4 +1373,18 @@ mod tests {
 /// equal this way.
 fn letters(text: &str) -> String {
     text.chars().filter(|c| c.is_alphanumeric()).flat_map(char::to_lowercase).collect()
+}
+
+#[cfg(test)]
+mod shell_command_tests {
+    use super::shell_command;
+
+    #[test]
+    fn one_bang_line_is_a_command() {
+        assert_eq!(shell_command("! git push -u origin main\n").as_deref(), Some("git push -u origin main"));
+        assert_eq!(shell_command("!ls").as_deref(), Some("ls"));
+        assert_eq!(shell_command("ls -la"), None);
+        assert_eq!(shell_command("! a\n! b"), None, "several commands: copy them instead");
+        assert_eq!(shell_command("!"), None);
+    }
 }

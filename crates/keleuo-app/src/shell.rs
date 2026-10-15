@@ -1404,18 +1404,21 @@ impl Shell {
                             .children(match summary {
                                 Some(sm) => {
                                     use keleuo_core::summary::Status;
-                                    let tone = match sm.status {
-                                        Status::NeedsYou => Some(yellow),
-                                        Status::Failed => Some(red),
-                                        Status::Partial => Some(blue),
-                                        Status::Done => None,
+                                    // How the work went when it is not plainly done, else that
+                                    // something waits on the person.
+                                    let (label, tone) = match sm.status {
+                                        Status::Done if !sm.needs_you.is_empty() => (Some("Needs you"), yellow),
+                                        Status::Done => (None, yellow),
+                                        Status::Waiting => (Some(sm.status.label()), yellow),
+                                        Status::Failed => (Some(sm.status.label()), red),
+                                        Status::Partial => (Some(sm.status.label()), blue),
                                     };
                                     Some(
                                         div()
                                             .flex()
                                             .gap_1()
                                             .text_size(px(11.))
-                                            .children(tone.map(|t| div().flex_none().text_color(t).child(sm.status.label())))
+                                            .children(label.map(|l| div().flex_none().text_color(tone).child(l)))
                                             .child(div().min_w_0().truncate().text_color(muted.opacity(0.9)).child(sm.headline)),
                                     )
                                 }
