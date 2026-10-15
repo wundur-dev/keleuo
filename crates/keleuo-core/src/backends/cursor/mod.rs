@@ -12,6 +12,7 @@
 
 pub mod acp;
 pub mod map;
+pub mod skills;
 pub mod store;
 
 use std::io::{BufRead, BufReader, Read, Write};
@@ -56,6 +57,8 @@ impl Backend for CursorBackend {
             subagents: true,
             // Over ACP it asks before acting, answered in the window.
             permission_prompts: true,
+            // Its own skill folders, and the other agents' it reads too (see `skills`).
+            skills: true,
             // `cursor-agent` itself in Terminal; Chat follows its record (see `follow_session`).
             terminal_view: true,
             // A few of `cursor-agent models`; any other name is typed in.
@@ -72,6 +75,14 @@ impl Backend for CursorBackend {
 
     fn permission_modes(&self) -> Vec<(&'static str, &'static str)> {
         MODES.to_vec()
+    }
+
+    fn skills(&self, host: &dyn Host, project: &Path) -> crate::skills::Catalog {
+        skills::discover(host, project)
+    }
+
+    fn create_skill(&self, host: &dyn Host, project: &Path, name: &str) -> std::io::Result<PathBuf> {
+        skills::create(host, project, name)
     }
 
     /// Cursor's own interface on chat `id` (a new id is made by Cursor on first use). It asks

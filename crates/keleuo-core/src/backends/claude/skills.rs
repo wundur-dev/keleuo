@@ -295,11 +295,16 @@ pub fn create_project_skill(
     project: &Path,
     name: &str,
 ) -> std::io::Result<PathBuf> {
+    create_skill_in(host, &project.join(".claude/skills"), name)
+}
+
+/// Create skill `name` (as a folder name) in the skills folder `skills`, from the template;
+/// returns its SKILL.md.
+pub fn create_skill_in(host: &dyn Host, skills: &Path, name: &str) -> std::io::Result<PathBuf> {
     let base = match slug(name) {
         s if s.is_empty() => "new-skill".to_string(),
         s => s,
     };
-    let skills = project.join(".claude/skills");
     let mut folder = base.clone();
     let mut n = 2;
     while host.exists(&skills.join(&folder)) {
