@@ -847,6 +847,8 @@ impl ChatPanel {
         let send = div()
             .id("send")
             .size(px(28.))
+            // A circle, however crowded the row (it would shrink into an oval).
+            .flex_none()
             .rounded_full()
             .flex()
             .items_center()
