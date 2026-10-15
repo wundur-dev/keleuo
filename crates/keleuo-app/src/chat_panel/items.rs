@@ -625,6 +625,7 @@ impl ChatPanel {
                 // and the message reads as the head of its turn).
                 Item::User(text) => {
                     let copy = paste::without_markers(text);
+                    let mark = key.strip_prefix("main").and_then(|n| n.parse().ok()).and_then(|n| self.delivery_mark(n, cx));
                     let group = SharedString::from(format!("user-{key}-{ix}"));
                     div()
                         .group(group.clone())
@@ -644,7 +645,9 @@ impl ChatPanel {
                                 .text_sm()
                                 .line_height(rems(1.45))
                                 .text_color(fg)
-                                .child(self.render_user_text(&format!("{key}-{ix}"), text, cx)),
+                                .child(self.render_user_text(&format!("{key}-{ix}"), text, cx))
+                                // Small, in the corner, under the words.
+                                .children(mark.map(|m| div().flex().justify_end().mr(px(-6.)).mb(px(-4.)).child(m))),
                         )
                         .into_any_element()
                 }
@@ -712,11 +715,11 @@ impl ChatPanel {
         out
     }
 
-    /// Under the person's last message: whether it has left Keleuo for the agent. "Sending"
-    /// with a ring while the agent has not shown it has it, a check once it has (it echoed it,
-    /// its prompt hook ran, or it began working), "Not delivered" when it failed first.
-    pub(super) fn delivery_mark(&self, ix: usize, item: &Item, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if self.agent.is_some() || !matches!(item, Item::User(_)) {
+    /// In the corner of the person's last message, small: a check once the agent has it (it
+    /// echoed it, its prompt hook ran, or it began working), a cross if it failed first.
+    /// Nothing while it is on its way.
+    pub(super) fn delivery_mark(&self, ix: usize, cx: &App) -> Option<AnyElement> {
+        if self.agent.is_some() {
             return None;
         }
         let chat = &self.session.read(cx).chat;
@@ -724,24 +727,17 @@ impl ChatPanel {
             return None;
         }
         let theme = cx.theme();
-        let (icon, words, color) = match chat.delivery? {
-            Delivery::Sending => (Icon::new(IconName::LoaderCircle), "Sending", theme.muted_foreground),
-            Delivery::Seen => (Icon::new(IconName::Check), "Seen by the agent", theme.success),
-            Delivery::Failed => (Icon::new(IconName::CircleX), "Not delivered", theme.danger),
+        let (icon, color, tip) = match chat.delivery? {
+            Delivery::Sending => return None,
+            Delivery::Seen => (IconName::Check, theme.success, "The agent has this message"),
+            Delivery::Failed => (IconName::CircleX, theme.danger, "Not delivered: the agent stopped before it took this message"),
         };
         Some(
             div()
-                .w_full()
-                .flex()
-                .justify_end()
-                .items_center()
-                .gap_1()
-                .mt(px(-4.))
-                .pr_2()
-                .text_size(px(11.))
-                .text_color(color)
-                .child(icon.xsmall().text_color(color))
-                .child(words)
+                .id(("delivery", ix))
+                .flex_none()
+                .child(Icon::new(icon).xsmall().text_color(color.opacity(0.8)))
+                .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(tip).build(w, cx))
                 .into_any_element(),
         )
     }

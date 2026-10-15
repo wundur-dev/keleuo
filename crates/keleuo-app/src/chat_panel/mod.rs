@@ -460,8 +460,7 @@ impl ChatPanel {
             .flex_col()
             .gap_2()
             .when(member, |d| d.pl_4())
-            .children(parts)
-            .children(self.delivery_mark(ix, &item, cx));
+            .children(parts);
         match group {
             Some(header) => self.column(div().w_full().flex().flex_col().gap_2().child(header).child(body).into_any_element(), last, top),
             None => self.column(body.into_any_element(), last, top),
