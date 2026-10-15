@@ -202,7 +202,19 @@ impl ChatPanel {
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(fg)
                         .child(s.headline.clone()),
-                ),
+                )
+                // Who wrote it: a summary is a model's reading of the turn, not the turn.
+                .when(!s.model.is_empty(), |d| {
+                    d.child(
+                        div()
+                            .flex_none()
+                            .max_w(px(200.))
+                            .truncate()
+                            .text_size(px(11.))
+                            .text_color(muted)
+                            .child(format!("by {}", s.model)),
+                    )
+                }),
         );
         // A section: its title in the left column, its rows beside it.
         let section = |title: &'static str, color: Hsla, rows: Vec<AnyElement>| {
