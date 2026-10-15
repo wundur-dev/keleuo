@@ -82,11 +82,23 @@ impl Backend for ClaudeBackend {
         Box::new(ClaudeCode::new())
     }
 
+    /// `--effort`, in Claude Code's order.
+    fn efforts(&self) -> Vec<&'static str> {
+        vec!["low", "medium", "high", "xhigh", "max"]
+    }
+
     /// Claude Code cannot list its models, so this is Keleuo's own list, kept by hand: the
     /// aliases (each the latest of its family), then model ids by generation. Any other name
     /// can still be typed in.
     fn list_models(&self, _host: &dyn Host) -> Vec<crate::agent::ModelOption> {
-        let m = |id: &str, label: &str, family: &str| crate::agent::ModelOption { id: id.into(), label: label.into(), family: family.into() };
+        let m = |id: &str, label: &str, family: &str| crate::agent::ModelOption {
+            id: id.into(),
+            label: label.into(),
+            family: family.into(),
+            base: id.into(),
+            base_label: label.into(),
+            ..Default::default()
+        };
         vec![
             m("fable", "Fable (latest)", "Aliases"),
             m("opus", "Opus (latest)", "Aliases"),
@@ -167,6 +179,9 @@ impl Backend for ClaudeBackend {
         }
         if let Some(model) = &options.model {
             args.extend(["--model".into(), model.clone()]);
+        }
+        if let Some(effort) = &options.effort {
+            args.extend(["--effort".into(), effort.clone()]);
         }
         if let Some(mode) = &options.permission_mode {
             args.extend(["--permission-mode".into(), mode.clone()]);
@@ -370,6 +385,7 @@ impl Agent for ClaudeCode {
                 permission_mode: options.permission_mode.clone(),
                 resume: options.resume.clone(),
                 fork: options.fork,
+                effort: options.effort.clone(),
             }
             .program_spec(),
         );

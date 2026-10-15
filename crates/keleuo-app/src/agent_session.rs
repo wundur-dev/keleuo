@@ -122,6 +122,8 @@ pub struct AgentSession {
     /// `None` is the backend's default mode (it asks); otherwise its own mode name.
     pub permission_mode: Option<String>,
     pub model: Option<String>,
+    /// The effort level, for an agent that takes one apart from the model; `None`: its default.
+    pub effort: Option<String>,
     /// Something happened since the user last looked at this session.
     pub unseen: bool,
     /// The next start forks the resumed session.
@@ -214,6 +216,7 @@ impl AgentSession {
             cwd,
             permission_mode: keleuo_core::env_var("PERMISSION_MODE").ok().filter(|m| !m.is_empty()),
             model: keleuo_core::env_var("MODEL").ok().filter(|m| !m.is_empty()),
+            effort: None,
             unseen: false,
             fork_next: false,
             waiting_for: None,
@@ -497,6 +500,7 @@ impl AgentSession {
         let options = StartOptions {
             cwd: self.cwd.clone(),
             model: self.model.clone(),
+            effort: self.effort.clone(),
             permission_mode: self.permission_mode.clone(),
             resume: None,
             fork,
@@ -723,19 +727,35 @@ impl AgentSession {
 
     pub fn set_model(&mut self, model: &str, cx: &mut Context<Self>) {
         self.model = Some(model.to_string());
+        self.restart_with(format!("Model: {model}"), format!("with {model}"), cx);
+    }
+
+    /// Switch the effort level (`None`: the agent's default), as the model is switched.
+    pub fn set_effort(&mut self, effort: Option<String>, cx: &mut Context<Self>) {
+        if self.effort == effort {
+            return;
+        }
+        let name = effort.clone().unwrap_or_else(|| "default".into());
+        self.effort = effort;
+        self.restart_with(format!("Effort: {name}"), format!("at {name} effort"), cx);
+    }
+
+    /// Start the agent again with what changed: now if it is idle, else when the turn ends, or
+    /// with the next message when it is not running. `said` goes in the chat.
+    fn restart_with(&mut self, said: String, restarting: String, cx: &mut Context<Self>) {
         if self.interactive() && self.running(cx) {
             if self.chat.busy {
                 self.restart_after_turn = true;
-                self.chat.push_notice(format!("Model: {model}. Applies when this turn ends."));
+                self.chat.push_notice(format!("{said}. Applies when this turn ends."));
             } else {
                 self.stop(cx);
-                self.restarting = Some(format!("with {model}"));
+                self.restarting = Some(restarting);
                 self.start_terminal(cx);
-                self.chat.push_notice(format!("Model: {model}."));
+                self.chat.push_notice(format!("{said}."));
             }
         } else {
             self.stop(cx);
-            self.chat.push_notice(format!("Model: {model}. Applies from the next message."));
+            self.chat.push_notice(format!("{said}. Applies from the next message."));
         }
         cx.notify();
     }
@@ -954,6 +974,7 @@ impl AgentSession {
         let options = StartOptions {
             cwd: self.cwd.clone(),
             model: self.model.clone(),
+            effort: self.effort.clone(),
             permission_mode: self.permission_mode.clone(),
             resume: self.chat.session_id.clone(),
             fork: std::mem::take(&mut self.fork_next),

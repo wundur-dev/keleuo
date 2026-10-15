@@ -96,8 +96,10 @@ pub enum Event {
     UserImages(Vec<PathBuf>),
 }
 
-/// A model an agent offers, as the agent itself lists it.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// A model an agent offers, as the agent itself lists it: one id may be one variant of a
+/// model (Cursor's `gpt-5.3-codex-high-fast` is `gpt-5.3-codex` at high effort, fast), which
+/// the window offers as the model plus its variant.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ModelOption {
     /// What to ask for (`--model <id>`).
     pub id: String,
@@ -105,6 +107,38 @@ pub struct ModelOption {
     pub label: String,
     /// The family it is grouped under in the menu ("Claude", "GPT"); empty: on its own.
     pub family: String,
+    /// The model this id is a variant of (the id itself when it is not one).
+    pub base: String,
+    /// What the base model is called (its label without the variant's words).
+    pub base_label: String,
+    /// The effort this variant runs at, when it names one.
+    pub effort: Option<String>,
+    /// A variant that thinks first.
+    pub thinking: bool,
+    /// A faster variant.
+    pub fast: bool,
+}
+
+/// Effort levels from least to most, the names agents use.
+pub const EFFORT_ORDER: [&str; 7] = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
+
+/// How far apart two efforts are (no effort counts as between medium and high).
+fn effort_rank(effort: Option<&str>) -> i32 {
+    match effort.and_then(|e| EFFORT_ORDER.iter().position(|o| *o == e)) {
+        Some(i) => 2 * i as i32,
+        None => 7,
+    }
+}
+
+/// The variant of model `base` closest to what is wanted: the same effort, thinking and speed
+/// when there is one; else the nearest effort (the higher of two as near), keeping thinking
+/// and speed where it can.
+pub fn pick_variant<'a>(models: &'a [ModelOption], base: &str, effort: Option<&str>, thinking: bool, fast: bool) -> Option<&'a ModelOption> {
+    models.iter().filter(|m| m.base == base).min_by_key(|m| {
+        let rank = effort_rank(m.effort.as_deref());
+        let off = (rank - effort_rank(effort)).abs() * 4 + i32::from(m.thinking != thinking) * 2 + i32::from(m.fast != fast);
+        (off, -rank)
+    })
 }
 
 /// The permission modes as `(mode, what the status line says)`, in the order the mode key
@@ -183,6 +217,9 @@ pub struct StartOptions {
     pub fork: bool,
     /// Extra settings for the agent's own interface (a file with the window's hooks).
     pub settings: Option<PathBuf>,
+    /// The effort level, for an agent that takes one apart from the model
+    /// ([`Backend::efforts`]).
+    pub effort: Option<String>,
 }
 
 /// A running conversation with an agent.
@@ -381,6 +418,11 @@ pub trait Backend: Send + Sync {
     fn model_command(&self, _model: &str) -> Option<String> {
         None
     }
+    /// The effort levels the agent takes apart from the model (Claude Code's `--effort`), from
+    /// least to most; empty when it takes none (Cursor's are part of its model ids).
+    fn efforts(&self) -> Vec<&'static str> {
+        Vec::new()
+    }
     /// Every model the agent offers this person, asked of the agent itself (slow: run off the
     /// window's thread). Empty when it cannot list them: then [`Capabilities::models`].
     fn list_models(&self, _host: &dyn Host) -> Vec<ModelOption> {
@@ -497,6 +539,37 @@ impl Registry {
     /// The first backend: the default for new sessions.
     pub fn default_backend(&self) -> Option<Arc<dyn Backend>> {
         self.backends.first().cloned()
+    }
+}
+
+#[cfg(test)]
+mod variant_tests {
+    use super::*;
+
+    #[test]
+    fn the_nearest_variant_is_picked() {
+        let m = |id: &str, effort: Option<&str>, thinking: bool, fast: bool| ModelOption {
+            id: id.into(),
+            base: "m".into(),
+            effort: effort.map(str::to_string),
+            thinking,
+            fast,
+            ..Default::default()
+        };
+        let models = [
+            m("m-low", Some("low"), false, false),
+            m("m-high", Some("high"), false, false),
+            m("m-high-fast", Some("high"), false, true),
+            m("m-thinking-max", Some("max"), true, false),
+        ];
+        let pick = |e: Option<&str>, t, f| pick_variant(&models, "m", e, t, f).map(|m| m.id.as_str());
+        assert_eq!(pick(Some("high"), false, true), Some("m-high-fast"));
+        // No medium: low and high are as near; the higher.
+        assert_eq!(pick(Some("medium"), false, false), Some("m-high"));
+        // Effort first: xhigh is nearest to high, thinking or not.
+        assert_eq!(pick(Some("xhigh"), false, false), Some("m-high"));
+        assert_eq!(pick(Some("max"), true, false), Some("m-thinking-max"));
+        assert_eq!(pick_variant(&models, "other", None, false, false), None);
     }
 }
 

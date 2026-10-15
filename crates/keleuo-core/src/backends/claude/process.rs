@@ -24,6 +24,8 @@ pub struct Options {
     pub resume: Option<String>,
     /// With `resume`: continue in a copy (`--fork-session`), leaving the original alone.
     pub fork: bool,
+    /// `--effort`, when not the default.
+    pub effort: Option<String>,
 }
 
 impl Options {
@@ -65,6 +67,9 @@ impl Options {
         }
         if let Some(mode) = &self.permission_mode {
             args.extend(["--permission-mode".into(), mode.clone()]);
+        }
+        if let Some(effort) = &self.effort {
+            args.extend(["--effort".into(), effort.clone()]);
         }
         if let Some(id) = &self.resume {
             args.extend(["--resume".into(), id.clone()]);

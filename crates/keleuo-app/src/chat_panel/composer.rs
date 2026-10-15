@@ -414,6 +414,7 @@ impl ChatPanel {
         let chips = self.render_chips(cx);
         let attach = self.render_attach(cx);
         let model_control = self.render_model_control(cx);
+        let effort_control = self.render_effort_control(cx);
         let mode_button = permission_prompts.then(|| self.render_mode_button(cx));
         let send = self.render_send(busy, has_text, cx);
         let paste_target = cx.entity().downgrade();
@@ -511,6 +512,7 @@ impl ChatPanel {
                             .text_color(muted)
                             .child(attach)
                             .child(model_control)
+                            .children(effort_control)
                             .children(mode_button)
                             .child(div().flex_1())
                             .child(send),
@@ -641,6 +643,110 @@ impl ChatPanel {
         }
     }
 
+    /// The variant of model `base` to run: `want` (effort, thinking, fast) if given, else the
+    /// nearest to the variant running now. `None` when the agent lists no variants of it.
+    fn variant_of(&self, base: &str, want: Option<(Option<String>, bool, bool)>, cx: &App) -> Option<String> {
+        let session = self.session.read(cx);
+        let listed = session.listed_models.as_deref().unwrap_or_default();
+        let current = session.model.as_deref().and_then(|m| listed.iter().find(|o| o.id == m));
+        let (effort, thinking, fast) = want.unwrap_or_else(|| current.map_or((None, false, false), |c| (c.effort.clone(), c.thinking, c.fast)));
+        keleuo_core::agent::pick_variant(listed, base, effort.as_deref(), thinking, fast).map(|m| m.id.clone())
+    }
+
+    /// Effort (and, where the model has them, thinking and fast): Claude Code's `--effort`, or
+    /// the variants of the Cursor model in use. Nothing when there is nothing to choose.
+    fn render_effort_control(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let session = self.session.read(cx);
+        let w = self.session.downgrade();
+        let levels = session.backend.efforts();
+        if !levels.is_empty() {
+            // An effort apart from the model.
+            let current = session.effort.clone();
+            let label = current.as_deref().map_or("Effort".to_string(), effort_name);
+            return Some(
+                Button::new("effort")
+                    .xsmall()
+                    .ghost()
+                    .label(label)
+                    .tooltip("Effort")
+                    .dropdown_menu(move |menu, _, _| {
+                        use gpui_kit::component::menu::PopupMenuItem;
+                        let w0 = w.clone();
+                        let mut menu = menu.item(PopupMenuItem::new("Default").checked(current.is_none()).on_click(move |_, _, cx| {
+                            let _ = w0.update(cx, |s, cx| s.set_effort(None, cx));
+                        }));
+                        for level in &levels {
+                            let (w, level) = (w.clone(), level.to_string());
+                            let checked = current.as_deref() == Some(level.as_str());
+                            menu = menu.item(PopupMenuItem::new(effort_name(&level)).checked(checked).on_click(move |_, _, cx| {
+                                let _ = w.update(cx, |s, cx| s.set_effort(Some(level.clone()), cx));
+                            }));
+                        }
+                        menu
+                    })
+                    .into_any_element(),
+            );
+        }
+        // Variants in the model ids.
+        let listed = session.listed_models.clone().unwrap_or_default();
+        let current = listed.iter().find(|m| Some(&m.id) == session.model.as_ref())?.clone();
+        let variants: Vec<ModelOption> = listed.iter().filter(|m| m.base == current.base).cloned().collect();
+        if variants.len() < 2 {
+            return None;
+        }
+        let mut efforts: Vec<Option<String>> = Vec::new();
+        for v in &variants {
+            if !efforts.contains(&v.effort) {
+                efforts.push(v.effort.clone());
+            }
+        }
+        efforts.sort_by_key(|e| e.as_deref().and_then(|e| keleuo_core::agent::EFFORT_ORDER.iter().position(|o| *o == e)).map_or(-1, |i| i as i32));
+        let thinking_choice = variants.iter().any(|v| v.thinking) && variants.iter().any(|v| !v.thinking);
+        let fast_choice = variants.iter().any(|v| v.fast) && variants.iter().any(|v| !v.fast);
+        let mut label = current.effort.as_deref().map_or("Default".to_string(), effort_name);
+        if current.thinking && thinking_choice {
+            label.push_str(" · Thinking");
+        }
+        if current.fast && fast_choice {
+            label.push_str(" · Fast");
+        }
+        let panel = cx.entity().downgrade();
+        Some(
+            Button::new("effort")
+                .xsmall()
+                .ghost()
+                .label(label)
+                .tooltip("Effort")
+                .dropdown_menu(move |menu, _, _| {
+                    use gpui_kit::component::menu::PopupMenuItem;
+                    let mut menu = menu;
+                    // Pick the variant nearest to the change.
+                    let choose = |effort: Option<String>, thinking: bool, fast: bool| {
+                        let (panel, w, base) = (panel.clone(), w.clone(), current.base.clone());
+                        move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+                            let Some(id) = panel.upgrade().and_then(|p| p.read(cx).variant_of(&base, Some((effort.clone(), thinking, fast)), cx)) else { return };
+                            let _ = w.update(cx, |s, cx| s.set_model(&id, cx));
+                        }
+                    };
+                    for e in &efforts {
+                        let name = e.as_deref().map_or("Default".to_string(), effort_name);
+                        menu = menu.item(PopupMenuItem::new(name).checked(*e == current.effort).on_click(choose(e.clone(), current.thinking, current.fast)));
+                    }
+                    if thinking_choice || fast_choice {
+                        menu = menu.separator();
+                    }
+                    if thinking_choice {
+                        menu = menu.item(PopupMenuItem::new("Thinking").checked(current.thinking).on_click(choose(current.effort.clone(), !current.thinking, current.fast)));
+                    }
+                    if fast_choice {
+                        menu = menu.item(PopupMenuItem::new("Fast").checked(current.fast).on_click(choose(current.effort.clone(), current.thinking, !current.fast)));
+                    }
+                    menu
+                })
+                .into_any_element(),
+        )
+    }
+
     /// Tests: focus the model list box (keys then reach it).
     pub fn test_focus_model_select(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.sync_model_select(window, cx);
@@ -659,11 +765,13 @@ impl ChatPanel {
         let listed: Vec<ModelOption> = match session.listed_models.as_deref() {
             Some(m) if !m.is_empty() => m.to_vec(),
             // Not listed (yet): the backend's own short list.
-            _ => session.backend.capabilities().models.iter().map(|m| ModelOption { id: m.clone(), label: capitalize(m), family: "Models".into() }).collect(),
+            _ => session.backend.capabilities().models.iter().map(|m| ModelOption { id: m.clone(), label: capitalize(m), family: "Models".into(), ..Default::default() }).collect(),
         };
         let recent: Vec<String> = cx.global::<crate::AppSettings>().0.borrow().recent_models.clone();
         let picked = session.model.clone().or_else(|| session.chat.model.clone()).unwrap_or_default();
-        let (groups, selected) = model_groups(&listed, &recent, &picked);
+        // The list shows models, not their variants (the effort control picks those).
+        let picked = listed.iter().find(|m| m.id == picked).map_or(picked, |m| m.base.clone());
+        let (groups, selected) = model_groups(&bases(&listed), &recent, &picked);
         let key = format!("{picked}|{}|{}", listed.len(), recent.join(","));
         if self.model_select.as_ref().is_some_and(|s| s.key == key) {
             return;
@@ -685,6 +793,8 @@ impl ChatPanel {
                     if cx.global::<crate::AppSettings>().0.borrow().recent_models.contains(&id) {
                         remember_model(&id, cx);
                     }
+                    // A model with variants: the one nearest the variant in use.
+                    let id = p.variant_of(&id, None, cx).unwrap_or(id);
                     p.session.update(cx, |s, cx| s.set_model(&id, cx));
                 });
                 self.model_select = Some(ModelSelect { state, key: String::new(), _sub: sub });
@@ -824,6 +934,30 @@ fn take_paste(item: &ClipboardItem, paste_target: &WeakEntity<ChatPanel>, window
 }
 
 /// Keep a typed model name among the recent ones, saved.
+/// An effort level as the menus say it.
+fn effort_name(effort: &str) -> String {
+    match effort {
+        "xhigh" => "Extra high".into(),
+        other => capitalize(other),
+    }
+}
+
+/// The models of a list of variants, once each, in the list's order: each named by the
+/// shortest of its variants' names (some differ by a note like "1M").
+fn bases(listed: &[ModelOption]) -> Vec<ModelOption> {
+    let mut out: Vec<ModelOption> = Vec::new();
+    for m in listed {
+        let base = if m.base.is_empty() { &m.id } else { &m.base };
+        let label = if m.base_label.is_empty() { &m.label } else { &m.base_label };
+        match out.iter_mut().find(|o| &o.id == base) {
+            Some(o) if label.len() < o.label.len() => o.label = label.clone(),
+            Some(_) => {}
+            None => out.push(ModelOption { id: base.clone(), label: label.clone(), family: m.family.clone(), base: base.clone(), base_label: label.clone(), ..Default::default() }),
+        }
+    }
+    out
+}
+
 /// The value of "Other model…" (no model is called that).
 const OTHER_MODEL: &str = "\u{0}other";
 
@@ -918,8 +1052,17 @@ mod model_list_tests {
     use super::*;
 
     #[::core::prelude::v1::test]
+    fn variants_show_as_one_model() {
+        let v = |id: &str, base: &str, label: &str| ModelOption { id: id.into(), base: base.into(), base_label: label.into(), label: label.into(), family: "GPT".into(), ..Default::default() };
+        let listed = [v("gpt-5.5-high", "gpt-5.5", "GPT-5.5 1M"), v("gpt-5.5-low", "gpt-5.5", "GPT-5.5"), v("gpt-5-mini", "gpt-5-mini", "GPT-5 Mini")];
+        let models: Vec<(String, String)> = bases(&listed).into_iter().map(|m| (m.id, m.label)).collect();
+        assert_eq!(models, [("gpt-5.5".to_string(), "GPT-5.5".to_string()), ("gpt-5-mini".into(), "GPT-5 Mini".into())]);
+        assert_eq!(effort_name("xhigh"), "Extra high");
+    }
+
+    #[::core::prelude::v1::test]
     fn models_group_by_family_with_typed_names_and_other_last() {
-        let m = |id: &str, family: &str| ModelOption { id: id.into(), label: id.to_uppercase(), family: family.into() };
+        let m = |id: &str, family: &str| ModelOption { id: id.into(), label: id.to_uppercase(), family: family.into(), ..Default::default() };
         let listed = [m("auto", ""), m("gpt-5", "GPT"), m("grok-4", "Grok"), m("gpt-5-mini", "GPT")];
         let recent = ["my-model".to_string(), "grok-4".to_string()];
         let (groups, selected) = model_groups(&listed, &recent, "gpt-5-mini");
