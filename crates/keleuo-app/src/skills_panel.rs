@@ -198,7 +198,7 @@ impl Render for SkillsPanel {
                 }
             }
         }
-        let bg = cx.theme().sidebar;
+        let bg = cx.theme().background;
         list.size_full().bg(bg)
     }
 }

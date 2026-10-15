@@ -118,7 +118,7 @@ impl Render for ChangesPanel {
             (s.chat.changes(from), s.cwd.clone())
         };
         let theme = cx.theme();
-        let (muted, bg, green, red, border) = (theme.muted_foreground, theme.sidebar, theme.green, theme.red, theme.border);
+        let (muted, bg, green, red, border) = (theme.muted_foreground, theme.background, theme.green, theme.red, theme.border);
         let (added, removed) = changes.iter().fold((0, 0), |(a, r), c| (a + c.added, r + c.removed));
         let mut col = div()
             .id("changes-panel")

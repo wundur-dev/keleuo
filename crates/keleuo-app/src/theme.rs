@@ -52,17 +52,19 @@ pub fn apply(dark: bool, cx: &mut App) {
             c.blue = hex(0x8aa4f2);
             c.warning = hex(CRANE);
         } else {
-            c.sidebar = hex(0xedeff3);
-            c.tab_bar = hex(0xe6e9ee);
+            // Neutral greys: the ground (the session list, the space between panels) a soft
+            // grey, the panels white on it.
+            c.sidebar = hex(0xf1f1f1);
+            c.tab_bar = hex(0xe9e9e9);
             c.background = hex(0xffffff);
-            c.secondary = hex(0xf1f3f6);
-            c.secondary_hover = hex(0xe5e8ee);
-            c.border = hex(0xd5d9e0);
+            c.secondary = hex(0xf3f3f3);
+            c.secondary_hover = hex(0xe8e8e8);
+            c.border = hex(0xe1e1e1);
             c.tab_active = hex(0xffffff);
             c.tab_active_foreground = hex(0x16181c);
-            c.tab_foreground = hex(0x5a5f69);
-            c.muted_foreground = hex(0x5a5f69);
-            c.foreground = hex(0x1c1e22);
+            c.tab_foreground = hex(0x5d5d5d);
+            c.muted_foreground = hex(0x6b6b6b);
+            c.foreground = hex(0x1a1a1a);
             c.accent = hex(0xdfe6fb);
             c.ring = hex(PERIWINKLE);
             // Text colours that keep 4.5:1 on white.
@@ -77,6 +79,13 @@ pub fn apply(dark: bool, cx: &mut App) {
 }
 
 /// Match the system (or the setting) if it changed; redraw everything when it does.
+/// The ground of tab strips and title bars inside a panel: between the panel's white and the
+/// grey the panels sit on, so a panel's edges stay its own.
+pub fn strip_ground(cx: &App) -> Hsla {
+    let t = cx.theme();
+    crate::sheet_tabs::mix(t.background, t.sidebar, 0.55)
+}
+
 pub fn sync(cx: &mut App) {
     let dark = wants_dark(cx);
     if cx.theme().is_dark() != dark {

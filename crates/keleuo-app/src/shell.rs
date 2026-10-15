@@ -1461,8 +1461,6 @@ impl Shell {
             .flex()
             .flex_col()
             .bg(bg)
-            .border_r_1()
-            .border_color(border)
             .child(
                 div()
                     .id("session-new")
@@ -1491,8 +1489,8 @@ impl Shell {
     /// The folded list: a dot and initials per session, with the name in a tooltip.
     fn render_rail(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
-        let (fg, muted, border, hover, ring, bg, sel) =
-            (theme.foreground, theme.muted_foreground, theme.border, theme.secondary_hover, theme.ring, theme.sidebar, theme.secondary);
+        let (fg, muted, hover, ring, bg, sel) =
+            (theme.foreground, theme.muted_foreground, theme.secondary_hover, theme.ring, theme.sidebar, theme.secondary);
         let mut col = div()
             .id("session-rail")
             .w(px(RAIL_WIDTH))
@@ -1504,8 +1502,6 @@ impl Shell {
             .gap(px(RAIL_GAP))
             .py(px(RAIL_GAP))
             .bg(bg)
-            .border_r_1()
-            .border_color(border)
             // A press here is meant for what is under it: the list does not come out over it.
             .on_mouse_down(MouseButton::Left, cx.listener(|s, _, _, _| s.peek_held = true))
             .on_mouse_down(MouseButton::Right, cx.listener(|s, _, _, _| s.peek_held = true))
@@ -1588,8 +1584,8 @@ impl Shell {
     /// beside them, so what the pointer was over is what it is over now.
     fn render_peek(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
-        let (fg, muted, border, hover, ring, bg, sel) =
-            (theme.foreground, theme.muted_foreground, theme.border, theme.secondary_hover, theme.ring, theme.sidebar, theme.secondary);
+        let (fg, muted, hover, ring, bg, sel) =
+            (theme.foreground, theme.muted_foreground, theme.secondary_hover, theme.ring, theme.sidebar, theme.secondary);
         // The rail centres its items: the left edge they start from.
         let inset = |w: f32| px((RAIL_WIDTH - w) / 2.);
         let mut col = div()
@@ -1601,8 +1597,6 @@ impl Shell {
             .gap(px(RAIL_GAP))
             .py(px(RAIL_GAP))
             .bg(bg)
-            .border_r_1()
-            .border_color(border)
             .child(
                 div()
                     .id("peek-new")

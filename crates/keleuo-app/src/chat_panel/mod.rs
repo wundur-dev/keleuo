@@ -640,8 +640,8 @@ impl ChatPanel {
         if !session.backend.capabilities().terminal_view {
             return None;
         }
+        let ground = crate::theme::strip_ground(cx);
         let theme = cx.theme();
-        let ground = theme.sidebar;
         let content = theme.background;
         let palette = Palette::new(ground, theme.foreground, content, theme.foreground, theme.border, theme.ring);
         let shown = match session.view {

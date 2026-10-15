@@ -74,9 +74,66 @@ impl KeleuoSkin {
     }
 }
 
+/// Half the gap between two cards (each card's edge in the ground's colour), and the margin
+/// at the dock's outer edges.
+pub const GUTTER: f32 = 4.;
+/// How round a card's corners are.
+pub const CARD_RADIUS: f32 = 10.;
+
+/// Each tab group is a card on the ground, rounded, with a gap around it (its edge, in the
+/// ground's colour).
+fn card(frame: Stateful<Div>, cx: &App) -> Stateful<Div> {
+    frame.overflow_hidden().border(px(GUTTER)).border_color(cx.theme().sidebar).bg(cx.theme().background)
+}
+
+/// GPUI clips to rectangles only, so a panel paints over a card's rounded corners: these caps,
+/// in the ground's colour, go over them (each the corner's square less a quarter circle).
+/// `top`: the two upper corners (drawn last in the tab bar), else the lower two (drawn last in
+/// the panel). Their parent is `relative` and fills the card's width.
+fn corner_caps(top: bool, cx: &App) -> [AnyElement; 2] {
+    let ground = cx.theme().sidebar;
+    let r = CARD_RADIUS;
+    let cap = move |left: bool| {
+        let d = div().absolute().size(px(r));
+        let d = if top { d.top_0() } else { d.bottom_0() };
+        let d = if left { d.left_0() } else { d.right_0() };
+        d.child(
+            canvas(
+                |_, _, _| {},
+                move |b, _, window, _| {
+                    // In the cap's square: the corner, the two ends of the arc, the arc's centre.
+                    let (x0, y0, w) = (b.origin.x, b.origin.y, b.size.width);
+                    let at = |fx: f32, fy: f32| point(x0 + w * fx, y0 + w * fy);
+                    let (cx_, cy_) = (if left { 1. } else { 0. }, if top { 1. } else { 0. });
+                    let corner = at(1. - cx_, 1. - cy_);
+                    let a = at(cx_, 1. - cy_);
+                    let z = at(1. - cx_, cy_);
+                    // A quarter circle as a cubic: its controls 0.5523 of the radius along the
+                    // tangents.
+                    let k = 0.5523;
+                    let ctrl_a = at(cx_ + (1. - 2. * cx_) * k, 1. - cy_);
+                    let ctrl_b = at(1. - cx_, cy_ + (1. - 2. * cy_) * k);
+                    let mut path = PathBuilder::fill();
+                    path.move_to(corner);
+                    path.line_to(a);
+                    path.cubic_bezier_to(z, ctrl_a, ctrl_b);
+                    path.close();
+                    if let Ok(path) = path.build() {
+                        window.paint_path(path, ground);
+                    }
+                },
+            )
+            .size_full(),
+        )
+        .into_any_element()
+    };
+    [cap(true), cap(false)]
+}
+
 impl DockAreaRenderer for KeleuoSkin {
     fn frame(&self, window: &mut Window, cx: &mut App) -> Stateful<Div> {
-        self.inner.frame(window, cx)
+        // The ground the cards sit on, with a margin at the outer edges.
+        self.inner.frame(window, cx).bg(cx.theme().sidebar).p(px(GUTTER))
     }
     fn split_frame(&self, node: NodeId, axis: Axis, window: &mut Window, cx: &mut App) -> Stateful<Div> {
         self.inner.split_frame(node, axis, window, cx)
@@ -216,7 +273,8 @@ impl SheetGroup {
     /// A tool group's title bar: grip, title, the shown panel's actions, its options on hover.
     fn header(&self, group: &TabGroupContext, window: &mut Window, cx: &mut App) -> AnyElement {
         let theme = cx.theme();
-        let (bar, border, fg, muted) = (theme.tab_bar, theme.border, theme.foreground, theme.muted_foreground);
+        // White, as the panel below it: the bold title marks it.
+        let (bar, border, fg, muted) = (theme.background, theme.border, theme.foreground, theme.muted_foreground);
         let Some(ix) = shown_ix(group, cx) else {
             return div().into_any_element();
         };
@@ -243,8 +301,8 @@ impl SheetGroup {
                     div()
                         .min_w_0()
                         .truncate()
-                        .text_xs()
-                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_size(px(13.))
+                        .font_weight(FontWeight::BOLD)
                         .text_color(fg)
                         .child(title),
                 ),
@@ -478,8 +536,7 @@ impl SheetGroup {
 
 impl TabGroupRenderer for SheetGroup {
     fn frame(&self, group: &TabGroupContext, window: &mut Window, cx: &mut App) -> Stateful<Div> {
-        let frame = self.inner.frame(group, window, cx);
-        if is_tool_group(group, cx) { frame.bg(cx.theme().sidebar) } else { frame }
+        card(self.inner.frame(group, window, cx), cx)
     }
 
     fn content_frame(&self, _: &TabGroupContext, _: &mut Window, _: &mut App) -> Stateful<Div> {
@@ -491,12 +548,13 @@ impl TabGroupRenderer for SheetGroup {
             return Empty.into_any_element();
         }
         if is_tool_group(group, cx) {
-            return self.header(group, window, cx);
+            let header = self.header(group, window, cx);
+            return div().relative().w_full().child(header).children(corner_caps(true, cx)).into_any_element();
         }
         let theme = cx.theme();
         // The strip's ground is the darkest surface, so the shown tab (the content's colour)
         // and the recessed grey ones both read against it.
-        let (ground, content) = (theme.sidebar, theme.background);
+        let (ground, content) = (crate::theme::strip_ground(cx), theme.background);
         let trailing = self.doc_actions(group, window, cx);
         // Room above the tabs, in the strip's own colour (no line between the shown tab and
         // its content below).
@@ -507,7 +565,9 @@ impl TabGroupRenderer for SheetGroup {
             .flex_col()
             .bg(ground)
             .pt(px(DOC_STRIP_GAP_ABOVE))
+            .relative()
             .child(self.strip(group, Joined::Bottom, TOP_STRIP, ground, content, trailing, window, cx))
+            .children(corner_caps(true, cx))
             .into_any_element()
     }
 
@@ -523,11 +583,10 @@ impl TabGroupRenderer for SheetGroup {
             .overflow_hidden()
             .child(panel.cached(StyleRefinement::default().absolute().size_full()));
         if !is_tool_group(group, cx) || visible(group, cx).len() < 2 {
-            return view.into_any_element();
+            return div().relative().flex().flex_col().flex_1().min_h_0().child(view).children(corner_caps(false, cx)).into_any_element();
         }
         let theme = cx.theme();
-        let depth = if theme.is_dark() { 0.45 } else { 0.07 };
-        let (ground, content) = (sheet_tabs::mix(theme.sidebar, gpui_kit::black(), depth), theme.sidebar);
+        let (ground, content) = (crate::theme::strip_ground(cx), theme.background);
         // Room in the panel's colour above the tabs, so the list does not run into them (the
         // shown tab still joins the panel through it), and a little below them.
         div()
@@ -540,6 +599,8 @@ impl TabGroupRenderer for SheetGroup {
             .child(div().flex_none().h(px(STRIP_GAP_ABOVE)))
             .child(self.strip(group, Joined::Top, BOTTOM_STRIP, ground, content, None, window, cx))
             .child(div().flex_none().h(px(STRIP_GAP_BELOW)))
+            .relative()
+            .children(corner_caps(false, cx))
             .into_any_element()
     }
 

@@ -193,7 +193,7 @@ impl Focusable for AgentSide {
 
 impl Render for AgentSide {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let bg = cx.theme().sidebar;
+        let bg = cx.theme().background;
         let mut col = div()
             .id("agent-side")
             .flex()

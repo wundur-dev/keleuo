@@ -340,7 +340,7 @@ impl Render for FileTree {
         let selected = self.selected.clone();
         let entity = cx.entity().downgrade();
         let menu_tree = entity.clone();
-        let sidebar_bg = cx.theme().sidebar;
+        let sidebar_bg = cx.theme().background;
         let danger = cx.theme().danger;
         let naming = self.creating.as_ref().map(|c| (c.input.clone(), c.problem.clone().unwrap_or_default()));
         let list = uniform_list("file-tree", rows.len(), move |range, _window, cx| {
