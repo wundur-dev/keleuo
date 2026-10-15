@@ -819,8 +819,16 @@ impl Conversation {
                 }
             }
             Event::UserImages(paths) => {
+                // Above the message's text, as they were in the message box and as the agent
+                // gets them (images first); the text is added first, so they go before it.
                 if !paths.is_empty() {
-                    self.items.push(Item::Images(paths));
+                    match self.items.last() {
+                        Some(Item::User(_)) => {
+                            let at = self.items.len() - 1;
+                            self.items.insert(at, Item::Images(paths));
+                        }
+                        _ => self.items.push(Item::Images(paths)),
+                    }
                 }
             }
             Event::CostEstimate { usd } => {
@@ -986,6 +994,24 @@ pub fn tool_run_label(tool: &str, n: usize) -> String {
         _ => return format!("{n} {tool} calls"),
     };
     format!("{n} {what}")
+}
+
+#[cfg(test)]
+mod image_order_tests {
+    use super::*;
+
+    #[test]
+    fn images_go_above_their_message() {
+        let mut chat = Conversation::new("/tmp");
+        chat.push_user("look at this");
+        chat.apply(Event::UserImages(vec![PathBuf::from("/tmp/a.png")]));
+        assert!(matches!(chat.items[0], Item::Images(_)));
+        assert!(matches!(&chat.items[1], Item::User(t) if t == "look at this"));
+        // A message of images alone (no text) follows the reply before it.
+        chat.apply(Event::Text { text: "nice".into(), parent: None });
+        chat.apply(Event::UserImages(vec![PathBuf::from("/tmp/b.png")]));
+        assert!(matches!(chat.items.last(), Some(Item::Images(_))));
+    }
 }
 
 #[cfg(test)]
