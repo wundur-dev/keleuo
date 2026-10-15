@@ -599,4 +599,69 @@ mod tests {
         }
         assert!(chat.items.iter().any(|i| matches!(i, crate::conversation::Item::User(_))));
     }
+
+    /// Over ssh against the real `cursor-agent acp` on another machine (signed in there; no
+    /// model switch): a reply, a permission asked and allowed (the command ran there), a turn
+    /// stopped, the chat shared for Terminal there, and the chat replayed there.
+    /// `KELEUO_SSH=<destination> cargo test -p keleuo-core ssh_for_real -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn ssh_for_real() {
+        use std::sync::mpsc::channel;
+        use std::time::Duration;
+        let dest = std::env::var("KELEUO_SSH").expect("KELEUO_SSH=<destination>");
+        let host: Arc<dyn Host> = Arc::new(crate::host::SshHost::connect(&dest).unwrap());
+        let home = host.home_dir().unwrap();
+        let dir = home.join(format!("keleuo-ssh-test-{}", std::process::id()));
+        host.create_dir_all(&dir).unwrap();
+        let (tx, rx) = channel::<Message>();
+        let tx = Mutex::new(tx);
+        let mut agent = CursorAcpAgent::default();
+        let options = StartOptions { cwd: dir.clone(), ..Default::default() };
+        agent.start(host.clone(), &options, Arc::new(move |m| drop(tx.lock().unwrap().send(m)))).unwrap();
+        let mut session = None;
+        let mut turn = |agent: &mut CursorAcpAgent| {
+            let mut got = Vec::new();
+            loop {
+                match rx.recv_timeout(Duration::from_secs(180)).expect("the turn ends") {
+                    Message::Event(e @ (Event::TurnEnded { .. } | Event::Interrupted)) => {
+                        got.push(e);
+                        return got;
+                    }
+                    Message::Event(Event::Permission { request_id, input, summary, .. }) => {
+                        eprintln!("asked: {summary}");
+                        agent.answer_permission(&request_id, true, &input).unwrap();
+                        got.push(Event::Notice("asked".into()));
+                    }
+                    Message::Event(Event::Started { session_id: Some(id), .. }) => session = Some(id),
+                    Message::Event(e) => got.push(e),
+                    Message::Log(l) => eprintln!("log: {l}"),
+                    Message::Closed => panic!("cursor-agent ended"),
+                }
+            }
+        };
+        agent.send("Reply with just the word: pong").unwrap();
+        let first = turn(&mut agent);
+        let text: String = first.iter().filter_map(|e| if let Event::TextDelta(t) = e { Some(t.as_str()) } else { None }).collect();
+        eprintln!("first: {text:?}");
+        assert!(text.to_lowercase().contains("pong"));
+        agent.send("Run exactly this shell command: touch made_over_ssh.txt").unwrap();
+        let second = turn(&mut agent);
+        assert!(second.iter().any(|e| matches!(e, Event::Notice(n) if n == "asked")), "a permission was asked");
+        assert!(host.exists(&dir.join("made_over_ssh.txt")), "allowed, it ran there");
+        agent.send("Write a 1500 word story about a heron, plain prose, no tools.").unwrap();
+        std::thread::sleep(Duration::from_secs(8));
+        agent.interrupt().unwrap();
+        assert_eq!(turn(&mut agent).last(), Some(&Event::Interrupted));
+        agent.stop();
+        drop(turn);
+        let id = session.expect("a session id");
+        let chats = home.join(".cursor/chats").join(super::super::store::md5_hex(dir.to_string_lossy().as_bytes())).join(&id);
+        eprintln!("shared for Terminal: {}", host.is_link(&chats));
+        assert!(host.is_link(&chats), "linked there for Terminal");
+        let events = replay(host.as_ref(), &dir, &id).unwrap();
+        let users = events.iter().filter(|e| matches!(e, Event::UserText(_))).count();
+        eprintln!("replayed: {users} messages");
+        assert!(users >= 2);
+    }
 }

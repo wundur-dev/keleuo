@@ -225,7 +225,7 @@ impl Drop for Copy {
 }
 
 /// MD5 of `data` as lower-case hex: Cursor names a folder's chat directory with it.
-fn md5_hex(data: &[u8]) -> String {
+pub(crate) fn md5_hex(data: &[u8]) -> String {
     use md5::Digest as _;
     md5::Md5::digest(data).iter().map(|b| format!("{b:02x}")).collect()
 }
