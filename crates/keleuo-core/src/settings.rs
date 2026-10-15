@@ -165,6 +165,8 @@ pub struct Settings {
     pub cost_display: String,
     /// Light or dark: `"system"` (the default: follow macOS), `"light"` or `"dark"`.
     pub appearance: String,
+    /// How tabs are drawn: `"pill"` (the default), `"sheet"` or `"underline"`.
+    pub tab_style: String,
     /// Model names typed in beyond a backend's own list, most recent first.
     pub recent_models: Vec<String>,
     /// The message box keeps its proportional font even with a code block in it (by default

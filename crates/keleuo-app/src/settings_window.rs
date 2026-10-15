@@ -128,7 +128,17 @@ fn general() -> SettingPage {
                 .default_value("system"),
             )
             .description("Light or dark, or following macOS."),
-        ),
+        ).item(choice(
+            "Tab style",
+            "How tabs look: pills, flat labels with a line under the shown one, or slanted sheets.",
+            &[("pill", "Pills"), ("underline", "Underline"), ("sheet", "Sheets")],
+            "pill",
+            |s| s.tab_style.clone(),
+            |s, v| {
+                s.tab_style = v.to_string();
+                crate::sheet_tabs::set_style(v);
+            },
+        )),
         SettingGroup::new().title("Sessions").items([
             choice(
                 "New sessions open in",

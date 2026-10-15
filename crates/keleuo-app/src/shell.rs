@@ -1771,7 +1771,8 @@ impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::perf::first_frame(window);
         let theme = cx.theme();
-        let (bg, fg, hover, muted) = (theme.background, theme.foreground, theme.secondary_hover, theme.muted_foreground);
+        // The window's chrome (title bar, session list) is the grey the work area sits in.
+        let (bg, fg, hover, muted) = (theme.sidebar, theme.foreground, theme.secondary_hover, theme.muted_foreground);
         // Blocking the mouse: on Windows the title bar is a drag area, and a click the button
         // does not block reaches it (Windows then moves the window instead).
         let button = |id: &'static str, icon: Icon, tip: &'static str| {
@@ -1892,6 +1893,7 @@ impl Render for Shell {
         } else {
             Some(self.render_list(cx))
         };
+        let list_shown = list.is_some();
         let folder_rename = self.render_folder_rename(cx);
         // Web pages are native views over the window: they hide while an overlay is open.
         crate::web_panel::set_covered(self.folder_rename.is_some() || (self.folded && self.peek && !self.tabs.is_empty()));
@@ -1987,7 +1989,13 @@ impl Render for Shell {
                                     }
                                 }))
                             })
-                            .child(main),
+                            .relative()
+                            .child(main)
+                            // The work area is rounded where it meets the session list.
+                            .when(list_shown, |d| {
+                                d.child(crate::dock_skin::corner_cap(true, true, bg))
+                                    .child(crate::dock_skin::corner_cap(false, true, bg))
+                            }),
                     )
                     .children(peek),
             )

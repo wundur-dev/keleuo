@@ -75,6 +75,9 @@ pub fn apply(dark: bool, cx: &mut App) {
             c.cyan = hex(0x13798a);
             c.warning = hex(0x9a6400);
         }
+        // The title bar is chrome, the grey the work area sits in, with no line under it.
+        c.title_bar = c.sidebar;
+        c.title_bar_border = c.sidebar;
     });
 }
 

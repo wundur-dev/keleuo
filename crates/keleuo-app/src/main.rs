@@ -265,6 +265,7 @@ fn main() {
                 "dark" => Some(WindowAppearance::Dark),
                 _ => None,
             };
+            sheet_tabs::set_style(&settings.tab_style);
             cx.set_global(AppSettings(Rc::new(RefCell::new(settings))));
             cx.set_window_appearance(forced);
             cx.set_global(panels::Names(Rc::new(RefCell::new(

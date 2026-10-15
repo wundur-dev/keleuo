@@ -14,6 +14,35 @@ use gpui_kit::component::Icon;
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 
+/// How the tabs are drawn (Settings > General > Tab style; an experiment).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TabStyle {
+    /// Slanted sheets joined to the content (the original).
+    Sheet,
+    /// Rounded pills on the strip, the shown one in the content's colour.
+    Pill,
+    /// Flat labels, the shown one with an accent line along the content's edge.
+    Underline,
+}
+
+thread_local! {
+    static STYLE: Cell<TabStyle> = const { Cell::new(TabStyle::Pill) };
+}
+
+/// Set the tab style from its setting (`sheet`, `pill`, `underline`; anything else: pill).
+pub fn set_style(name: &str) {
+    let style = match name {
+        "sheet" => TabStyle::Sheet,
+        "underline" => TabStyle::Underline,
+        _ => TabStyle::Pill,
+    };
+    STYLE.with(|s| s.set(style));
+}
+
+pub fn style() -> TabStyle {
+    STYLE.with(Cell::get)
+}
+
 /// The tabs' shape, in pixels.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Geometry {
@@ -188,6 +217,52 @@ fn path(points: &[Point<f32>], fill: bool) -> Option<Path<Pixels>> {
 
 /// Paint one tab in `bounds` (its slot across, the strip's height down).
 pub fn paint_tab(bounds: Bounds<Pixels>, joined: Joined, shown: bool, hot: bool, palette: &Palette, window: &mut Window) {
+    match style() {
+        TabStyle::Sheet => paint_sheet(bounds, joined, shown, hot, palette, window),
+        TabStyle::Pill => paint_pill(bounds, shown, hot, palette, window),
+        TabStyle::Underline => paint_underline(bounds, joined, shown, hot, palette, window),
+    }
+}
+
+/// A pill inset in its slot: the shown one in the content's colour with a hairline edge, the
+/// one under the pointer a soft grey, the rest bare.
+fn paint_pill(bounds: Bounds<Pixels>, shown: bool, hot: bool, palette: &Palette, window: &mut Window) {
+    let inset = bounds.size.height * 0.16;
+    let b = Bounds::new(
+        point(bounds.origin.x, bounds.origin.y + inset),
+        size(bounds.size.width, bounds.size.height - inset * 2.),
+    );
+    let radius = b.size.height * 0.36;
+    if shown {
+        window.paint_quad(fill(b, palette.content).corner_radii(radius).border_widths(px(1.)).border_color(palette.line));
+    } else if hot {
+        window.paint_quad(fill(b, palette.face_hover).corner_radii(radius));
+    }
+}
+
+/// A flat label: the shown one gets the accent along the edge that meets the content, the one
+/// under the pointer a soft grey behind it.
+fn paint_underline(bounds: Bounds<Pixels>, joined: Joined, shown: bool, hot: bool, palette: &Palette, window: &mut Window) {
+    if shown {
+        let w = bounds.size.width - px(12.);
+        let x = bounds.origin.x + px(6.);
+        let y = match joined {
+            Joined::Top => bounds.origin.y + px(1.),
+            Joined::Bottom => bounds.origin.y + bounds.size.height - px(1. + ACCENT),
+        };
+        window.paint_quad(fill(Bounds::new(point(x, y), size(w, px(ACCENT))), palette.accent));
+    } else if hot {
+        let inset = bounds.size.height * 0.18;
+        let b = Bounds::new(
+            point(bounds.origin.x + px(2.), bounds.origin.y + inset),
+            size(bounds.size.width - px(4.), bounds.size.height - inset * 2.),
+        );
+        window.paint_quad(fill(b, palette.face_hover).corner_radii(px(5.)));
+    }
+}
+
+/// The original sheet: slanted, joined to the content, the shown one in front.
+fn paint_sheet(bounds: Bounds<Pixels>, joined: Joined, shown: bool, hot: bool, palette: &Palette, window: &mut Window) {
     let g = GEOMETRY;
     let x0 = f32::from(bounds.origin.x);
     let x1 = x0 + f32::from(bounds.size.width);
@@ -250,7 +325,9 @@ impl StripState {
                     Joined::Top => b.origin.y,
                     Joined::Bottom => b.origin.y + b.size.height - px(1.),
                 };
-                window.paint_quad(fill(Bounds::new(point(b.origin.x, y), size(b.size.width, px(1.))), palette.line));
+                if style() != TabStyle::Pill {
+                    window.paint_quad(fill(Bounds::new(point(b.origin.x, y), size(b.size.width, px(1.))), palette.line));
+                }
                 let slots = state.slots.borrow().clone();
                 let selected: Vec<bool> = slots.iter().map(|(ix, _)| Some(*ix) == shown).collect();
                 for i in paint_order(&selected) {
@@ -300,7 +377,10 @@ impl StripState {
 
 /// Room between a tab's side and its label.
 pub fn label_pad() -> Pixels {
-    px(GEOMETRY.pad + GEOMETRY.slant)
+    match style() {
+        TabStyle::Sheet => px(GEOMETRY.pad + GEOMETRY.slant),
+        TabStyle::Pill | TabStyle::Underline => px(10.),
+    }
 }
 
 /// A tab's box in a strip: its slot recorder, label padding and overlap with the one before.
@@ -311,14 +391,19 @@ pub fn tab_box(state: &Rc<StripState>, id: impl Into<ElementId>, ix: usize, n: u
         .flex_none()
         .h_full()
         .px(label_pad())
-        .when(n > 0, |d| d.ml(px(-GEOMETRY.overlap)))
+        .when(n > 0, |d| match style() {
+            // Sheets overlap; pills and labels stand a little apart.
+            TabStyle::Sheet => d.ml(px(-GEOMETRY.overlap)),
+            TabStyle::Pill | TabStyle::Underline => d.ml(px(2.)),
+        })
         .flex()
         .items_center()
         .gap_1()
-        .map(|d| match joined {
-            // Labels sit in the tab's body, away from the recessed free edge.
-            Joined::Top => d.pb(px(2.)),
-            Joined::Bottom => d.pt(px(2.)),
+        .map(|d| match (style(), joined) {
+            // Sheet labels sit in the tab's body, away from the recessed free edge.
+            (TabStyle::Sheet, Joined::Top) => d.pb(px(2.)),
+            (TabStyle::Sheet, Joined::Bottom) => d.pt(px(2.)),
+            _ => d,
         })
         .child(state.recorder(ix))
         .on_hover(state.hover(ix))
