@@ -738,6 +738,60 @@ impl ChatPanel {
         )
     }
 
+    /// The same at the foot of the conversation, as a chat app shows it: a spinner and grey
+    /// words under the last message ("Thinking · 12s", or the tool running), while the agent
+    /// works.
+    pub(super) fn render_working_line(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let session = self.session.read(cx);
+        if !session.chat.busy || session.chat.needs_input() || session.view == View::Terminal {
+            return None;
+        }
+        let answering = matches!(session.chat.items.last(), Some(Item::Assistant { streaming: true, .. }));
+        let tool = session.chat.running_tools().last().map(|t| {
+            let what = t.summary.lines().next().unwrap_or_default().trim().to_string();
+            match t.name.as_str() {
+                "Bash" | "Shell" => format!("Running {what}"),
+                "Read" => format!("Reading {what}"),
+                "Edit" | "MultiEdit" | "Write" | "StrReplace" => format!("Editing {what}"),
+                "Grep" | "Glob" => format!("Searching {what}"),
+                name => format!("{name} {what}"),
+            }
+        });
+        let doing = match (answering, tool, session.chat.status.as_deref()) {
+            (true, _, _) => "Writing".to_string(),
+            (_, Some(t), _) => t,
+            (_, None, None | Some("thinking" | "working" | "sending" | "requesting")) => "Thinking".into(),
+            (_, None, Some(_)) => "Working".into(),
+        };
+        let label = match self.busy_since.map(|t| format_elapsed(t.elapsed())) {
+            Some(e) => format!("{doing} · {e}"),
+            None => doing,
+        };
+        let muted = cx.theme().muted_foreground;
+        Some(
+            div()
+                .flex_none()
+                .w_full()
+                .flex()
+                .justify_center()
+                .px_4()
+                .pb_2()
+                .child(
+                    div()
+                        .w_full()
+                        .max_w(px(COLUMN))
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .text_size(px(13.))
+                        .text_color(muted)
+                        .child(self.spinner(muted).small())
+                        .child(div().min_w_0().truncate().child(label)),
+                )
+                .into_any_element(),
+        )
+    }
+
     pub(super) fn render_asking(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let session = self.session.read(cx);
         let asking = session.asking?;
