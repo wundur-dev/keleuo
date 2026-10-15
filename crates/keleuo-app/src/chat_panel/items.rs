@@ -223,7 +223,8 @@ impl ChatPanel {
                 .mx(px(-4.))
                 .rounded(px(4.))
                 .text_color(fg)
-                .child(div().flex_none().w(px(14.)).flex().justify_center().child(mark))
+                // One line tall, so the mark sits on the item's first line.
+                .child(div().flex_none().w(px(14.)).h(rems(1.45)).flex().items_center().justify_center().child(mark))
                 .child(div().flex_1().min_w_0().child(text))
                 .when_some(target, |d, target| {
                     let panel = panel.clone();
@@ -266,7 +267,7 @@ impl ChatPanel {
                 .iter()
                 .enumerate()
                 .map(|(n, t)| {
-                    let dot = div().mt(px(7.)).size(px(6.)).rounded_full().bg(amber).into_any_element();
+                    let dot = div().size(px(6.)).rounded_full().bg(amber).into_any_element();
                     let command = t.source.as_ref().and_then(|s| s.command.clone());
                     div()
                         .flex()

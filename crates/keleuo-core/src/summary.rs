@@ -358,34 +358,46 @@ fn fenced_command(block: &str) -> Option<String> {
     crate::conversation::shell_command(&lines[1..lines.len() - 1].join("\n"))
 }
 
-/// The instructions the model gets, unless the person changed them (see [`prompt_file`]).
+/// What the model is told about the job, unless the person changed it (see [`prompt_file`]):
+/// who it writes for, and how. What the answer's fields mean is in [`FORMAT`], which always
+/// follows, so an edited (or older) prompt cannot change it.
 pub const DEFAULT_PROMPT: &str = r#"# Summarise a coding agent's turn
 
 You summarise **one turn** of a coding agent's work for the person who asked for it, so they can
 see at a glance what happened without reading the whole reply.
 
-Answer with **JSON only**, matching the schema. No prose before or after it.
+## Rules
 
-## The agent's reply
+1. Each item is **at most 15 words**. The headline is at most 12.
+2. Plain words. Say what changed as the person would describe it: the behaviour, not the file
+   names.
+3. Use only what the text says. **Never invent** results, checks or changes.
+4. Prefer the agent's final words: the end of a turn says what was finished and what is left.
+"#;
+
+/// The answer's shape: what each field means, the tags, an example. Always sent after the
+/// prompt; it goes with the schema, which the person cannot change either.
+const FORMAT: &str = r#"## The answer
+
+Answer with **JSON only**, matching the schema. No prose before or after it.
 
 What the agent said comes in tagged pieces: `[P3]` is a paragraph or list item, `[C1]` a
 command the agent gave the person to run. Use the tags to point at where an item comes from.
-
-## Fields
 
 - **`status`**: how the work went, one of:
   - `done`: what was asked is carried out (even when there are steps left for the person).
   - `partial`: some of it is done and some is not.
   - `failed`: it could not do what was asked.
   - `waiting`: the agent stopped on a question and cannot go on without an answer.
-- **`headline`**: what happened, in at most 12 words. Plain words, no file paths, no final
-  period.
-- **`changed`**: what changed, as the person would describe it: the behaviour, not the file
-  names. At most 5 items. Empty when nothing changed.
+- **`headline`**: what happened. No file paths, no final period.
+- **`changed`**: what changed, at most 5 items. Empty when nothing changed.
 - **`checked`**: how the work was verified, only when the agent says so. Each has:
   - `what`: the check (tests, a build, running it), in a few words.
-  - `outcome`: `passed`, `failed`, `not_run` or `unknown`. Use `unknown` whenever the agent
-    does not say how it came out; never assume it passed.
+  - `outcome`: how the check came out:
+    - `passed`: the agent says it worked, passed, is clean, or showed what was expected.
+    - `failed`: the agent says it failed, errored, or showed something wrong.
+    - `not_run`: the agent says it did not run it.
+    - `unknown`: the agent does not say how it came out. Never assume either way.
   - `source`: the tag of the piece that reports it, or `""`.
 - **`needs_you`**: questions, decisions and actions waiting on the person: a command to run,
   something to push, a question to answer. Each has:
@@ -395,12 +407,6 @@ command the agent gave the person to run. Use the tags to point at where an item
 
   One item per thing to do. A command belongs to its item as its `source`: never list the
   command itself, or what it should print, as an item of its own.
-
-## Rules
-
-1. Each item is **at most 15 words**.
-2. Use only what the text says. **Never invent** results, checks or changes.
-3. Prefer the agent's final words: the end of a turn says what was finished and what is left.
 
 ## Example
 
@@ -418,6 +424,16 @@ command the agent gave the person to run. Use the tags to point at where an item
 ```
 "#;
 
+/// Earlier defaults (md5 of their trimmed text): a prompt file that is still one of them was
+/// never edited, and gets the current default.
+const OLD_DEFAULTS: [&str; 3] =
+    ["219c0cbaa4d4d905a01281a5291594a7", "24bc6a60862379ab119f26e0a1c37993", "74ab7eda124f7394adef0f6832d0397b"];
+
+fn md5_of(text: &str) -> String {
+    use md5::{Digest, Md5};
+    Md5::digest(text.as_bytes()).iter().map(|b| format!("{b:02x}")).collect()
+}
+
 /// The person's own instructions for the model, a Markdown file in Keleuo's settings folder;
 /// [`DEFAULT_PROMPT`] while there is none. The summary's fields stay as they are whatever it
 /// says (they are what the chat shows).
@@ -425,18 +441,25 @@ pub fn prompt_file() -> Option<PathBuf> {
     crate::settings::config_dir().map(|d| d.join("summary-prompt.md"))
 }
 
-/// The instructions to send: the person's file when it says something, else the default.
+/// The person's prompt: their file when it says something of their own, else the default.
 pub fn prompt() -> String {
     prompt_file()
         .and_then(|p| std::fs::read_to_string(p).ok())
-        .filter(|t| !t.trim().is_empty())
+        .filter(|t| !t.trim().is_empty() && !OLD_DEFAULTS.contains(&md5_of(t.trim()).as_str()))
         .unwrap_or_else(|| DEFAULT_PROMPT.to_string())
 }
 
-/// The prompt file, written with the default first when there is none yet (to edit it).
+/// What the model is told: the prompt, then the answer's shape.
+pub fn instructions() -> String {
+    format!("{}\n\n{FORMAT}", prompt().trim_end())
+}
+
+/// The prompt file, written with the default first when there is none yet, or it is an
+/// earlier default never edited (to edit it).
 pub fn ensure_prompt_file() -> std::io::Result<PathBuf> {
     let path = prompt_file().ok_or_else(|| std::io::Error::other("no settings folder"))?;
-    if !path.exists() {
+    let old = std::fs::read_to_string(&path).is_ok_and(|t| OLD_DEFAULTS.contains(&md5_of(t.trim()).as_str()));
+    if !path.exists() || old {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
@@ -619,7 +642,7 @@ fn agent(timeout: Duration) -> ureq::Agent {
 pub fn summarize(config: &Config, turn: &TurnText) -> Result<TurnSummary> {
     let url = format!("{}/chat/completions", base(&config.endpoint));
     let agent = agent(Duration::from_secs(if config.thinking { 300 } else { 120 }));
-    let instructions = prompt();
+    let instructions = instructions();
     let send = |structured: bool| -> Result<Value> {
         let mut res = with_key(agent.post(&url), &config.api_key).send_json(request(config, turn, &instructions, structured))?;
         Ok(res.body_mut().read_json::<Value>()?)
@@ -816,12 +839,19 @@ mod tests {
     }
 
     #[test]
+    fn earlier_defaults_are_known_and_the_format_always_follows() {
+        assert!(!OLD_DEFAULTS.contains(&md5_of(DEFAULT_PROMPT.trim()).as_str()), "the current default is not an old one");
+        let i = instructions();
+        assert!(i.ends_with(FORMAT) && i.contains("`not_run`"));
+    }
+
+    #[test]
     fn the_base_takes_either_form() {
         assert_eq!(base("http://h:1234"), "http://h:1234/v1");
         assert_eq!(base("http://h:1234/v1/"), "http://h:1234/v1");
     }
 
-    const REPLY: &str = "I added `multiply(a, b)` to `calc.py`, returning `a * b`, below `add`. I haven't run it. You need to check it yourself.\n\n```\n! python3 -B -c \"from calc import multiply; print(multiply(2, 3), multiply(-4, 5))\"\n```\n\nThe expected output is `6 -20`.";
+    const REPLY: &str = "I added `multiply(a, b)` to `calc.py`, returning `a * b`, below `add`. I checked `add` still works in a test copy: screenshots taken 0.7 s apart show the result each time. Clippy is clean. I haven't run `multiply`. You need to check it yourself.\n\n```\n! python3 -B -c \"from calc import multiply; print(multiply(2, 3), multiply(-4, 5))\"\n```\n\nThe expected output is `6 -20`.";
 
     /// Against a real server: KELEUO_SUMMARY_ENDPOINT=http://host:1234 KELEUO_SUMMARY_MODEL=…
     #[test]
