@@ -1350,17 +1350,16 @@ impl Shell {
                 div()
                     .id(("session-row", number))
                     .relative()
+                    .mx(px(6.))
                     .px_2()
                     .py(px(6.))
                     .flex()
                     .gap_2()
-                    .border_b_1()
-                    .border_color(border.opacity(0.5))
+                    .rounded(px(8.))
                     .cursor_pointer()
+                    // The shown session: a rounded highlight.
                     .when(active, |d| d.bg(sel))
                     .when(!active, |d| d.hover(|d| d.bg(hover)))
-                    // The shown session: an accent bar along its left edge.
-                    .when(active, |d| d.child(div().absolute().left_0().top_0().bottom_0().w(px(2.)).bg(ring)))
                     .child(
                         div()
                             .pt(px(5.))
@@ -1454,28 +1453,46 @@ impl Shell {
                 .drag_over::<SessionDrag>(move |d, _, _, _| d.border_t_2().border_color(ring))
                 .on_drop(cx.listener(move |s, d: &SessionDrag, _, cx| s.reorder(d.number, end, cx))),
         );
+        // A lighter panel set into the window's grey frame, rounded at its top left (as Codex's
+        // sidebar is): a heading, then New session as a row of its own.
         div()
             .w(px(LIST_WIDTH))
             .flex_none()
             .h_full()
+            .ml(px(6.))
+            .relative()
             .flex()
             .flex_col()
-            .bg(bg)
+            .bg(crate::theme::tool_ground(cx))
+            .child(
+                div()
+                    .flex_none()
+                    .h(px(40.))
+                    .px(px(14.))
+                    .flex()
+                    .items_center()
+                    .text_size(px(18.))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(fg)
+                    .child("Sessions"),
+            )
             .child(
                 div()
                     .id("session-new")
-                    .h(px(30.))
+                    .h(px(32.))
                     .flex_none()
+                    .mx(px(6.))
+                    .mb_1()
                     .px_2()
                     .flex()
                     .items_center()
                     .gap_2()
-                    .text_sm()
-                    .text_color(muted)
-                    .border_b_1()
-                    .border_color(border)
+                    .rounded(px(8.))
+                    .bg(bg)
+                    .text_size(px(14.))
+                    .text_color(fg)
                     .cursor_pointer()
-                    .hover(|d| d.bg(hover).text_color(fg))
+                    .hover(|d| d.bg(hover))
                     .child(Icon::new(IconName::Plus).small())
                     .child("New session")
                     .child(div().flex_1())
@@ -1483,6 +1500,7 @@ impl Shell {
                     .on_click(cx.listener(|s, _, window, cx| s.new_session(window, cx))),
             )
             .child(col)
+            .child(crate::dock_skin::corner_cap(true, true, bg))
             .into_any_element()
     }
 
@@ -1916,6 +1934,8 @@ impl Render for Shell {
             .flex_col()
             .bg(bg)
             .text_color(fg)
+            // A touch heavier than regular, as Codex sets SF Pro (430): denser, still not bold.
+            .font_weight(FontWeight(crate::theme::UI_WEIGHT))
             .track_focus(&self.focus)
             .on_action(cx.listener(|s, _: &NewSession, w, cx| s.new_session(w, cx)))
             .on_action(cx.listener(|s, _: &ToggleSessions, _, cx| s.toggle_folded(cx)))
@@ -1991,11 +2011,9 @@ impl Render for Shell {
                             })
                             .relative()
                             .child(main)
-                            // The work area is rounded where it meets the session list.
-                            .when(list_shown, |d| {
-                                d.child(crate::dock_skin::corner_cap(true, true, bg))
-                                    .child(crate::dock_skin::corner_cap(false, true, bg))
-                            }),
+                            // Beside the folded rail (the frame), the work area is rounded at its
+                            // top left; beside the open list, the list's corner is.
+                            .when(list_shown && self.folded, |d| d.child(crate::dock_skin::corner_cap(true, true, bg))),
                     )
                     .children(peek),
             )

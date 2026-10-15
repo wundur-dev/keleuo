@@ -8,6 +8,9 @@ use gpui_kit::component::{Theme, ThemeMode};
 use gpui_kit::*;
 
 /// The icon's periwinkle.
+/// The interface text's weight: between regular (400) and medium (500).
+pub const UI_WEIGHT: f32 = 430.;
+
 pub const PERIWINKLE: u32 = 0x6084e8;
 /// The crane's yellow.
 pub const CRANE: u32 = 0xffc354;
