@@ -1112,7 +1112,16 @@ impl Shell {
                     None => "no browser".into(),
                 }
             }
-            "close-browser" => {
+            "show-image" => {
+                // Tests: open an image full size, as a click on one in the chat does.
+                crate::image_view::show(PathBuf::from(arg), cx);
+                "ok".into()
+            }
+            "close-image" => {
+                crate::image_view::close(cx);
+                "ok".into()
+            }
+                        "close-browser" => {
                 self.close_browser(window, cx);
                 "ok".into()
             }
@@ -1914,7 +1923,9 @@ impl Render for Shell {
         let list_shown = list.is_some();
         let folder_rename = self.render_folder_rename(cx);
         // Web pages are native views over the window: they hide while an overlay is open.
-        crate::web_panel::set_covered(self.folder_rename.is_some() || (self.folded && self.peek && !self.tabs.is_empty()));
+        crate::web_panel::set_covered(
+            self.folder_rename.is_some() || (self.folded && self.peek && !self.tabs.is_empty()) || crate::image_view::is_open(cx),
+        );
         // The folded list, peeking out over the content until the pointer leaves it.
         let peek = (self.folded && self.peek && !self.tabs.is_empty()).then(|| {
             div()
@@ -1936,6 +1947,13 @@ impl Render for Shell {
             .text_color(fg)
             // A touch heavier than regular, as Codex sets SF Pro (430): denser, still not bold.
             .font_weight(FontWeight(crate::theme::UI_WEIGHT))
+            // An image opened full size: Esc closes it, wherever the keyboard is.
+            .capture_key_down(cx.listener(|_, ev: &KeyDownEvent, _, cx| {
+                if ev.keystroke.key == "escape" && crate::image_view::is_open(cx) {
+                    crate::image_view::close(cx);
+                    cx.stop_propagation();
+                }
+            }))
             .track_focus(&self.focus)
             .on_action(cx.listener(|s, _: &NewSession, w, cx| s.new_session(w, cx)))
             .on_action(cx.listener(|s, _: &ToggleSessions, _, cx| s.toggle_folded(cx)))
@@ -2018,6 +2036,7 @@ impl Render for Shell {
                     .children(peek),
             )
             .children(folder_rename)
+            .children(crate::image_view::render(cx))
     }
 }
 

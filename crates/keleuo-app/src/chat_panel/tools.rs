@@ -440,10 +440,7 @@ impl ChatPanel {
                         .border_color(border)
                         .cursor_pointer()
                         .child(img(path.clone()).size_full().object_fit(ObjectFit::Contain))
-                        .on_click(cx.listener(move |panel, _, _, cx| {
-                            panel.preview = Some(p.clone());
-                            cx.notify();
-                        })),
+                        .on_click(move |_, _, cx| crate::image_view::show(p.clone(), cx)),
                 );
             }
             card = card.child(row);

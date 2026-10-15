@@ -95,8 +95,6 @@ pub struct ChatPanel {
     md_marks: Option<TextDecorationCollection<TextareaMode>>,
     /// A syntax highlighter per language named on a code fence in the message box.
     md_highlighters: HashMap<String, gpui_kit::component::highlighter::SyntaxHighlighter>,
-    /// An image shown full size over the chat.
-    preview: Option<PathBuf>,
     /// Choices made on an open question card, by request: the labels picked for each question.
     picks: HashMap<String, Vec<Vec<String>>>,
     /// The known failure whose fixes are being offered.
@@ -224,7 +222,6 @@ impl ChatPanel {
             md_marks: None,
             md_highlighters: HashMap::new(),
             picks: HashMap::new(),
-            preview: None,
             fixing: None,
             fixed: Default::default(),
             toggled: HashSet::new(),
@@ -826,8 +823,7 @@ impl Render for ChatPanel {
                     .when(!empty, |d| d.child(
                         list(self.list.clone(), cx.processor(|this, ix, _window, cx| this.render_entry(ix, cx)))
                             .size_full(),
-                    ))
-
+                    )),
             )
             .children(self.render_asking(cx))
             .child({
@@ -837,23 +833,6 @@ impl Render for ChatPanel {
             }))
             .children(self.render_views(cx))
             .children(self.render_fix(cx))
-            .children(self.preview.clone().map(|path| {
-                div()
-                    .id("image-preview")
-                    .absolute()
-                    .inset_0()
-                    .bg(gpui_kit::black().opacity(0.8))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .p_6()
-                    .cursor_pointer()
-                    .child(img(path).max_w_full().max_h_full().object_fit(ObjectFit::Contain))
-                    .on_click(cx.listener(|p, _, _, cx| {
-                        p.preview = None;
-                        cx.notify();
-                    }))
-            }))
             .relative()
     }
 }

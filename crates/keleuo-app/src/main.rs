@@ -44,6 +44,7 @@ mod perf;
 mod procstats;
 mod instance;
 mod pty;
+mod image_view;
 mod sheet_tabs;
 mod settings_window;
 mod shell;

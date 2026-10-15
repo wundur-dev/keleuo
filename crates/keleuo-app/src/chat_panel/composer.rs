@@ -645,10 +645,7 @@ impl ChatPanel {
                     .border_color(border)
                     .cursor_pointer()
                     .child(img(path.clone()).size_full().object_fit(ObjectFit::Cover))
-                    .on_click(cx.listener(move |p, _, _, cx| {
-                        p.preview = Some(p1.clone());
-                        cx.notify();
-                    }))
+                    .on_click(move |_, _, cx| crate::image_view::show(p1.clone(), cx))
                     .child(
                         div()
                             .id(("chip-x", n))
