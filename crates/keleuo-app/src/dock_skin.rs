@@ -270,7 +270,7 @@ impl SheetGroup {
         // The tool panels' light grey, as the panel below it.
         // The title in a dark grey rather than black, on a bar that sits slightly in.
         let (bar, border, muted) = (crate::theme::tool_ground(cx), theme.border, theme.muted_foreground);
-        let fg = sheet_tabs::mix(theme.foreground, muted, 0.4);
+        let fg = sheet_tabs::mix(theme.foreground, muted, 0.55);
         let inset = BoxShadow {
             color: gpui_kit::black().opacity(if theme.is_dark() { 0.35 } else { 0.07 }),
             offset: point(px(0.), px(1.)),
