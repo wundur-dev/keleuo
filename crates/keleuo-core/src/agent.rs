@@ -77,7 +77,11 @@ pub enum Event {
     ToolIssue { id: String, issue: Issue },
     /// The person stopped the turn: it is over, with no answer to come.
     Interrupted,
-    /// A subagent finished.
+    /// A background subagent was sent another message and runs again (`agent_id`: the id it
+    /// was launched under).
+    SubagentResumed { agent_id: String },
+    /// A subagent finished. `id` is the tool call that started it, or, when only that is
+    /// known, the id it was launched under.
     SubagentEnded { id: String, failed: bool, summary: Option<String>, tokens: Option<u64>, duration_ms: Option<u64> },
     /// A turn ended, with what it used. `cost_total_usd` is the process total so far.
     TurnEnded {

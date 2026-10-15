@@ -253,6 +253,15 @@ impl Conversation {
 
     /// The process ended: the next one reports its cost from zero again.
     pub fn process_ended(&mut self) {
+        // Subagents run inside the agent's process: they end with it.
+        for agent in self.agents.iter_mut().filter(|a| a.running()) {
+            agent.status = AgentStatus::Failed;
+            agent.current_tool = None;
+            agent.summary = Some("Stopped: the agent's process ended (a restart or exit) before it finished.".into());
+            if agent.duration_ms.is_none() {
+                agent.duration_ms = agent.started.map(|t| t.elapsed().as_millis() as u64);
+            }
+        }
         self.cost_base = self.total_cost_usd;
         self.stop_clocks();
         self.busy = false;
@@ -756,7 +765,28 @@ impl Conversation {
                 };
                 self.items.push(Item::AgentMessage { from, agent: tool_use_id, title, text });
             }
+            Event::SubagentResumed { agent_id } => {
+                let replaying = self.replaying;
+                if let Some(agent) = self.agents.iter_mut().find(|a| a.task_id.as_deref() == Some(agent_id.as_str())) {
+                    agent.status = AgentStatus::Running;
+                    agent.summary = None;
+                    agent.duration_ms = None;
+                    agent.started = (!replaying).then(std::time::Instant::now);
+                }
+            }
             Event::SubagentEnded { id, failed, summary, tokens, duration_ms } => {
+                // Named by the tool call that started it, or by the id it was launched under (a
+                // background agent stopped from outside); the end of anything else (a background
+                // command) is no subagent's.
+                let Some(id) = self
+                    .agents
+                    .iter()
+                    .find(|a| a.tool_use_id == id)
+                    .or_else(|| self.agents.iter().find(|a| a.task_id.as_deref() == Some(id.as_str())))
+                    .map(|a| a.tool_use_id.clone())
+                else {
+                    return applied;
+                };
                 let agent = self.agent_entry(&id);
                 agent.status = if failed { AgentStatus::Failed } else { AgentStatus::Done };
                 agent.current_tool = None;

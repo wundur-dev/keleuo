@@ -252,7 +252,7 @@ fn line_events(v: &Value, mapper: &mut Mapper) -> Vec<Event> {
                 vec![Event::AgentMessage { from, text }]
             } else if let Some((id, failed)) = super::messages::task_ended(v) {
                 // Background shell commands notify too: only subagents end here.
-                if mapper.started_agent(&id) {
+                if let Some(id) = mapper.agent_call(&id) {
                     vec![Event::SubagentEnded { id, failed, summary: None, tokens: None, duration_ms: None }]
                 } else {
                     Vec::new()
@@ -944,6 +944,47 @@ mod tests {
         chat.apply_all(line_events(&lines[4], &mut mapper));
         assert_eq!(chat.agents.len(), 1, "a shell task's notice is no subagent");
         assert!(!chat.items.iter().any(|i| matches!(i, Item::User(_))), "nothing shows as the person's");
+    }
+
+    /// A background agent stopped from outside (its session's process ended) is named only by
+    /// its own id; sent another message, it runs again; and when the agent's process ends, a
+    /// subagent still running ends with it.
+    #[test]
+    fn a_background_agent_stopped_resumed_and_ended_with_its_process() {
+        use serde_json::json;
+        use crate::conversation::AgentStatus;
+        let launch = [
+            json!({"type": "assistant", "message": {"id": "m1", "model": "claude", "content": [
+                {"type": "tool_use", "id": "toolu_a", "name": "Agent", "input": {"description": "Record sessions", "run_in_background": true}}]}}),
+            json!({"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_a",
+                "content": [{"type": "text", "text": "Async agent launched successfully.\nagentId: a72 (internal ID)"}]}]}}),
+        ];
+        let stopped = json!({"type": "user", "message": {"role": "user", "content":
+            "<task-notification>\n<task-id>a72</task-id>\n<status>stopped</status>\n<summary>didn't finish</summary>\n</task-notification>"}});
+        let resume = [
+            json!({"type": "assistant", "message": {"id": "m2", "model": "claude", "content": [
+                {"type": "tool_use", "id": "toolu_s", "name": "SendMessage", "input": {"to": "a72", "message": "go on"}}]}}),
+            json!({"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_s",
+                "content": [{"type": "text", "text": "{\"success\":true,\"resumedAgentId\":\"a72\"}"}]}]}}),
+        ];
+        let mut chat = Conversation::new("/tmp");
+        let mut mapper = Mapper::new("/tmp");
+        mapper.history = true;
+        for l in &launch {
+            chat.apply_all(line_events(l, &mut mapper));
+        }
+        assert_eq!(chat.agent("toolu_a").unwrap().status, AgentStatus::Running);
+        chat.apply_all(line_events(&stopped, &mut mapper));
+        assert_eq!(chat.agent("toolu_a").unwrap().status, AgentStatus::Failed, "stopped, named by its own id");
+        assert_eq!(chat.agents.len(), 1);
+        for l in &resume {
+            chat.apply_all(line_events(l, &mut mapper));
+        }
+        assert_eq!(chat.agent("toolu_a").unwrap().status, AgentStatus::Running, "resumed");
+        chat.process_ended();
+        let agent = chat.agent("toolu_a").unwrap();
+        assert_eq!(agent.status, AgentStatus::Failed, "ended with the process");
+        assert!(agent.summary.as_deref().unwrap().contains("process ended"));
     }
 
     #[test]

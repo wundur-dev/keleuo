@@ -36,6 +36,15 @@ impl Mapper {
         self.tools.get(tool_use_id).is_some_and(|(name, _)| is_agent_tool(name))
     }
 
+    /// The tool call that started subagent `id`: `id` itself, or the call that launched the
+    /// background agent with that id. `None` when `id` is no subagent of this session.
+    pub fn agent_call(&self, id: &str) -> Option<String> {
+        if self.started_agent(id) {
+            return Some(id.to_string());
+        }
+        self.tasks.get(id).filter(|call| self.started_agent(call)).cloned()
+    }
+
     /// Whether a tool call seen so far is one that does not start a subagent. Claude Code
     /// reports background commands (`task_type: local_bash`) as tasks too; they are not agents.
     fn other_tool(&self, tool_use_id: &str) -> bool {
@@ -116,7 +125,19 @@ impl Mapper {
                 let background = is_agent_tool(&name) && !is_error && content.starts_with(ASYNC_LAUNCHED);
                 let mut out = Vec::new();
                 if background {
-                    out.push(Event::SubagentBackground { id: tool_use_id.clone(), agent_id: launched_agent_id(&content) });
+                    let agent_id = launched_agent_id(&content);
+                    // Its end may name it only by this id.
+                    if let Some(a) = &agent_id {
+                        self.tasks.insert(a.clone(), tool_use_id.clone());
+                    }
+                    out.push(Event::SubagentBackground { id: tool_use_id.clone(), agent_id });
+                }
+                // A background subagent sent another message runs again.
+                if name == "SendMessage"
+                    && !is_error
+                    && let Some(agent_id) = resumed_agent_id(&content)
+                {
+                    out.push(Event::SubagentResumed { agent_id });
                 }
                 // A known needless failure: say so, with the fixes.
                 let issue = super::issues::spot(&name, &content, std::path::Path::new(&self.cwd), dirs::home_dir().as_deref());
@@ -169,15 +190,15 @@ impl Mapper {
                 }]
             }
             Raw::TaskDone { tool_use_id, task_id, status, summary, total_tokens, duration_ms } => {
-                let Some(id) = tool_use_id.or_else(|| self.tasks.get(&task_id).cloned()) else {
-                    return Vec::new();
-                };
+                // Unknown here (launched by an earlier process): the id it was launched under,
+                // which the chat knows it by.
+                let id = tool_use_id.or_else(|| self.tasks.get(&task_id).cloned()).unwrap_or(task_id);
                 if self.other_tool(&id) {
                     return Vec::new();
                 }
                 vec![Event::SubagentEnded {
                     id,
-                    failed: matches!(status.as_str(), "failed" | "error" | "killed" | "cancelled"),
+                    failed: matches!(status.as_str(), "failed" | "error" | "killed" | "cancelled" | "stopped"),
                     summary,
                     tokens: total_tokens,
                     duration_ms,
@@ -202,6 +223,12 @@ impl Mapper {
     pub fn map_lines(&mut self, text: &str) -> Vec<Event> {
         text.lines().filter_map(super::stream::parse_line).flat_map(|e| self.map(e)).collect()
     }
+}
+
+/// The agent a `SendMessage` result says it resumed (`{"resumedAgentId": ...}`).
+fn resumed_agent_id(result: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(result.trim()).ok()?;
+    v.get("resumedAgentId")?.as_str().map(str::to_string)
 }
 
 /// How the Agent tool's result begins when the subagent runs in the background.
