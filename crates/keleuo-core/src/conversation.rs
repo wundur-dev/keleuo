@@ -177,6 +177,17 @@ pub struct Applied {
     pub turn_ended: bool,
 }
 
+/// Where the person's last message is: with Keleuo still, or with the agent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Delivery {
+    /// Handed to the agent; it has not shown it has it yet.
+    Sending,
+    /// The agent has it.
+    Seen,
+    /// It failed or exited before it took it.
+    Failed,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct Conversation {
     pub items: Vec<Item>,
@@ -204,6 +215,9 @@ pub struct Conversation {
     pub context_window: Option<u64>,
     /// The latest status note (`requesting`, ...), cleared at the end of a turn.
     pub status: Option<String>,
+    /// Whether the agent has the last message the person sent from here (`None` for one that
+    /// came with the history).
+    pub delivery: Option<Delivery>,
     /// Index of the assistant text item receiving streamed deltas.
     streaming: Option<usize>,
     /// The streaming item is a preview read off the agent's screen, not text from its stream:
@@ -228,6 +242,7 @@ impl Conversation {
     /// Record a message the user sent.
     pub fn push_user(&mut self, text: &str) {
         self.items.push(Item::User(text.to_string()));
+        self.delivery = Some(Delivery::Sending);
         self.turn_agents_from = self.agents.len();
         self.turn_cost_from = self.total_cost_usd;
         self.busy = true;
@@ -259,7 +274,23 @@ impl Conversation {
     }
 
     /// The process ended: the next one reports its cost from zero again.
+    /// The agent has the last message sent (it said so, or began working on it).
+    pub fn mark_seen(&mut self) {
+        if self.delivery == Some(Delivery::Sending) {
+            self.delivery = Some(Delivery::Seen);
+            self.revision += 1;
+        }
+    }
+
+    /// The last message sent never reached the agent (it failed or exited first).
+    fn not_delivered(&mut self) {
+        if self.delivery == Some(Delivery::Sending) {
+            self.delivery = Some(Delivery::Failed);
+        }
+    }
+
     pub fn process_ended(&mut self) {
+        self.not_delivered();
         // Subagents run inside the agent's process: they end with it.
         for agent in self.agents.iter_mut().filter(|a| a.running()) {
             agent.status = AgentStatus::Failed;
@@ -617,6 +648,20 @@ impl Conversation {
     pub fn apply(&mut self, event: Event) -> Applied {
         let mut applied = Applied::default();
         self.revision += 1;
+        // The agent working (thinking, writing, calling a tool, asking) has the message; a turn
+        // that fails before any of it did not take it.
+        match &event {
+            Event::TurnEnded { error: Some(_), .. } => self.not_delivered(),
+            Event::Status(_)
+            | Event::TextStart
+            | Event::TextDelta(_)
+            | Event::Text { .. }
+            | Event::ToolCall { .. }
+            | Event::Permission { .. }
+            | Event::UserText(_)
+            | Event::TurnEnded { .. } => self.mark_seen(),
+            _ => {}
+        }
         match event {
             Event::Started { session_id, model, permission_mode, cwd } => {
                 self.session_id = session_id.or(self.session_id.take());
@@ -1407,5 +1452,35 @@ mod shell_command_tests {
         assert_eq!(shell_command("ls -la"), None);
         assert_eq!(shell_command("! a\n! b"), None, "several commands: copy them instead");
         assert_eq!(shell_command("!"), None);
+    }
+
+    #[test]
+    fn a_sent_message_is_sending_until_the_agent_shows_it_has_it() {
+        use crate::agent::Event;
+        use crate::conversation::{Conversation, Delivery};
+        let mut chat = Conversation::default();
+        assert_eq!(chat.delivery, None, "history carries no mark");
+        chat.push_user("hello");
+        assert_eq!(chat.delivery, Some(Delivery::Sending));
+        chat.apply(Event::TextDelta("hi".into()));
+        assert_eq!(chat.delivery, Some(Delivery::Seen));
+        // A later failure does not take it back.
+        chat.process_ended();
+        assert_eq!(chat.delivery, Some(Delivery::Seen));
+
+        chat.push_user("again");
+        chat.process_ended();
+        assert_eq!(chat.delivery, Some(Delivery::Failed), "the agent exited first");
+
+        chat.push_user("once more");
+        chat.apply(Event::TurnEnded {
+            error: Some("refused".into()),
+            cost_total_usd: None,
+            input_tokens: 0,
+            output_tokens: 0,
+            duration_ms: None,
+            session_id: None,
+        });
+        assert_eq!(chat.delivery, Some(Delivery::Failed));
     }
 }

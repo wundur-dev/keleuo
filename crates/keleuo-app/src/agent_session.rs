@@ -1041,6 +1041,8 @@ impl AgentSession {
             Hook::Prompt(text) => {
                 self.end_parked_agent();
                 self.prompts_seen += 1;
+                // The agent took a message: the one sent from here, if it is waiting.
+                self.chat.mark_seen();
                 let t = plain(&text);
                 // Empty: a prompt the interface made itself (a report, a task notice), which
                 // may not start a turn; the work it starts marks the session busy.
@@ -1177,8 +1179,9 @@ impl AgentSession {
                 if let Event::UserText(text) = &event
                     && let Some(i) = self.echo.iter().position(|e| *e == plain(text))
                 {
-                    // Shown already, when it was sent.
+                    // Shown already, when it was sent; the agent has it now.
                     self.echo.remove(i);
+                    self.chat.mark_seen();
                     return;
                 }
                 if let Event::UserImages(_) = &event

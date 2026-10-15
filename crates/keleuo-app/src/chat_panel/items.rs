@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::native_spinner::NativeSpinner;
+use keleuo_core::conversation::Delivery;
 
 impl ChatPanel {
     /// The divider where the context was compacted, its summary on request.
@@ -709,6 +710,40 @@ impl ChatPanel {
             out.push(el);
         }
         out
+    }
+
+    /// Under the person's last message: whether it has left Keleuo for the agent. "Sending"
+    /// with a ring while the agent has not shown it has it, a check once it has (it echoed it,
+    /// its prompt hook ran, or it began working), "Not delivered" when it failed first.
+    pub(super) fn delivery_mark(&self, ix: usize, item: &Item, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if self.agent.is_some() || !matches!(item, Item::User(_)) {
+            return None;
+        }
+        let chat = &self.session.read(cx).chat;
+        if chat.turn_start() != ix {
+            return None;
+        }
+        let theme = cx.theme();
+        let (icon, words, color) = match chat.delivery? {
+            Delivery::Sending => (Icon::new(IconName::LoaderCircle), "Sending", theme.muted_foreground),
+            Delivery::Seen => (Icon::new(IconName::Check), "Seen by the agent", theme.success),
+            Delivery::Failed => (Icon::new(IconName::CircleX), "Not delivered", theme.danger),
+        };
+        Some(
+            div()
+                .w_full()
+                .flex()
+                .justify_end()
+                .items_center()
+                .gap_1()
+                .mt(px(-4.))
+                .pr_2()
+                .text_size(px(11.))
+                .text_color(color)
+                .child(icon.xsmall().text_color(color))
+                .child(words)
+                .into_any_element(),
+        )
     }
 
     /// What the working line says ("Thinking · 12s", or the tool running), or `None` when it
