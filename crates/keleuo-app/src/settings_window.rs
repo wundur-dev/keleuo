@@ -130,9 +130,9 @@ fn general() -> SettingPage {
             .description("Light or dark, or following macOS."),
         ).item(choice(
             "Tab style",
-            "How tabs look: pills, flat labels with a line under the shown one, or slanted sheets.",
-            &[("pill", "Pills"), ("underline", "Underline"), ("sheet", "Sheets")],
-            "pill",
+            "How tabs look: square blocks, flat labels with a line under the shown one, or slanted sheets.",
+            &[("block", "Blocks"), ("underline", "Underline"), ("sheet", "Sheets")],
+            "block",
             |s| s.tab_style.clone(),
             |s, v| {
                 s.tab_style = v.to_string();
