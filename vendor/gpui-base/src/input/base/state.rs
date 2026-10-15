@@ -694,7 +694,8 @@ impl<M: InputModeKind> InputBaseState<M> {
             }),
             // Observe the blink cursor to repaint the view when it changes.
             cx.observe(&blink_cursor, |_, _, cx| cx.notify()),
-            // Blink the cursor when the window is active, pause when it's not.
+            // Blink the cursor when the window is active, stop when it's not: an inactive
+            // window shows no cursor, and each blink would redraw it twice a second for nothing.
             cx.observe_window_activation(window, |input, window, cx| {
                 if window.is_window_active() {
                     let focus_handle = input.focus_handle.clone();
@@ -703,6 +704,8 @@ impl<M: InputModeKind> InputBaseState<M> {
                             blink_cursor.start(cx);
                         });
                     }
+                } else {
+                    input.blink_cursor.update(cx, |blink_cursor, cx| blink_cursor.stop(cx));
                 }
             }),
             cx.on_focus(&focus_handle, window, Self::on_focus),
@@ -1314,9 +1317,12 @@ impl<M: InputModeKind> InputBaseState<M> {
     /// Focus the input field.
     pub fn focus(&self, window: &mut Window, cx: &mut Context<Self>) {
         self.focus_handle.focus(window, cx);
-        self.blink_cursor.update(cx, |cursor, cx| {
-            cursor.start(cx);
-        });
+        // In a window in the background it starts blinking when the window becomes active.
+        if window.is_window_active() {
+            self.blink_cursor.update(cx, |cursor, cx| {
+                cursor.start(cx);
+            });
+        }
     }
 
     /// Refresh the input, so the next render re-runs syntax highlighting and
@@ -3387,10 +3393,14 @@ impl<M: InputModeKind> InputBaseState<M> {
             && window.is_window_active()
     }
 
-    fn on_focus(&mut self, _: &mut Window, cx: &mut Context<Self>) {
-        self.blink_cursor.update(cx, |cursor, cx| {
-            cursor.start(cx);
-        });
+    fn on_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Focus can move while the window is in the background: it starts blinking when the
+        // window becomes active.
+        if window.is_window_active() {
+            self.blink_cursor.update(cx, |cursor, cx| {
+                cursor.start(cx);
+            });
+        }
         cx.emit(InputEvent::Focus);
     }
 

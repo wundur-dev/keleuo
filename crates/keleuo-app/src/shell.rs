@@ -53,6 +53,92 @@ fn silent() -> bool {
 struct Tab {
     number: usize,
     ws: Entity<Workspace>,
+    /// What its row shows, kept up to date as the session changes (see [`Row`]).
+    row: Row,
+}
+
+/// What a session's row in the list (and the rail) shows, kept on the tab. The list draws from
+/// it, not from the sessions: GPUI draws the window again whenever something read while drawing
+/// changes, so a list reading every session redrew the whole window on each streamed word and
+/// each line of terminal output in any session, shown or not. Now a session's change redraws
+/// the window only when its row comes out different.
+#[derive(Clone, Default, PartialEq)]
+struct Row {
+    dot: Option<Dot>,
+    unseen: bool,
+    /// Its name from the conversation (the list's own, before any rename).
+    name: String,
+    root: PathBuf,
+    remote: bool,
+    folder: String,
+    /// Folder, branch and machine.
+    place: String,
+    worktree: bool,
+    activity: Option<String>,
+    /// The last turn's summary, once the turn is over: status, whether it needs the person,
+    /// headline.
+    summary: Option<(keleuo_core::summary::Status, bool, String)>,
+    per_use: Option<bool>,
+    cost: Option<Spend>,
+    context: Option<Spend>,
+    short_id: Option<String>,
+}
+
+/// A session's state on its dot.
+#[derive(Clone, Copy, PartialEq)]
+enum Dot {
+    Permission,
+    Asking,
+    Working,
+    Agents,
+}
+
+impl Row {
+    fn of(w: &Workspace, cx: &App) -> Self {
+        let s = w.session.read(cx);
+        let chat = &s.chat;
+        let needs_input = chat.needs_input();
+        let dot = if needs_input {
+            Some(Dot::Permission)
+        } else if s.asking.is_some() {
+            Some(Dot::Asking)
+        } else if chat.busy || s.waiting_for.is_some() {
+            Some(Dot::Working)
+        } else if chat.running_agents().any(|a| a.background) {
+            Some(Dot::Agents)
+        } else {
+            None
+        };
+        let folder = w.root().file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        let place = match w.branch() {
+            Some(b) => format!("{folder} · {b}"),
+            None => folder.clone(),
+        };
+        let place = if w.host().is_remote() { format!("{}: {place}", w.host().label()) } else { place };
+        Row {
+            dot,
+            unseen: s.unseen,
+            name: w.list_name(cx),
+            root: w.root().to_path_buf(),
+            remote: w.host().is_remote(),
+            folder,
+            place,
+            worktree: w.worktree.is_some(),
+            activity: chat.last_activity(80),
+            summary: (!chat.busy && !needs_input)
+                .then(|| chat.last_summary().map(|sm| (sm.status, !sm.needs_you.is_empty(), sm.headline.clone())))
+                .flatten(),
+            per_use: s.per_use,
+            cost: s.spend_as(true),
+            context: s.spend_as(false),
+            short_id: chat.session_id.clone(),
+        }
+    }
+
+    /// Cost or context, as the setting says (read when drawn, so a change of setting shows).
+    fn spend(&self, cx: &App) -> Option<&Spend> {
+        if crate::agent_session::shows_cost(self.per_use, cx) { self.cost.as_ref() } else { self.context.as_ref() }
+    }
 }
 
 /// A session row being dragged to a new place.
@@ -834,13 +920,25 @@ impl Shell {
             cx.subscribe_in(&ws, window, |shell, ws, ev: &WorkspaceEvent, window, cx| match ev {
                 WorkspaceEvent::AgentEdited(path) => shell.edited(ws.clone(), path.clone(), window, cx),
             }),
-            // The row's name, dot, activity and cost follow the session; its conversation id,
-            // once it has one, is kept for the next run.
-            cx.observe(&ws, |_, _, cx| cx.notify()),
-            cx.observe_in(&session, window, |s, _, window, cx| {
-                s.save_open(cx);
-                s.attend(window, cx);
-                cx.notify()
+            // The row's name, dot, activity and cost follow the session and its workspace (drawn
+            // again only when the row changed); its conversation id, once it has one, is kept
+            // for the next run.
+            cx.observe(&ws, |s, ws, cx| {
+                if s.refresh_row(&ws, cx) {
+                    cx.notify();
+                }
+            }),
+            cx.observe_in(&session, window, {
+                let ws = ws.downgrade();
+                move |s, _, window, cx| {
+                    s.save_open(cx);
+                    s.attend(window, cx);
+                    if let Some(ws) = ws.upgrade()
+                        && s.refresh_row(&ws, cx)
+                    {
+                        cx.notify();
+                    }
+                }
             }),
             cx.subscribe_in(&session, window, |s, session, ev: &SessionEvent, window, cx| {
                 if let SessionEvent::TurnEnded = ev {
@@ -851,7 +949,8 @@ impl Shell {
         let number = self.next;
         self.next += 1;
         self.subs.insert(ws.entity_id(), subs);
-        self.tabs.push(Tab { number, ws });
+        let row = Row::of(ws.read(cx), cx);
+        self.tabs.push(Tab { number, ws, row });
         self.activate(self.tabs.len() - 1, window, cx);
         self.save_open(cx);
     }
@@ -874,6 +973,8 @@ impl Shell {
             });
             w.focus_main(window, cx);
         });
+        // Seen now: its row loses the mark.
+        self.refresh_row(&ws, cx);
         self.save_open(cx);
         let title = format!("{} - Keleuo", self.name(ix, cx));
         window.set_window_title(&title);
@@ -924,8 +1025,20 @@ impl Shell {
         panels::session_key(self.tabs[ix].number)
     }
 
-    fn list_name(&self, ix: usize, cx: &App) -> String {
-        self.tabs[ix].ws.read(cx).list_name(cx)
+    fn list_name(&self, ix: usize, _cx: &App) -> String {
+        self.tabs[ix].row.name.clone()
+    }
+
+    /// Bring the row of `ws`'s session up to date; true when it changed (the list is then
+    /// drawn again).
+    fn refresh_row(&mut self, ws: &Entity<Workspace>, cx: &App) -> bool {
+        let Some(tab) = self.tabs.iter_mut().find(|t| &t.ws == ws) else { return false };
+        let row = Row::of(ws.read(cx), cx);
+        if tab.row == row {
+            return false;
+        }
+        tab.row = row;
+        true
     }
 
     fn name(&self, ix: usize, cx: &App) -> String {
@@ -940,8 +1053,8 @@ impl Shell {
     ) -> impl Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu + 'static {
         let number = self.tabs[ix].number;
         let (key, auto, current) = (self.key(ix), self.list_name(ix, cx), self.name(ix, cx));
-        let w = self.tabs[ix].ws.read(cx);
-        let (remote, folder) = (w.host().is_remote(), w.root().to_path_buf());
+        let row = &self.tabs[ix].row;
+        let (remote, folder) = (row.remote, row.root.clone());
         let weak = cx.entity().downgrade();
         move |menu: PopupMenu, _: &mut Window, _: &mut Context<PopupMenu>| {
             let (w1, w3) = (weak.clone(), weak.clone());
@@ -1307,19 +1420,14 @@ impl Shell {
     /// A session's dot: amber needs permission, blue working, white unseen, none when idle.
     fn dot(&self, ix: usize, cx: &App) -> Option<(Hsla, &'static str)> {
         let theme = cx.theme();
-        let s = self.tabs[ix].ws.read(cx).session.read(cx);
-        if s.chat.needs_input() {
-            Some((theme.warning, "Needs permission"))
-        } else if s.asking.is_some() {
-            Some((theme.warning, "Asking something in the terminal"))
-        } else if s.chat.busy || s.waiting_for.is_some() {
-            Some((theme.blue, "Working"))
-        } else if s.chat.running_agents().any(|a| a.background) {
-            Some((theme.magenta, "Agents still working in the background"))
-        } else if s.unseen && ix != self.active {
-            Some((theme.foreground, "Something new"))
-        } else {
-            None
+        let row = &self.tabs[ix].row;
+        match row.dot {
+            Some(Dot::Permission) => Some((theme.warning, "Needs permission")),
+            Some(Dot::Asking) => Some((theme.warning, "Asking something in the terminal")),
+            Some(Dot::Working) => Some((theme.blue, "Working")),
+            Some(Dot::Agents) => Some((theme.magenta, "Agents still working in the background")),
+            None if row.unseen && ix != self.active => Some((theme.foreground, "Something new")),
+            None => None,
         }
     }
 
@@ -1332,23 +1440,15 @@ impl Shell {
         for ix in 0..self.tabs.len() {
             let active = ix == self.active && self.browser.is_none();
             let number = self.tabs[ix].number;
-            let w = self.tabs[ix].ws.read(cx);
-            let s = w.session.read(cx);
-            let folder = w.root().file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-            let place = match w.branch() {
-                Some(b) => format!("{folder} · {b}"),
-                None => folder,
-            };
-            let place = if w.host().is_remote() { format!("{}: {place}", w.host().label()) } else { place };
-            let worktree = w.worktree.clone();
-            let activity = s.chat.last_activity(80);
+            let row = &self.tabs[ix].row;
+            let place = row.place.clone();
+            let worktree = row.worktree.then_some(());
+            let activity = row.activity.clone();
             // Once a turn is over and summarised: its headline, how it ended when it needs the
             // person or went wrong.
-            let summary = (!s.chat.busy && !s.chat.needs_input() && crate::summaries_on(cx))
-                .then(|| s.chat.last_summary().cloned())
-                .flatten();
+            let summary = row.summary.clone().filter(|_| crate::summaries_on(cx));
             // A context filling up shows amber, then red, as in the session's header.
-            let cost = s.spend(cx).map(|sp| {
+            let cost = row.spend(cx).map(|sp| {
                 let color = match sp {
                     Spend::Context { fill: Fill::Filling, .. } => cx.theme().warning,
                     Spend::Context { fill: Fill::Nearly, .. } => cx.theme().danger,
@@ -1356,7 +1456,7 @@ impl Shell {
                 };
                 (sp.short(), color)
             });
-            let short_id = s.chat.session_id.clone();
+            let short_id = row.short_id.clone();
             let dot = self.dot(ix, cx);
             let key = self.key(ix);
             let auto = self.list_name(ix, cx);
@@ -1421,16 +1521,16 @@ impl Shell {
                                     })),
                             )
                             .children(match summary {
-                                Some(sm) => {
+                                Some((status, needs_you, headline)) => {
                                     use keleuo_core::summary::Status;
                                     // How the work went when it is not plainly done, else that
                                     // something waits on the person.
-                                    let (label, tone) = match sm.status {
-                                        Status::Done if !sm.needs_you.is_empty() => (Some("Needs you"), yellow),
+                                    let (label, tone) = match status {
+                                        Status::Done if needs_you => (Some("Needs you"), yellow),
                                         Status::Done => (None, yellow),
-                                        Status::Waiting => (Some(sm.status.label()), yellow),
-                                        Status::Failed => (Some(sm.status.label()), red),
-                                        Status::Partial => (Some(sm.status.label()), blue),
+                                        Status::Waiting => (Some(status.label()), yellow),
+                                        Status::Failed => (Some(status.label()), red),
+                                        Status::Partial => (Some(status.label()), blue),
                                     };
                                     Some(
                                         div()
@@ -1438,7 +1538,7 @@ impl Shell {
                                             .gap_1()
                                             .text_size(px(11.))
                                             .children(label.map(|l| div().flex_none().text_color(tone).child(l)))
-                                            .child(div().min_w_0().truncate().text_color(muted.opacity(0.9)).child(sm.headline)),
+                                            .child(div().min_w_0().truncate().text_color(muted.opacity(0.9)).child(headline)),
                                     )
                                 }
                                 None => activity.map(|a| div().flex().text_size(px(11.)).text_color(muted.opacity(0.8)).child(div().min_w_0().truncate().child(a))),
@@ -1616,7 +1716,7 @@ impl Shell {
             let active = ix == self.active && self.browser.is_none();
             let number = self.tabs[ix].number;
             let name = self.name(ix, cx);
-            let activity = self.tabs[ix].ws.read(cx).session.read(cx).chat.last_activity(80);
+            let activity = self.tabs[ix].row.activity.clone();
             let dot = self.dot(ix, cx);
             let tip = match (&dot, activity) {
                 (Some((_, state)), Some(a)) => format!("{name}\n{state}: {a}"),
@@ -1695,9 +1795,8 @@ impl Shell {
             let name = self.name(ix, cx);
             // The name, or the field renaming it.
             let title = panels::title_element(&self.key(ix), self.list_name(ix, cx), None, None, cx);
-            let w = self.tabs[ix].ws.read(cx);
-            let folder = w.root().file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-            let detail = w.session.read(cx).chat.last_activity(80).unwrap_or(folder);
+            let row = &self.tabs[ix].row;
+            let detail = row.activity.clone().unwrap_or_else(|| row.folder.clone());
             let dot = self.dot(ix, cx);
             col = col.child(
                 div()
@@ -1845,6 +1944,7 @@ impl Focusable for Shell {
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::perf::first_frame(window);
+        crate::perf::count(crate::perf::Count::Frame);
         let theme = cx.theme();
         // The window's chrome (title bar, session list) is the grey the work area sits in.
         let (bg, fg, hover, muted) = (theme.sidebar, theme.foreground, theme.secondary_hover, theme.muted_foreground);
@@ -1881,8 +1981,9 @@ impl Render for Shell {
         // the folded sidebar did.
         let tools_menu = {
             let ws = self.active_workspace().map(|w| w.downgrade());
-            let tools = self.active_workspace().map(|w| w.read(cx).tool_panels(cx)).unwrap_or_default();
-            move |mut menu: PopupMenu, _: &mut Window, _: &mut Context<PopupMenu>| {
+            // Read when the menu opens, not on every frame.
+            move |mut menu: PopupMenu, _: &mut Window, cx: &mut Context<PopupMenu>| {
+                let tools = ws.as_ref().and_then(|w| w.upgrade()).map(|w| w.read(cx).tool_panels(cx)).unwrap_or_default();
                 for (name, id) in tools.iter().copied() {
                     let ws = ws.clone();
                     menu = menu.item(PopupMenuItem::new(name).on_click(move |_, window, cx| {

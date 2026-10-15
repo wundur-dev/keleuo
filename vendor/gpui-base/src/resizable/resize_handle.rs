@@ -384,16 +384,19 @@ impl<T: 'static, E: 'static + Render> Element for ResizeHandle<T, E> {
 
         window.with_element_state(id.unwrap(), |state: Option<SharedHandleState>, window| {
             let state = state.unwrap_or_default();
+            // A change of state redraws the view the handle is in, not the whole window (which
+            // would paint every cached panel again).
+            let view = window.current_view();
 
             window.on_mouse_event({
                 let state = state.clone();
                 let hitbox = hitbox.clone();
-                move |ev: &MouseDownEvent, phase, window, _| {
+                move |ev: &MouseDownEvent, phase, window, cx| {
                     if phase.bubble()
                         && hitbox.is_hovered_at(ev.position, window)
                         && state.set(ResizeHandleState::Pressed)
                     {
-                        window.refresh();
+                        cx.notify(view);
                     }
                 }
             });
@@ -401,7 +404,7 @@ impl<T: 'static, E: 'static + Render> Element for ResizeHandle<T, E> {
             window.on_mouse_event({
                 let state = state.clone();
                 let hitbox = hitbox.clone();
-                move |ev: &MouseMoveEvent, phase, window, _| {
+                move |ev: &MouseMoveEvent, phase, window, cx| {
                     if !phase.bubble() {
                         return;
                     }
@@ -418,7 +421,7 @@ impl<T: 'static, E: 'static + Render> Element for ResizeHandle<T, E> {
                         _ => ResizeHandleState::Idle,
                     };
                     if state.set(next) {
-                        window.refresh();
+                        cx.notify(view);
                     }
                 }
             });
@@ -426,7 +429,7 @@ impl<T: 'static, E: 'static + Render> Element for ResizeHandle<T, E> {
             window.on_mouse_event({
                 let state = state.clone();
                 let hitbox = hitbox.clone();
-                move |ev: &MouseUpEvent, _, window, _| {
+                move |ev: &MouseUpEvent, _, window, cx| {
                     if !state.get().is_active() {
                         return;
                     }
@@ -440,7 +443,7 @@ impl<T: 'static, E: 'static + Render> Element for ResizeHandle<T, E> {
                         ResizeHandleState::Idle
                     };
                     if state.set(next) {
-                        window.refresh();
+                        cx.notify(view);
                     }
                 }
             });

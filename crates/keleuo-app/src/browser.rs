@@ -430,8 +430,11 @@ impl Browser {
                 let running = cx.background_spawn(async move { b.running(h.as_ref(), std::process::id()) }).await;
                 if this
                     .update(cx, |b, cx| {
-                        b.running = running;
-                        cx.notify();
+                        // Drawn again only when the live dots change.
+                        if b.running != running {
+                            b.running = running;
+                            cx.notify();
+                        }
                     })
                     .is_err()
                 {

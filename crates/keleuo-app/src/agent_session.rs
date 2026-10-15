@@ -40,6 +40,16 @@ pub enum Spend {
     Context { percent: u32, tokens: u64, window: u64, fill: Fill },
 }
 
+/// Whether cost shows rather than the context, as the setting says and, on auto, for a session
+/// billed per use (`per_use`).
+pub fn shows_cost(per_use: Option<bool>, cx: &App) -> bool {
+    match cx.global::<crate::AppSettings>().0.borrow().cost_display.as_str() {
+        "always" => true,
+        "never" => false,
+        _ => per_use == Some(true),
+    }
+}
+
 /// How close a session's context is to where its agent compacts it by itself.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Fill {
@@ -145,6 +155,8 @@ pub struct AgentSession {
     pub dormant: bool,
     /// When the reply preview was last read off the terminal (at most ten times a second).
     preview_read: Option<std::time::Instant>,
+    /// The preview last shown (this turn's): the same words again change nothing.
+    previewed: Option<String>,
     /// Messages the interface reported submitted (its prompt hook), to tell a sent message
     /// from one whose Enter was lost.
     prompts_seen: u64,
@@ -253,6 +265,7 @@ impl AgentSession {
             host,
             dormant: false,
             preview_read: None,
+            previewed: None,
             prompts_seen: 0,
             listed_models: None,
             chat: Conversation::new(cwd.to_string_lossy().to_string()),
@@ -449,7 +462,11 @@ impl AgentSession {
     /// The terminal drew: while the agent works and Chat shows, read the reply it is writing
     /// off the screen as a preview (the record has it only once it is finished).
     fn read_preview(&mut self, view: &Entity<TerminalView>, cx: &mut Context<Self>) {
-        if !self.chat.busy || self.view != View::Chat {
+        if !self.chat.busy {
+            self.previewed = None;
+            return;
+        }
+        if self.view != View::Chat {
             return;
         }
         let now = std::time::Instant::now();
@@ -458,7 +475,11 @@ impl AgentSession {
         }
         self.preview_read = Some(now);
         let Some((lines, columns)) = view.read(cx).recent_lines(PREVIEW_LINES) else { return };
-        if let Some(text) = self.backend.reply_preview(&lines, columns) {
+        // Claude Code redraws its screen many times a second; the chat only when the words do.
+        if let Some(text) = self.backend.reply_preview(&lines, columns)
+            && self.previewed.as_deref() != Some(text.as_str())
+        {
+            self.previewed = Some(text.clone());
             self.chat.apply(Event::TextPreview(text));
             cx.notify();
         }
@@ -484,12 +505,11 @@ impl AgentSession {
     /// Cost when it is billed per use (or the setting says always), else how full the context
     /// is. `None` before there is anything to show.
     pub fn spend(&self, cx: &App) -> Option<Spend> {
-        let setting = cx.global::<crate::AppSettings>().0.borrow().cost_display.clone();
-        let cost = match setting.as_str() {
-            "always" => true,
-            "never" => false,
-            _ => self.per_use == Some(true),
-        };
+        self.spend_as(shows_cost(self.per_use, cx))
+    }
+
+    /// What it used, as cost (`cost`) or as how full its context is.
+    pub fn spend_as(&self, cost: bool) -> Option<Spend> {
         if cost {
             return (self.chat.total_cost_usd > 0.0).then_some(Spend::Cost {
                 total: self.chat.total_cost_usd,
@@ -676,7 +696,11 @@ impl AgentSession {
             v
         });
         self.pasted_images.clear();
-        let exit = cx.observe(&view, |s, view, cx| {
+        // On each batch of output, shown or not (a hidden terminal draws nothing).
+        let exit = cx.subscribe(&view, |s, view, ev: &TerminalEvent, cx| {
+            if !matches!(ev, TerminalEvent::Output) {
+                return;
+            }
             // A parked interface (Chat showing) is not the session's to follow.
             if s.terminal.as_ref().is_none_or(|t| t.view != view) {
                 return;

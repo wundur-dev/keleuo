@@ -665,11 +665,13 @@ impl DocPanel {
                         // window until the button is let go.
                         let (moving, letting_go) = (drag_paint.clone(), drag_paint.clone());
                         let follow = jump_scroll.clone();
-                        window.on_mouse_event(move |e: &MouseMoveEvent, phase, window, _| {
+                        // Each move redraws the panel, not the whole window.
+                        let view = window.current_view();
+                        window.on_mouse_event(move |e: &MouseMoveEvent, phase, _, cx| {
                             if phase == DispatchPhase::Bubble && moving.get() {
                                 if e.pressed_button == Some(MouseButton::Left) {
                                     overview_jump(&follow, n, b, e.position.y);
-                                    window.refresh();
+                                    cx.notify(view);
                                 } else {
                                     moving.set(false);
                                 }

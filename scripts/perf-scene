@@ -1,0 +1,104 @@
+#!/usr/bin/env bash
+# Measure Keleuo on a fixed scene, so a performance change is compared like for like.
+#
+#   scripts/perf-scene [binary] [project]
+#
+# Starts a separate copy of Keleuo (its own settings, never brought to the front), with
+# KELEUO_PERF=1, and plays four phases of 20 seconds, each averaged from the app's own
+# `perf pulse` lines (renders per second, CPU, memory, wakeups):
+#
+#   idle       one session, nothing happening, the app in the background
+#   working    a scripted agent playing turns (text, a tool call, a permission, a subagent)
+#   terminal   a terminal printing 20 lines a second in a tab that is not shown
+#   hidden     that terminal, and a turn, in a session that is not shown
+#
+# Nothing is spent: the agent is Keleuo's scripted test backend. The project defaults to this
+# repository (read only: the scripted agent never writes).
+set -euo pipefail
+
+here="$(cd "$(dirname "$0")/.." && pwd)"
+bin="${1:-${CARGO_TARGET_DIR:-$HOME/Library/Caches/workbench-target}/release/keleuo}"
+project="${2:-$here}"
+phase_secs=20
+
+t="$(mktemp -d /tmp/keleuo-perf.XXXXXX)"
+mkfifo "$t/ctl"
+: > "$t/log"
+echo "perf-scene: $bin on $project (files in $t)"
+
+KELEUO_PERF=1 KELEUO_TEST_BACKENDS=1 KELEUO_BACKGROUND=1 \
+  KELEUO_CONFIG_DIR="$t/config" KELEUO_CACHE_DIR="$t/cache" KELEUO_CONTROL="$t/ctl" \
+  "$bin" "$project" >> "$t/log" 2>&1 &
+pid=$!
+trap 'kill $pid 2>/dev/null || true' EXIT
+
+# One command per open of the FIFO, as the control channel reads it.
+ctl() { printf '%s\n' "$*" > "$t/ctl"; sleep 0.3; }
+mark() { echo "== $1" >> "$t/log"; }
+
+sleep 6
+# Keep the window where nothing covers it (a covered window may stop drawing), without
+# bringing it to the front: typing must not land in it.
+osascript -e "tell application \"System Events\" to set position of window 1 of (first process whose unix id is $pid) to {1700, 200}" >/dev/null 2>&1 || true
+sleep 2
+
+ctl new-scripted "$project"
+sleep 3
+mark idle
+sleep "$phase_secs"
+
+mark working
+end=$((SECONDS + phase_secs))
+while [ $SECONDS -lt $end ]; do
+  ctl send "a turn to measure"
+  sleep 1.5
+  ctl allow
+  sleep 2.5
+done
+sleep 2
+
+ctl run "while :; do date; sleep 0.05; done"
+sleep 1
+# A file opened in the same group covers the terminal's tab: it prints, unseen.
+ctl open AGENTS.md
+sleep 1
+mark terminal
+sleep "$phase_secs"
+
+ctl new-scripted "$project"
+sleep 2
+mark hidden
+end=$((SECONDS + phase_secs))
+ctl tab 1
+ctl send "a turn in the background"
+sleep 1.5
+ctl allow
+ctl tab 2
+while [ $SECONDS -lt $end ]; do sleep 1; done
+mark end
+
+kill $pid 2>/dev/null || true
+wait $pid 2>/dev/null || true
+
+python3 - "$t/log" <<'PY'
+import re, sys
+phase, rows = None, {}
+for line in open(sys.argv[1], errors="replace"):
+    if line.startswith("== "):
+        phase = line[3:].strip()
+        rows.setdefault(phase, [])
+        continue
+    if phase and phase != "end" and line.startswith("perf pulse"):
+        nums = dict((k, float(v)) for k, v in re.findall(r"([a-z]+) ([\d.]+)(?:/s|%)", line))
+        mb = re.search(r"([\d.]+) MB", line)
+        nums["MB"] = float(mb.group(1)) if mb else 0.0
+        rows[phase].append(nums)
+keys = ["frames", "workspace", "chat", "terminal", "cpu", "MB", "wakeups"]
+print(f"{'phase':<10}" + "".join(f"{k:>11}" for k in keys))
+for phase, pulses in rows.items():
+    pulses = pulses[1:] or pulses  # the first pulse straddles the phase change
+    if not pulses:
+        continue
+    avg = {k: sum(p.get(k, 0) for p in pulses) / len(pulses) for k in keys}
+    print(f"{phase:<10}" + "".join(f"{avg[k]:>11.1f}" for k in keys))
+PY

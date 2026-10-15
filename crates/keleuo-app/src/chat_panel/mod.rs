@@ -104,8 +104,10 @@ pub struct ChatPanel {
     toggled: HashSet<String>,
     pub index: Arc<FileIndex>,
     last_revision: u64,
-    /// Redraws once a second while subagents or tool calls run (their elapsed time).
+    /// Turns the spinners and the clocks while something runs, a few steps a second; slower,
+    /// and drawing nothing, while the chat is not on screen.
     ticker: Option<Task<()>>,
+    on_screen: crate::on_screen::OnScreen,
     /// When the agent became busy with the current turn (for the time on the thinking line).
     busy_since: Option<std::time::Instant>,
     /// The step the spinners are at: the ticker moves it on while something runs.
@@ -126,6 +128,8 @@ const MONO: &str = crate::terminal_view::FONT_FAMILY;
 /// How often the chat redraws while something runs: the spinners' step and the clocks.
 /// Ten a second reads as motion; continuous animation would redraw every frame.
 const TICK: std::time::Duration = std::time::Duration::from_millis(100);
+/// The ticker's pace while the chat is not shown: enough to notice the work has ended.
+const UNSEEN_TICK: std::time::Duration = std::time::Duration::from_secs(1);
 /// Steps in a spinner's turn (one turn a little over a second at the tick above).
 const SPINNER_STEPS: u32 = 12;
 /// Space below the Chat / Terminal tabs, before the window's bottom edge.
@@ -174,19 +178,26 @@ impl ChatPanel {
                 if running && panel.ticker.is_none() {
                     panel.ticker = Some(cx.spawn(
                         async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+                            let mut wait = TICK;
                             loop {
-                                cx.background_executor().timer(TICK).await;
+                                cx.background_executor().timer(wait).await;
                                 let alive = this.update(cx, |p, cx| {
-                                    let still = clocks_running(&p.session.read(cx).chat);
+                                    let session = p.session.read(cx);
+                                    let still = clocks_running(&session.chat);
+                                    // Drawn only where the clocks show: on screen, in Chat.
+                                    let shown = p.on_screen.now() && session.view == View::Chat;
                                     p.phase = p.phase.wrapping_add(1);
-                                    cx.notify();
+                                    if shown {
+                                        cx.notify();
+                                    }
                                     if !still {
                                         p.ticker = None;
                                     }
-                                    still
+                                    (still, shown)
                                 });
-                                if !matches!(alive, Ok(true)) {
-                                    break;
+                                match alive {
+                                    Ok((true, shown)) => wait = if shown { TICK } else { UNSEEN_TICK },
+                                    _ => break,
                                 }
                             }
                         },
@@ -229,6 +240,7 @@ impl ChatPanel {
             busy_since: None,
             phase: 0,
             ticker: None,
+            on_screen: Default::default(),
             views: Rc::new(StripState::default()),
             _subs: vec![s1, s2],
         }
@@ -793,6 +805,7 @@ impl Focusable for ChatPanel {
 
 impl Render for ChatPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        crate::perf::count(crate::perf::Count::Chat);
         if let Some(id) = self.agent.clone() {
             return self.render_agent_view(&id, cx);
         }
@@ -834,9 +847,17 @@ impl Render for ChatPanel {
             .track_focus(&self.focus)
             .on_action(cx.listener(|p, _: &CopyConversation, window, cx| p.copy_conversation(window, cx)))
             .child(self.render_header(cx))
+            // The agent's terminal as a view of its own, cached: drawing the chat (its header,
+            // a clock) does not paint the whole grid again; the terminal does when it changes.
             .when_some(terminal.clone(), |d, term| {
-                d.child(div().flex_1().min_h_0().relative().child(term))
-                    .children(self.render_edits(cx))
+                d.child(
+                    div()
+                        .flex_1()
+                        .min_h_0()
+                        .relative()
+                        .child(AnyView::from(term).cached(StyleRefinement::default().size_full())),
+                )
+                .children(self.render_edits(cx))
             })
             .when(terminal.is_none(), |d| d.child(
                 div()
@@ -863,6 +884,11 @@ impl Render for ChatPanel {
             }))
             .children(self.render_views(cx))
             .children(self.render_fix(cx))
+            // Marks the chat as on screen while a frame shows it (see `on_screen`).
+            .child({
+                let on_screen = self.on_screen.clone();
+                canvas(|_, _, _| {}, move |_, _, window, _| on_screen.mark(window)).absolute().size_0()
+            })
             .relative()
     }
 }

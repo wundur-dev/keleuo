@@ -984,10 +984,11 @@ impl Workspace {
                         ws.panel_subs.remove(&view.entity_id());
                         cx.notify();
                     }
+                    TerminalEvent::Output => {}
                 },
             ),
-            // The tab title follows the program and unseen output.
-            cx.observe(&view, |_, _, cx| cx.notify()),
+            // The tab's title (the program, unseen output) is read from the terminal as the tab
+            // strip is drawn, and the terminal says when it changed: nothing to pass on here.
         ];
         self.panel_subs.insert(id, subs);
         self.touch_code(id);
@@ -1642,6 +1643,7 @@ impl Workspace {
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        crate::perf::count(crate::perf::Count::Workspace);
         if !self.first_frame_logged {
             self.first_frame_logged = true;
             // A session opened later (from the browser): its own time, with KELEUO_PERF=1.

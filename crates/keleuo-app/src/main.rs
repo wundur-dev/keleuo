@@ -45,6 +45,7 @@ mod procstats;
 mod instance;
 mod pty;
 mod image_view;
+mod on_screen;
 mod sheet_tabs;
 mod skill_installer;
 mod settings_window;
@@ -330,6 +331,7 @@ fn main() {
             })
             .detach();
             perf::step("open the window", || carry_out(request, note, cx));
+            perf::start_pulse();
             if !background() {
                 cx.activate(true);
             }

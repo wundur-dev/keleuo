@@ -860,6 +860,15 @@ impl Conversation {
                 let agent = self.agent_entry(&id);
                 agent.status = if failed { AgentStatus::Failed } else { AgentStatus::Done };
                 agent.current_tool = None;
+                // Its unfinished calls end with it: their clocks stop (a background agent can
+                // end after the turn did, and nothing else would stop them).
+                for item in agent.items.iter_mut() {
+                    if let Item::Tool(t) = item
+                        && !t.done()
+                    {
+                        t.stop_clock();
+                    }
+                }
                 agent.summary = summary.or(agent.summary.take());
                 agent.total_tokens = tokens.or(agent.total_tokens);
                 agent.duration_ms =
