@@ -875,9 +875,13 @@ const COLUMN: f32 = 760.;
 const ITEM_GAP: f32 = 12.;
 const TURN_GAP: f32 = 36.;
 
-/// Something with a live clock runs: a subagent or a tool call.
+/// Something live runs: a subagent, a tool call, or a turn's summary being made.
 fn clocks_running(chat: &keleuo_core::conversation::Conversation) -> bool {
-    chat.busy || chat.running_agents().next().is_some() || chat.running_tools().next().is_some()
+    chat.busy
+        || chat.running_agents().next().is_some()
+        || chat.running_tools().next().is_some()
+        // A turn's summary being made shows a spinner too.
+        || chat.items.iter().rev().any(|i| matches!(i, Item::Summary { state: summary::State::Pending, .. }))
 }
 
 /// `42s`, `3m 05s`, `2h 05m 09s`, `1d 3h 05m 09s`.
