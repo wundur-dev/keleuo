@@ -518,17 +518,18 @@ impl AgentSession {
         // A pasted image is kept here, where the agent on another machine cannot read it.
         // Its own clipboard key if it has one, else the kept copy's path typed in.
         let backend = self.backend.clone();
+        let attach = self.backend.terminal_attach(std::path::Path::new("image.png"), false).is_some().then(|| {
+            Rc::new(move |path: &std::path::Path, bracketed| backend.terminal_attach(path, bracketed)) as Rc<crate::terminal_view::AttachFn>
+        });
         let paste = match self.backend.terminal_paste_image() {
             Some(key) => Some(PasteImage::Key(key)),
-            None if self.backend.terminal_attach(std::path::Path::new("image.png"), false).is_some() => {
-                Some(PasteImage::Path(Rc::new(move |path: &std::path::Path, bracketed| backend.terminal_attach(path, bracketed))))
-            }
-            None => None,
+            None => attach.clone().map(PasteImage::Path),
         };
         let images = paste.filter(|_| !self.host.is_remote()).map(|paste| {
             let (w1, w2) = (weak.clone(), weak.clone());
             ImageSupport {
                 paste,
+                attach: attach.clone(),
                 pasted: Rc::new(move |bytes, ext, cx| {
                     w1.update(cx, |s, _| {
                         let dir = keleuo_core::images::session_dir(s.chat.session_id.as_deref());
