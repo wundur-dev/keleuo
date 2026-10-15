@@ -2582,6 +2582,9 @@ fn leaf_element_id(fade_key: Option<TextLeafKey>) -> ElementId {
 
 /// `block` with `gap` below it. The box only exists to hold the padding,
 /// so a block with no gap below it is returned as is.
+/// Keleuo patch: the space between the items of a tight list, as a share of the paragraph gap.
+const LIST_ITEM_GAP: f32 = 0.375;
+
 fn gapped(block: AnyElement, gap: Rems) -> AnyElement {
     if gap.is_zero() {
         block
@@ -3059,7 +3062,9 @@ impl BlockNode {
                                 ));
                             }
                             BlockNode::List { .. } => {
-                                items.push(div().ml(rems(1.)).child(child.render_block(
+                                // Keleuo patch: the gap between items above a nested list too.
+                                let gap = node_cx.style.paragraph_gap().0 * LIST_ITEM_GAP;
+                                items.push(div().ml(rems(1.)).pt(rems(gap)).child(child.render_block(
                                     NodeRenderOptions {
                                         depth: options.depth + 1,
                                         todo: checked.is_some(),
@@ -3523,8 +3528,16 @@ impl BlockNode {
                     let mut item_index = 0;
                     for (ix, item) in children.into_iter().enumerate() {
                         let is_item = item.is_list_item();
-
-                        items.push(Self::render_list_item(
+                        // Keleuo patch: space between list items, a share of the paragraph
+                        // gap (the whole gap in a loose list, as CommonMark spaces those like
+                        // paragraphs), so items do not run together as one block of lines.
+                        let item_gap = match item {
+                            BlockNode::ListItem { spread: true, .. } => {
+                                node_cx.style.paragraph_gap()
+                            }
+                            _ => rems(node_cx.style.paragraph_gap().0 * LIST_ITEM_GAP),
+                        };
+                        let rendered = Self::render_list_item(
                             item,
                             item_index,
                             NodeRenderOptions {
@@ -3536,7 +3549,12 @@ impl BlockNode {
                             node_cx,
                             window,
                             cx,
-                        ));
+                        );
+                        items.push(if item_index > 0 {
+                            div().pt(item_gap).child(rendered).into_any_element()
+                        } else {
+                            rendered
+                        });
 
                         if is_item {
                             item_index += 1;

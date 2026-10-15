@@ -377,6 +377,7 @@ impl ChatPanel {
         let item = self.item_at(ix, cx);
         let Some(item) = item else { return div().into_any_element() };
         let last = ix + 1 == self.list_len;
+        let top = self.space_above(ix, cx);
         // The end-of-turn card, turned off in Settings: nothing, taking no room (but the last
         // entry keeps the gap at the bottom).
         if matches!(item, Item::TurnChanges(_)) && !crate::prefs(cx).turn_card {
@@ -397,7 +398,7 @@ impl ChatPanel {
             }
             if !open {
                 return match group {
-                    Some(header) => self.column(header, last),
+                    Some(header) => self.column(header, last, top),
                     None => div().when(last, |d| d.pb_4()).into_any_element(),
                 };
             }
@@ -415,19 +416,45 @@ impl ChatPanel {
             .when(member, |d| d.pl_4())
             .children(parts);
         match group {
-            Some(header) => self.column(div().w_full().flex().flex_col().gap_2().child(header).child(body).into_any_element(), last),
-            None => self.column(body.into_any_element(), last),
+            Some(header) => self.column(div().w_full().flex().flex_col().gap_2().child(header).child(body).into_any_element(), last, top),
+            None => self.column(body.into_any_element(), last, top),
         }
     }
 
+    /// The space above entry `ix`. A new turn (the person's message, or the images that lead
+    /// it) stands apart from the turn before by three times the space between the items of a
+    /// turn: space rather than a rule, since the bubble on the right already marks the start
+    /// and a line across the page would cut the conversation into boxes. A finished reply
+    /// keeps room under it for its Copy button; that room counts toward the space.
+    fn space_above(&self, ix: usize, cx: &App) -> Pixels {
+        let chat = &self.session.read(cx).chat;
+        let items: &[Item] = match &self.agent {
+            Some(id) => chat.agent(id).map(|a| a.items.as_slice()).unwrap_or_default(),
+            None => &chat.items,
+        };
+        let prev = ix.checked_sub(1).and_then(|p| items.get(p));
+        let turn_start = ix > 0
+            && match items.get(ix) {
+                Some(Item::Images(_)) => true,
+                Some(Item::User(_)) => !matches!(prev, Some(Item::Images(_))),
+                _ => false,
+            };
+        let want = if turn_start { TURN_GAP } else { ITEM_GAP };
+        let kept = match prev {
+            Some(Item::Assistant { streaming: false, .. }) => items::HOVER_ROW,
+            _ => 0.,
+        };
+        px((want - kept).max(0.))
+    }
+
     /// An entry in the centred column of comfortable width, the page behind it.
-    fn column(&self, content: AnyElement, last: bool) -> AnyElement {
+    fn column(&self, content: AnyElement, last: bool, top: Pixels) -> AnyElement {
         div()
             .w_full()
             .flex()
             .justify_center()
             .px_4()
-            .pt_3()
+            .pt(top)
             .when(last, |d| d.pb_4())
             .child(div().w_full().max_w(px(COLUMN)).flex().flex_col().gap_2().child(content))
             .into_any_element()
@@ -824,6 +851,11 @@ fn short_tokens(n: u64) -> String {
 
 /// The column's widest.
 const COLUMN: f32 = 760.;
+
+/// The space between the items of one turn, and above the person's message that starts the
+/// next: three times as much, so turns read as paragraphs of the conversation.
+const ITEM_GAP: f32 = 12.;
+const TURN_GAP: f32 = 36.;
 
 /// Something with a live clock runs: a subagent or a tool call.
 fn clocks_running(chat: &keleuo_core::conversation::Conversation) -> bool {

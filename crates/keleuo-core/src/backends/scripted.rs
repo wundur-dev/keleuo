@@ -212,7 +212,9 @@ impl Turn {
             parent: None,
         });
         send(Event::SubagentEnded { id: agent, failed: false, summary: Some("done".into()), tokens: Some(120), duration_ms: Some(60) });
-        send(Event::Text { text: if allowed { "Done.".into() } else { "Stopped.".into() }, parent: None });
+        // A closing reply with paragraphs and a list, so Markdown spacing can be seen in a test window.
+        let done = "Done. The line in `notes.txt` is changed.\n\nWhat happened:\n\n- the old line is now the new line\n- nothing else in the file moved\n- a helper looked around and found nothing to report\n\nAsk again to change it back.";
+        send(Event::Text { text: if allowed { done.into() } else { "Stopped.".into() }, parent: None });
         send(Event::TurnEnded {
             error: None,
             cost_total_usd: Some(self.cost),

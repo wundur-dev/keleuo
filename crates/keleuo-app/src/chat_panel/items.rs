@@ -450,7 +450,9 @@ impl ChatPanel {
         let mut out = Vec::new();
         for (ix, item) in items.iter().enumerate() {
             let el = match item {
-                // The person's message: a rounded bubble on the right.
+                // The person's message: a rounded bubble on the right, its Copy button beside
+                // it on the left (beside rather than under, so the reply follows close below
+                // and the message reads as the head of its turn).
                 Item::User(text) => {
                     let copy = paste::without_markers(text);
                     let group = SharedString::from(format!("user-{key}-{ix}"));
@@ -458,9 +460,10 @@ impl ChatPanel {
                         .group(group.clone())
                         .w_full()
                         .flex()
-                        .flex_col()
+                        .justify_end()
                         .items_end()
                         .gap_1()
+                        .child(hover_actions(group, format!("{key}-{ix}"), copy, muted))
                         .child(
                             div()
                                 .max_w(relative(0.8))
@@ -473,7 +476,6 @@ impl ChatPanel {
                                 .text_color(fg)
                                 .child(self.render_user_text(&format!("{key}-{ix}"), text, cx)),
                         )
-                        .child(hover_actions(group, format!("{key}-{ix}"), copy, muted))
                         .into_any_element()
                 }
                 // Claude's reply: plain text across the column, no bubble.
@@ -635,7 +637,11 @@ impl ChatPanel {
     }
 }
 
-/// Copy, under a message, shown while the pointer is over it.
+/// The room a finished reply keeps under its text for [`hover_actions`]: the column's gap and
+/// an extra-small button.
+pub(super) const HOVER_ROW: f32 = 24.;
+
+/// Copy, by a message, shown while the pointer is over it.
 pub(super) fn hover_actions(group: SharedString, key: String, text: String, muted: Hsla) -> impl IntoElement {
     div()
         .flex()
