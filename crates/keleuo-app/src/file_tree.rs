@@ -2,6 +2,7 @@
 //! on a background thread through the Host.
 
 use std::collections::HashSet;
+use crate::panels::{LIST_TEXT, ROW_HEIGHT};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -331,7 +332,7 @@ impl Render for FileTree {
         if self.loading {
             return div()
                 .p_2()
-                .text_xs()
+                .text_size(px(LIST_TEXT))
                 .text_color(muted)
                 .child("Listing files...")
                 .into_any_element();
@@ -350,7 +351,7 @@ impl Render for FileTree {
                     let entity = entity.clone();
                     let indent = px(6. + row.depth as f32 * 12.);
                     if let (RowKind::Name | RowKind::Problem, Some((input, problem))) = (row.kind, &naming) {
-                        let base = div().id(ix).w_full().h(px(20.)).pl(indent).pr_1().flex().items_center().gap_1();
+                        let base = div().id(ix).w_full().h(px(ROW_HEIGHT)).pl(indent).pr_1().flex().items_center().gap_1();
                         let el = if row.kind == RowKind::Name {
                             let icon = if row.is_dir { crate::icons::folder(false, cx) } else { crate::icons::file("", cx) };
                             base.child(icon).child(
@@ -366,7 +367,7 @@ impl Render for FileTree {
                                     .child(Input::new(input).xsmall()),
                             )
                         } else {
-                            base.text_xs().text_color(danger).child(div().truncate().child(problem.clone()))
+                            base.text_size(px(LIST_TEXT)).text_color(danger).child(div().truncate().child(problem.clone()))
                         };
                         return el.into_any_element();
                     }
@@ -379,13 +380,13 @@ impl Render for FileTree {
                     };
                     div()
                         .id(ix)
-                        .h(px(20.))
+                        .h(px(ROW_HEIGHT))
                         .pl(indent)
                         .pr_1()
                         .flex()
                         .items_center()
                         .gap_1()
-                        .text_xs()
+                        .text_size(px(LIST_TEXT))
                         .text_color(if row.is_dir || is_sel { fg } else { quiet })
                         .when(is_sel, |d| d.bg(sel_bg))
                         .hover(|d| d.bg(hover))

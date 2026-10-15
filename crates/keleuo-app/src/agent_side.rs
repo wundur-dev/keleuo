@@ -3,6 +3,7 @@
 //! are found in the session browser, not here: a session is one conversation.
 
 use std::path::PathBuf;
+use crate::panels::{LIST_SMALL, LIST_TEXT, ROW_HEIGHT};
 use std::sync::Arc;
 
 use gpui_kit::component::{ActiveTheme, Icon, IconName, Sizable};
@@ -53,10 +54,10 @@ impl AgentSide {
             out.push(
                 div()
                     .pl(px(24.))
-                    .h(px(20.))
+                    .h(px(ROW_HEIGHT))
                     .flex()
                     .items_center()
-                    .text_size(px(11.))
+                    .text_size(px(LIST_SMALL))
                     .text_color(muted.opacity(0.7))
                     .child("None yet")
                     .into_any_element(),
@@ -116,13 +117,13 @@ impl AgentSide {
         let panel = self.panel.downgrade();
         div()
             .id(SharedString::from(format!("agent-row-{}", a.tool_use_id)))
-            .h(px(20.))
+            .h(px(ROW_HEIGHT))
             .pl(px(18.))
             .pr(px(6.))
             .flex()
             .items_center()
             .gap(px(6.))
-            .text_size(px(11.))
+            .text_size(px(LIST_TEXT))
             .text_color(if a.running() { fg } else { muted })
             .hover(|d| d.bg(hover))
             .child(icon)

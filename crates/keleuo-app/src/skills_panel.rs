@@ -2,6 +2,7 @@
 //! backend reads for this project. Scanned on a background thread through the Host.
 
 use std::collections::HashSet;
+use crate::panels::{LIST_TEXT, ROW_HEIGHT};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -140,13 +141,13 @@ impl SkillsPanel {
                 col = col.child(
                     div()
                         .id(SharedString::from(e.path.to_string_lossy().to_string()))
-                        .h(px(20.))
+                        .h(px(ROW_HEIGHT))
                         .pl(px(18.))
                         .pr_1()
                         .flex()
                         .items_center()
                         .gap(px(6.))
-                        .text_xs()
+                        .text_size(px(LIST_TEXT))
                         .text_color(if is_sel { theme.foreground } else { fg })
                         .when(is_sel, |d| d.bg(sel_bg))
                         .hover(|d| d.bg(hover))
@@ -187,7 +188,7 @@ impl Render for SkillsPanel {
                 list = list.child(
                     div()
                         .p_2()
-                        .text_xs()
+                        .text_size(px(LIST_TEXT))
                         .text_color(muted)
                         .child("Scanning skills..."),
                 )

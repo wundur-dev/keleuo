@@ -559,7 +559,6 @@ impl ChatPanel {
             .gap_1()
             .text_size(px(11.))
             .text_color(muted)
-            // No line under it: a light shadow (drawn over the chat's top) sets it off.
             .bg(cx.theme().background)
             .child(Icon::new(IconName::Bot).xsmall())
             .child(
@@ -825,22 +824,7 @@ impl Render for ChatPanel {
                         list(self.list.clone(), cx.processor(|this, ix, _window, cx| this.render_entry(ix, cx)))
                             .size_full(),
                     ))
-                    // The header's shadow: a short fade over the top of the chat, drawn after
-                    // it (a real shadow would sit under the chat's own painting).
-                    .relative()
-                    .child(
-                        div()
-                            .absolute()
-                            .top_0()
-                            .left_0()
-                            .right_0()
-                            .h(px(8.))
-                            .bg(linear_gradient(
-                                180.,
-                                linear_color_stop(gpui_kit::black().opacity(if cx.theme().is_dark() { 0.4 } else { 0.1 }), 0.),
-                                linear_color_stop(gpui_kit::black().opacity(0.), 1.),
-                            )),
-                    ),
+
             )
             .children(self.render_asking(cx))
             .child({

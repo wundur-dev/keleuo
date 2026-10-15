@@ -36,7 +36,7 @@ use crate::sheet_tabs::{self, Joined, Palette, StripState};
 const TOOLS: [&str; 4] = ["Files", "Skills", "Changes", "Agent"];
 
 /// A tool group's title bar.
-pub const HEADER_HEIGHT: f32 = 26.;
+pub const HEADER_HEIGHT: f32 = 34.;
 /// A tool group's tabs along the bottom.
 pub const BOTTOM_STRIP: f32 = 24.;
 /// Space between a tool panel's content and its tabs along the bottom.
@@ -263,7 +263,8 @@ fn grip(color: Hsla) -> impl IntoElement {
 }
 
 impl SheetGroup {
-    /// A tool group's title bar: grip, title, the shown panel's actions, its options on hover.
+    /// A tool group's title bar: grip, title, the shown panel's actions. (No options menu:
+    /// tool panels are neither closed nor zoomed, so it would be empty.)
     fn header(&self, group: &TabGroupContext, window: &mut Window, cx: &mut App) -> AnyElement {
         let theme = cx.theme();
         // White, as the panel below it: the bold title marks it.
@@ -276,9 +277,6 @@ impl SheetGroup {
         let buttons = handle.as_ref().and_then(|h| h.toolbar_buttons(window, cx)).unwrap_or_default();
         let title = title_of(&panel, window, cx);
         let drag = drag_of(group, ix, cx);
-        let closable = group.is_closable();
-        let close_group = group.clone();
-        let menu_panel = handle.clone();
         let handle_el = on_drag_panel(
             div()
                 .id(("panel-grip", panel.panel_id(cx).as_u64() as usize))
@@ -294,7 +292,7 @@ impl SheetGroup {
                     div()
                         .min_w_0()
                         .truncate()
-                        .text_size(px(13.))
+                        .text_size(px(17.))
                         .font_weight(FontWeight::BOLD)
                         .text_color(fg)
                         .child(title),
@@ -308,8 +306,8 @@ impl SheetGroup {
             .group("panel-header")
             .h(px(HEADER_HEIGHT))
             .flex_none()
-            .pl(px(6.))
-            .pr(px(4.))
+            .pl(px(10.))
+            .pr(px(8.))
             .flex()
             .items_center()
             .gap_1()
@@ -325,32 +323,6 @@ impl SheetGroup {
             })
             .child(handle_el.test_support())
             .children(buttons.into_iter().map(|b| b.xsmall().ghost().tab_stop(false)))
-            .child(
-                div().invisible().group_hover("panel-header", |d| d.visible()).child(
-                    Button::new("panel-options")
-                        .icon(IconName::Ellipsis)
-                        .xsmall()
-                        .ghost()
-                        .tab_stop(false)
-                        .dropdown_menu(move |menu, window, cx| {
-                            let close_group = close_group.clone();
-                            menu.when_some(menu_panel.clone(), |menu, p| p.dropdown_menu(menu, window, cx))
-                                .when(closable, |menu| {
-                                    menu.separator().item(
-                                        gpui_kit::component::menu::PopupMenuItem::new("Close").on_click(
-                                            move |_, window, cx| {
-                                                if let Some(p) = close_group.active_panel() {
-                                                    let id = p.panel_id(cx);
-                                                    let group = close_group.clone();
-                                                    crate::closing::close_tab(p.view(), move |w, cx| group.close(id, w, cx), window, cx);
-                                                }
-                                            },
-                                        ),
-                                    )
-                                })
-                        }),
-                ),
-            )
             .into_any_element()
     }
 

@@ -160,6 +160,12 @@ list_panel!(SkillsPanel, "Skills", "Skills", IconName::BookOpen);
 list_panel!(AgentSide, "Agent", "Agent", IconName::Bot);
 list_panel!(ChangesPanel, "Changes", "Changes", IconName::Bot);
 
+/// A row in a tool panel's list (files, skills, subagents, changes), and its text sizes.
+pub const ROW_HEIGHT: f32 = 24.;
+pub const LIST_TEXT: f32 = 13.5;
+pub const LIST_SMALL: f32 = 12.;
+pub const LIST_TINY: f32 = 11.;
+
 /// A quiet section header in a sidebar list: an icon, the title, a faint count and, when the
 /// section folds, a chevron. Space above it separates groups (none for the first); the rows
 /// below stay tight.
@@ -176,14 +182,14 @@ pub fn section_header(
     let (muted, fg, hover) = (theme.muted_foreground, theme.foreground, theme.secondary_hover);
     div()
         .id(id)
-        .h(px(20.))
+        .h(px(22.))
         .mt(px(if first { 3. } else { 9. }))
         .pl(px(6.))
         .pr(px(6.))
         .flex()
         .items_center()
         .gap(px(6.))
-        .text_size(px(10.5))
+        .text_size(px(LIST_SMALL))
         .font_weight(FontWeight::MEDIUM)
         .text_color(muted.opacity(0.85))
         .hover(|d| d.bg(hover).text_color(fg))

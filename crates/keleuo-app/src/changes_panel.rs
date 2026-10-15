@@ -3,6 +3,7 @@
 //! A file opens as the diff of what the session changed in it.
 
 use std::path::{Path, PathBuf};
+use crate::panels::{LIST_SMALL, LIST_TEXT, LIST_TINY, ROW_HEIGHT};
 
 use gpui_kit::component::{ActiveTheme, Icon, IconName, Sizable};
 use gpui_kit::prelude::*;
@@ -42,11 +43,11 @@ impl ChangesPanel {
         div()
             .id(label)
             .px_2()
-            .h(px(20.))
+            .h(px(ROW_HEIGHT))
             .flex()
             .items_center()
             .rounded(px(5.))
-            .text_size(px(11.))
+            .text_size(px(LIST_SMALL))
             .cursor_pointer()
             .text_color(if on { theme.foreground } else { theme.muted_foreground })
             .when(on, |d| d.bg(theme.secondary))
@@ -71,24 +72,24 @@ impl ChangesPanel {
         let panel = self.panel.downgrade();
         div()
             .id(SharedString::from(format!("change-{}", change.path.display())))
-            .h(px(22.))
+            .h(px(ROW_HEIGHT))
             .pl(px(10.))
             .pr(px(8.))
             .flex()
             .items_center()
             .gap(px(6.))
-            .text_size(px(12.))
+            .text_size(px(LIST_TEXT))
             .text_color(fg)
             .cursor_pointer()
             .hover(|d| d.bg(hover))
             .child(crate::icons::file(&name, cx))
             // The name gives way before the counts do.
             .child(div().flex_shrink(1.).min_w(px(40.)).truncate().child(name))
-            .child(div().flex_1().min_w_0().truncate().text_size(px(11.)).text_color(muted).child(dir))
-            .when(change.by_command, |d| d.child(div().flex_none().text_size(px(10.)).text_color(muted).child("by a command")))
-            .when(change.created, |d| d.child(div().flex_none().text_size(px(10.)).text_color(green).child("new")))
-            .child(div().flex_none().text_size(px(11.)).text_color(green).child(format!("+{}", change.added)))
-            .child(div().flex_none().text_size(px(11.)).text_color(red).child(format!("−{}", change.removed)))
+            .child(div().flex_1().min_w_0().truncate().text_size(px(LIST_SMALL)).text_color(muted).child(dir))
+            .when(change.by_command, |d| d.child(div().flex_none().text_size(px(LIST_TINY)).text_color(muted).child("by a command")))
+            .when(change.created, |d| d.child(div().flex_none().text_size(px(LIST_TINY)).text_color(green).child("new")))
+            .child(div().flex_none().text_size(px(LIST_SMALL)).text_color(green).child(format!("+{}", change.added)))
+            .child(div().flex_none().text_size(px(LIST_SMALL)).text_color(red).child(format!("−{}", change.removed)))
             .tooltip({
                 let tip = match change.edits {
                     0 => "Changed by a command, found with git".to_string(),
@@ -141,18 +142,18 @@ impl Render for ChangesPanel {
                     .child(self.scope_button("This session", true, cx))
                     .child(div().flex_1())
                     .when(!changes.is_empty(), |d| {
-                        d.child(div().text_size(px(11.)).text_color(muted).child(match changes.len() {
+                        d.child(div().text_size(px(LIST_SMALL)).text_color(muted).child(match changes.len() {
                             1 => "1 file".to_string(),
                             n => format!("{n} files"),
                         }))
-                        .child(div().text_size(px(11.)).text_color(green).child(format!("+{added}")))
-                        .child(div().text_size(px(11.)).text_color(red).child(format!("−{removed}")))
+                        .child(div().text_size(px(LIST_SMALL)).text_color(green).child(format!("+{added}")))
+                        .child(div().text_size(px(LIST_SMALL)).text_color(red).child(format!("−{removed}")))
                     }),
             );
         if changes.is_empty() {
             let what = if self.session_scope { "No files changed in this session yet." } else { "No files changed in this turn." };
             return col
-                .child(div().px_3().py_2().text_size(px(11.)).text_color(muted).child(what))
+                .child(div().px_3().py_2().text_size(px(LIST_SMALL)).text_color(muted).child(what))
                 .into_any_element();
         }
         for (group, title) in [(Group::Code, None), (Group::Tests, Some("Tests")), (Group::Generated, Some("Generated"))] {
