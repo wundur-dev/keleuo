@@ -142,8 +142,6 @@ pub fn register_panels(cx: &mut App) {
 }
 
 pub enum WorkspaceEvent {
-    /// Start a new session (pick a folder).
-    NewSession,
     /// This session's Claude wrote or edited a file.
     AgentEdited(PathBuf),
 }
@@ -232,6 +230,18 @@ impl Workspace {
             window,
             |ws, _, ev: &FileTreeEvent, window, cx| match ev {
                 FileTreeEvent::Open(path) => ws.open(path.clone(), None, false, false, window, cx),
+                // Open tabs of what was renamed follow it (a save would write the old name).
+                FileTreeEvent::Renamed(from, to) => {
+                    for doc in ws.docs.clone() {
+                        let moved = doc.read(cx).path.strip_prefix(from).ok().map(|rest| if rest.as_os_str().is_empty() { to.clone() } else { to.join(rest) });
+                        if let Some(path) = moved {
+                            doc.update(cx, |d, cx| {
+                                d.path = path;
+                                cx.notify();
+                            });
+                        }
+                    }
+                }
                 FileTreeEvent::Indexed(index) => {
                     *ws.doc_ctx.index.borrow_mut() = index.clone();
                     ws.build_symbols(index.clone(), cx);
@@ -250,7 +260,6 @@ impl Workspace {
                     ws.open(path.clone(), *line, false, true, window, cx)
                 }
                 ChatPanelEvent::OpenDiff(path) => ws.open_diff(path.clone(), None, window, cx),
-                ChatPanelEvent::NewSession => cx.emit(WorkspaceEvent::NewSession),
                 ChatPanelEvent::OpenAgent(id) => ws.open_agent(id.clone(), window, cx),
                 ChatPanelEvent::OpenWeb(url) => ws.open_web(url.clone(), window, cx),
                 ChatPanelEvent::RunCommand(command) => ws.run_in_terminal(command.clone(), window, cx),
@@ -750,7 +759,6 @@ impl Workspace {
                 ChatPanelEvent::OpenWeb(url) => ws.open_web(url.clone(), window, cx),
                 ChatPanelEvent::RunCommand(command) => ws.run_in_terminal(command.clone(), window, cx),
                 ChatPanelEvent::ShowChanges => ws.show_changes(window, cx),
-                ChatPanelEvent::NewSession => cx.emit(WorkspaceEvent::NewSession),
                 ChatPanelEvent::Activated => ws.touch_code(panel.entity_id()),
                 ChatPanelEvent::Closed => {
                     ws.agent_views.retain(|v| v.entity_id() != panel.entity_id());
@@ -976,10 +984,11 @@ impl Workspace {
                         ws.panel_subs.remove(&view.entity_id());
                         cx.notify();
                     }
+                    TerminalEvent::Output => {}
                 },
             ),
-            // The tab title follows the program and unseen output.
-            cx.observe(&view, |_, _, cx| cx.notify()),
+            // The tab's title (the program, unseen output) is read from the terminal as the tab
+            // strip is drawn, and the terminal says when it changed: nothing to pass on here.
         ];
         self.panel_subs.insert(id, subs);
         self.touch_code(id);
@@ -1490,6 +1499,11 @@ impl Workspace {
                 };
                 self.show_panel(id, window, cx);
             }
+            "install-skills" => {
+                // Tests: open the skill installer on a source, fetching it.
+                let src = (!arg.is_empty()).then(|| arg.to_string());
+                self.skills.update(cx, |p, cx| p.install_from_git(src, window, cx));
+            }
             "fold" => self.toggle_sidebar(window, cx),
             "reset" => self.reset_layout(window, cx),
             "zoom" => {
@@ -1629,6 +1643,7 @@ impl Workspace {
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        crate::perf::count(crate::perf::Count::Workspace);
         if !self.first_frame_logged {
             self.first_frame_logged = true;
             // A session opened later (from the browser): its own time, with KELEUO_PERF=1.

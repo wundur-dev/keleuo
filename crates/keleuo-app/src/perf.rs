@@ -180,3 +180,89 @@ pub fn switch_shown(window: &mut gpui_kit::Window) {
         });
     }
 }
+
+/// What gets drawn, counted with `KELEUO_PERF=1` and reported by the pulse.
+#[derive(Clone, Copy)]
+pub enum Count {
+    /// The window's root: one per frame drawn.
+    Frame,
+    Workspace,
+    Chat,
+    /// A terminal's grid painted.
+    Terminal,
+}
+
+const COUNTS: [&str; 4] = ["frames", "workspace", "chat", "terminal"];
+
+static COUNTED: [std::sync::atomic::AtomicU64; 4] = [const { std::sync::atomic::AtomicU64::new(0) }; 4];
+
+pub fn count(what: Count) {
+    if enabled() {
+        COUNTED[what as usize].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// With `KELEUO_PERF=1`: every five seconds, on its own thread, what the app drew and what it
+/// cost: renders per second, CPU, memory and wakeups (a line on stderr starting
+/// `perf pulse`). A change is then measured against the same scene, not guessed.
+pub fn start_pulse() {
+    if !enabled() {
+        return;
+    }
+    const EVERY: Duration = Duration::from_secs(5);
+    std::thread::spawn(|| {
+        let mut before = Usage::now();
+        let mut counts_before = [0u64; 4];
+        loop {
+            std::thread::sleep(EVERY);
+            let now = Usage::now();
+            let secs = now.at.duration_since(before.at).as_secs_f64().max(0.001);
+            let counts: Vec<u64> = COUNTED.iter().map(|c| c.load(std::sync::atomic::Ordering::Relaxed)).collect();
+            let rates: Vec<String> = COUNTS
+                .iter()
+                .zip(counts.iter().zip(counts_before.iter()))
+                .map(|(name, (n, b))| format!("{name} {:.1}/s", (n - b) as f64 / secs))
+                .collect();
+            eprintln!(
+                "perf pulse {} · cpu {:.1}% · {:.0} MB · wakeups {:.0}/s",
+                rates.join(" · "),
+                (now.cpu - before.cpu).as_secs_f64() / secs * 100.0,
+                now.footprint as f64 / 1_048_576.0,
+                now.wakeups.saturating_sub(before.wakeups) as f64 / secs,
+            );
+            counts_before.copy_from_slice(&counts);
+            before = now;
+        }
+    });
+}
+
+/// The process's CPU time, memory footprint and wakeups so far.
+struct Usage {
+    at: Instant,
+    cpu: Duration,
+    footprint: u64,
+    wakeups: u64,
+}
+
+impl Usage {
+    fn now() -> Self {
+        let at = Instant::now();
+        // SAFETY: both calls only write into the zeroed structs passed to them.
+        let cpu = unsafe {
+            let mut r: libc::rusage = std::mem::zeroed();
+            libc::getrusage(libc::RUSAGE_SELF, &mut r);
+            let t = |v: libc::timeval| Duration::new(v.tv_sec as u64, v.tv_usec as u32 * 1000);
+            t(r.ru_utime) + t(r.ru_stime)
+        };
+        let (footprint, wakeups) = unsafe {
+            let mut info: libc::rusage_info_v4 = std::mem::zeroed();
+            let ok = libc::proc_pid_rusage(
+                std::process::id() as libc::c_int,
+                libc::RUSAGE_INFO_V4,
+                &mut info as *mut _ as *mut libc::rusage_info_t,
+            ) == 0;
+            if ok { (info.ri_phys_footprint, info.ri_pkg_idle_wkups + info.ri_interrupt_wkups) } else { (0, 0) }
+        };
+        Self { at, cpu, footprint, wakeups }
+    }
+}

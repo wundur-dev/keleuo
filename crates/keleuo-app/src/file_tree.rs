@@ -6,6 +6,7 @@ use crate::panels::{LIST_TEXT, ROW_HEIGHT};
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::menu::{ContextMenuExt, PopupMenu, PopupMenuItem};
 use gpui_kit::component::{ActiveTheme, Icon, Sizable};
@@ -17,6 +18,8 @@ use keleuo_core::links::FileIndex;
 
 pub enum FileTreeEvent {
     Open(PathBuf),
+    /// A file or folder was renamed: from, to (open tabs follow).
+    Renamed(PathBuf, PathBuf),
     /// A new file list (for link resolution).
     Indexed(Arc<FileIndex>),
 }
@@ -49,6 +52,14 @@ struct Creating {
     _sub: Subscription,
 }
 
+/// A file or folder being renamed, its row a name field.
+struct Renaming {
+    path: PathBuf,
+    input: Entity<InputState>,
+    problem: Option<String>,
+    _sub: Subscription,
+}
+
 pub struct FileTree {
     focus: FocusHandle,
     host: Arc<dyn Host>,
@@ -59,6 +70,7 @@ pub struct FileTree {
     pub selected: Option<PathBuf>,
     loading: bool,
     creating: Option<Creating>,
+    renaming: Option<Renaming>,
     /// Select this path once the next listing comes in (one just made).
     reveal_after: Option<PathBuf>,
     /// Every path listed, to tell a new file from a changed one.
@@ -88,6 +100,7 @@ impl FileTree {
             selected: None,
             loading: true,
             creating: None,
+            renaming: None,
             reveal_after: None,
             known: HashSet::new(),
             asked: Vec::new(),
@@ -267,6 +280,92 @@ impl FileTree {
         .detach();
     }
 
+    /// Rename `path`: its row becomes a name field (Enter renames, Esc or clicking away keeps it).
+    pub fn start_rename(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        let input = cx.new(|cx| InputState::new(window, cx).default_value(name));
+        input.update(cx, |s, cx| s.focus(window, cx));
+        let sub = cx.subscribe_in(&input, window, |tree, _, ev: &InputEvent, _, cx| match ev {
+            InputEvent::PressEnter { .. } => tree.finish_rename(cx),
+            InputEvent::Blur => tree.cancel_rename(cx),
+            _ => {}
+        });
+        self.renaming = Some(Renaming { path, input, problem: None, _sub: sub });
+        cx.notify();
+    }
+
+    fn cancel_rename(&mut self, cx: &mut Context<Self>) {
+        if self.renaming.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    fn finish_rename(&mut self, cx: &mut Context<Self>) {
+        let Some(r) = &self.renaming else { return };
+        let (from, name) = (r.path.clone(), r.input.read(cx).value().to_string());
+        let host = self.host.clone();
+        cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let to = { let from = from.clone(); cx.background_spawn(async move { files::rename(host.as_ref(), &from, &name) }).await };
+            let _ = this.update(cx, |tree, cx| match to {
+                Ok(to) => {
+                    tree.renaming = None;
+                    if to != from {
+                        if tree.expanded.remove(&from) {
+                            tree.expanded.insert(to.clone());
+                        }
+                        tree.selected = Some(to.clone());
+                        cx.emit(FileTreeEvent::Renamed(from, to.clone()));
+                        tree.reveal_after = Some(to);
+                        tree.refresh(cx);
+                    }
+                    cx.notify();
+                }
+                Err(problem) => {
+                    if let Some(r) = tree.renaming.as_mut() {
+                        r.problem = Some(problem);
+                    }
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Take `path` away once the person says so: into the Trash (deleted over SSH, said first).
+    pub fn discard(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        let what = if self.host.is_file(&path) { "file" } else { "folder" };
+        let detail = if self.host.is_remote() {
+            format!("Deletes it on {} (there is no Trash there).", self.host.label())
+        } else {
+            "Moves it to the Trash.".to_string()
+        };
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            &format!("Remove the {what} {name}?"),
+            Some(&detail),
+            &[PromptButton::Ok("Remove".into()), PromptButton::Cancel("Cancel".into())],
+            cx,
+        );
+        let host = self.host.clone();
+        cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            if answer.await.ok() != Some(0) {
+                return;
+            }
+            let gone = { let path = path.clone(); cx.background_spawn(async move { files::discard(host.as_ref(), &path) }).await };
+            let _ = this.update(cx, |tree, cx| {
+                if let Err(e) = gone {
+                    eprintln!("keleuo: could not remove {}: {e}", path.display());
+                }
+                if tree.selected.as_ref().is_some_and(|s| s.starts_with(&path)) {
+                    tree.selected = None;
+                }
+                tree.refresh(cx);
+            });
+        })
+        .detach();
+    }
+
     fn click(&mut self, ix: usize, cx: &mut Context<Self>) {
         let Some(row) = self.rows.get(ix) else { return };
         let path = row.path.clone();
@@ -344,6 +443,7 @@ impl Render for FileTree {
         let sidebar_bg = crate::theme::tool_ground(cx);
         let danger = cx.theme().danger;
         let naming = self.creating.as_ref().map(|c| (c.input.clone(), c.problem.clone().unwrap_or_default()));
+        let renaming = self.renaming.as_ref().map(|r| (r.path.clone(), r.input.clone(), r.problem.clone()));
         let list = uniform_list("file-tree", rows.len(), move |range, _window, cx| {
             range
                 .map(|ix| {
@@ -378,8 +478,67 @@ impl Render for FileTree {
                     } else {
                         crate::icons::file(&row.name, cx)
                     };
+                    // Being renamed: a name field in its place.
+                    if let Some((_, input, problem)) = renaming.as_ref().filter(|(p, _, _)| *p == row.path) {
+                        let cancel = entity.clone();
+                        return div()
+                            .id(ix)
+                            .h(px(ROW_HEIGHT))
+                            .pl(indent)
+                            .pr_1()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .child(icon)
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w(px(80.))
+                                    .capture_key_down(move |ev: &KeyDownEvent, _, cx| {
+                                        if ev.keystroke.key == "escape" {
+                                            cx.stop_propagation();
+                                            let _ = cancel.update(cx, |tree, cx| tree.cancel_rename(cx));
+                                        }
+                                    })
+                                    .child(Input::new(input).xsmall()),
+                            )
+                            .children(problem.clone().map(|p| div().flex_none().max_w(px(140.)).truncate().text_size(px(11.)).text_color(danger).child(p)))
+                            .into_any_element();
+                    }
+                    // Rename and remove, on hover (right-click is easy to miss on a Mac).
+                    let group = SharedString::from(format!("file-row-{ix}"));
+                    let (ren, rem) = (entity.clone(), entity.clone());
+                    let (ren_path, rem_path) = (row.path.clone(), row.path.clone());
+                    let icons = div()
+                        .flex_none()
+                        .flex()
+                        .invisible()
+                        .group_hover(group.clone(), |d| d.visible())
+                        .child(
+                            Button::new(("file-rename", ix))
+                                .icon(gpui_kit::assets::IconName::Pencil)
+                                .xsmall()
+                                .ghost()
+                                .tooltip("Rename")
+                                .on_click(move |_, window, cx| {
+                                    cx.stop_propagation();
+                                    let _ = ren.update(cx, |t, cx| t.start_rename(ren_path.clone(), window, cx));
+                                }),
+                        )
+                        .child(
+                            Button::new(("file-remove", ix))
+                                .icon(gpui_kit::assets::IconName::Trash)
+                                .xsmall()
+                                .ghost()
+                                .tooltip("Remove")
+                                .on_click(move |_, window, cx| {
+                                    cx.stop_propagation();
+                                    let _ = rem.update(cx, |t, cx| t.discard(rem_path.clone(), window, cx));
+                                }),
+                        );
                     div()
                         .id(ix)
+                        .group(group)
                         .h(px(ROW_HEIGHT))
                         .pl(indent)
                         .pr_1()
@@ -391,7 +550,8 @@ impl Render for FileTree {
                         .when(is_sel, |d| d.bg(sel_bg))
                         .hover(|d| d.bg(hover))
                         .child(icon)
-                        .child(div().truncate().child(row.name.clone()))
+                        .child(div().flex_1().min_w_0().truncate().child(row.name.clone()))
+                        .child(icons)
                         .on_click(move |_, _, cx| {
                             let _ = entity.update(cx, |tree, cx| tree.click(ix, cx));
                         })

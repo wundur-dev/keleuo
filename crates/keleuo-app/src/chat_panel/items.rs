@@ -169,12 +169,18 @@ impl ChatPanel {
             summary::State::Ready(s) => s,
         };
         let amber = theme.yellow;
+        // The turn's summary reads the turn; agents it left in the background are not done yet.
+        let chat = &self.session.read(cx).chat;
+        let background = chat.running_agents().filter(|a| a.background).count();
+        let agents_on = background > 0 && chat.last_summary().is_some_and(|last| std::ptr::eq(last, s));
         let tone = match s.status {
+            _ if agents_on => theme.magenta,
             summary::Status::Done => theme.green,
             summary::Status::Partial => theme.blue,
             summary::Status::Failed => theme.red,
             summary::Status::Waiting => amber,
         };
+        let status_label = if agents_on { "Agents working" } else { s.status.label() };
         let (green, red, hover) = (theme.green, theme.red, theme.secondary_hover);
         let panel = cx.entity().downgrade();
         let mut card = card.child(
@@ -192,7 +198,7 @@ impl ChatPanel {
                         .text_size(px(12.))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(tone)
-                        .child(s.status.label()),
+                        .child(status_label),
                 )
                 .child(
                     div()
@@ -202,7 +208,19 @@ impl ChatPanel {
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(fg)
                         .child(s.headline.clone()),
-                ),
+                )
+                // Who wrote it: a summary is a model's reading of the turn, not the turn.
+                .when(!s.model.is_empty(), |d| {
+                    d.child(
+                        div()
+                            .flex_none()
+                            .max_w(px(200.))
+                            .truncate()
+                            .text_size(px(11.))
+                            .text_color(muted)
+                            .child(format!("by {}", s.model)),
+                    )
+                }),
         );
         // A section: its title in the left column, its rows beside it.
         let section = |title: &'static str, color: Hsla, rows: Vec<AnyElement>| {
@@ -292,7 +310,7 @@ impl ChatPanel {
                                             .text_color(muted)
                                             .child(command.clone()),
                                     )
-                                    .child(run_pill(SharedString::from(format!("sum-run-{key}-{n}")), command, panel.clone(), cx)),
+                                    .child(run_pill(SharedString::from(format!("sum-run-{key}-{n}")), command, background, panel.clone(), cx)),
                             )
                         })
                         .into_any_element()
@@ -494,6 +512,7 @@ impl ChatPanel {
             // which runs it (without the `!`) in a terminal tab of the session's folder.
             .code_block_actions({
                 let panel = entity.clone();
+                let session = self.session.clone();
                 move |block, _, cx| {
                 let code = block.code();
                 let lang = block.lang().unwrap_or_else(|| "code".into());
@@ -507,7 +526,10 @@ impl ChatPanel {
                     .text_size(px(11.))
                     .text_color(muted)
                     .child(lang)
-                    .when_some(command, |d, command| d.child(run_pill("run-code", command, panel.clone(), cx)))
+                    .when_some(command, |d, command| {
+                        let background = session.read(cx).chat.running_agents().filter(|a| a.background).count();
+                        d.child(run_pill("run-code", command, background, panel.clone(), cx))
+                    })
                     .child(
                         Button::new("copy-code")
                             .xsmall()
@@ -726,6 +748,149 @@ impl ChatPanel {
         )
     }
 
+    /// The same at the foot of the conversation, as a chat app shows it: a spinner and grey
+    /// words under the last message ("Thinking · 12s", or the tool running), while the agent
+    /// works.
+    pub(super) fn render_working_line(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let session = self.session.read(cx);
+        if !session.chat.busy || session.chat.needs_input() || session.view == View::Terminal {
+            return None;
+        }
+        let answering = matches!(session.chat.items.last(), Some(Item::Assistant { streaming: true, .. }));
+        let tool = session.chat.running_tools().last().map(|t| {
+            let what = t.summary.lines().next().unwrap_or_default().trim().to_string();
+            match t.name.as_str() {
+                "Bash" | "Shell" => format!("Running {what}"),
+                "Read" => format!("Reading {what}"),
+                "Edit" | "MultiEdit" | "Write" | "StrReplace" => format!("Editing {what}"),
+                "Grep" | "Glob" => format!("Searching {what}"),
+                name => format!("{name} {what}"),
+            }
+        });
+        let doing = match (answering, tool, session.chat.status.as_deref()) {
+            (true, _, _) => "Writing".to_string(),
+            (_, Some(t), _) => t,
+            (_, None, None | Some("thinking" | "working" | "sending" | "requesting")) => "Thinking".into(),
+            (_, None, Some(_)) => "Working".into(),
+        };
+        let label = match self.busy_since.map(|t| format_elapsed(t.elapsed())) {
+            Some(e) => format!("{doing} · {e}"),
+            None => doing,
+        };
+        let muted = cx.theme().muted_foreground;
+        Some(
+            div()
+                .flex_none()
+                .w_full()
+                .flex()
+                .justify_center()
+                .px_4()
+                .pb_2()
+                .child(
+                    div()
+                        .w_full()
+                        .max_w(px(COLUMN))
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .text_size(px(13.))
+                        .text_color(muted)
+                        .child(self.spinner(muted).small())
+                        .child(div().min_w_0().truncate().child(label)),
+                )
+                .into_any_element(),
+        )
+    }
+
+    /// Agents sent to the background go on after the turn ends, and the turn looks finished:
+    /// a tinted bar above the message box says they are still working, with each one (a click
+    /// opens it), until the last reports back.
+    pub(super) fn render_background_agents(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let session = self.session.read(cx);
+        if session.view == View::Terminal {
+            return None;
+        }
+        let running: Vec<(String, String, Option<std::time::Duration>)> = session
+            .chat
+            .running_agents()
+            .filter(|a| a.background)
+            .map(|a| (a.tool_use_id.clone(), a.title(), a.elapsed()))
+            .collect();
+        if running.is_empty() {
+            return None;
+        }
+        let name = session.backend.name();
+        let theme = cx.theme();
+        let (fg, muted, violet, hover) = (theme.foreground, theme.muted_foreground, theme.magenta, theme.secondary_hover);
+        let head = match running.len() {
+            1 => "1 agent is still working".to_string(),
+            n => format!("{n} agents are still working"),
+        };
+        let longest = running.iter().filter_map(|r| r.2).max().map(|d| format!(" · {}", format_elapsed(d))).unwrap_or_default();
+        let after = if session.chat.busy {
+            "in the background".to_string()
+        } else {
+            format!("in the background; {name} picks up when they report back")
+        };
+        let mut chips = div().flex().flex_wrap().gap_1();
+        for (ix, (id, title, elapsed)) in running.into_iter().enumerate() {
+            let elapsed = elapsed.map(|d| format!(" · {}", format_elapsed(d))).unwrap_or_default();
+            chips = chips.child(
+                div()
+                    .id(("background-agent", ix))
+                    .max_w(px(320.))
+                    .px_2()
+                    .py(px(1.))
+                    .rounded(px(6.))
+                    .border_1()
+                    .border_color(violet.opacity(0.35))
+                    .bg(theme.background)
+                    .text_size(px(12.))
+                    .text_color(fg)
+                    .truncate()
+                    .cursor_pointer()
+                    .hover(|d| d.bg(hover))
+                    .child(format!("{title}{elapsed}"))
+                    .on_click(cx.listener(move |_, _, _, cx| cx.emit(ChatPanelEvent::OpenAgent(id.clone())))),
+            );
+        }
+        Some(
+            div()
+                .flex_none()
+                .w_full()
+                .flex()
+                .justify_center()
+                .px_4()
+                .pb_2()
+                .child(
+                    div()
+                        .w_full()
+                        .max_w(px(COLUMN))
+                        .flex()
+                        .flex_col()
+                        .gap(px(6.))
+                        .px_3()
+                        .py_2()
+                        .rounded_lg()
+                        .border_1()
+                        .border_color(violet.opacity(0.5))
+                        .bg(violet.opacity(0.07))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .text_size(px(13.))
+                                .child(self.spinner(violet).small())
+                                .child(div().flex_none().font_weight(FontWeight::SEMIBOLD).text_color(fg).child(format!("{head}{longest}")))
+                                .child(div().min_w_0().truncate().text_color(muted).child(after)),
+                        )
+                        .child(chips),
+                )
+                .into_any_element(),
+        )
+    }
+
     pub(super) fn render_asking(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let session = self.session.read(cx);
         let asking = session.asking?;
@@ -808,11 +973,32 @@ pub(super) fn hover_actions(group: SharedString, key: String, text: String, mute
 
 /// A green Run pill, so it reads as a button at a glance (brighter under the pointer, darker
 /// while pressed): runs `command` in a terminal tab of the session's folder.
-pub(super) fn run_pill(id: impl Into<ElementId>, command: String, panel: WeakEntity<ChatPanel>, cx: &App) -> Stateful<Div> {
+pub(super) fn run_pill(id: impl Into<ElementId>, command: String, background: usize, panel: WeakEntity<ChatPanel>, cx: &App) -> Stateful<Div> {
     let theme = cx.theme();
-    let (go, go_hover, go_active) = (theme.success, theme.success_hover, theme.success_active);
+    // Keleuo's own restart quits the app, and with it the agents working in the background:
+    // amber, and it says so, while there are any. The caller counts them (`background`): this
+    // runs while the panel is being drawn, and reading the panel from here panics.
+    let stops = if restarts_keleuo(&command) { background } else { 0 };
+    let (go, go_hover, go_active) = if stops > 0 {
+        (theme.warning, theme.warning_hover, theme.warning_active)
+    } else {
+        (theme.success, theme.success_hover, theme.success_active)
+    };
     // The dark theme's green is light: dark text on it reads, its own green does not.
-    let go_fg = if theme.is_dark() { theme.background } else { theme.success_foreground };
+    let go_fg = match (theme.is_dark(), stops > 0) {
+        (true, _) => theme.background,
+        (false, true) => theme.warning_foreground,
+        (false, false) => theme.success_foreground,
+    };
+    let label = match stops {
+        0 => "Run".to_string(),
+        1 => "Run · stops 1 agent".to_string(),
+        n => format!("Run · stops {n} agents"),
+    };
+    let tip: SharedString = match stops {
+        0 => "Run it in a terminal in this folder".into(),
+        n => format!("{n} background agent(s) are still working: restarting quits Keleuo and stops them. Wait for them to report back, or run it anyway.").into(),
+    };
     div()
         .id(id)
         .flex_none()
@@ -831,10 +1017,62 @@ pub(super) fn run_pill(id: impl Into<ElementId>, command: String, panel: WeakEnt
         .hover(|d| d.bg(go_hover).shadow_sm())
         .active(|d| d.bg(go_active))
         .child(Icon::new(gpui_kit::assets::IconName::Play).xsmall().text_color(go_fg))
-        .child("Run")
-        .tooltip(|w, cx| gpui_kit::component::tooltip::Tooltip::new("Run it in a terminal in this folder").build(w, cx))
+        .child(label)
+        .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(w, cx))
         .on_click(move |_, _, cx| {
             let text = command.clone();
             let _ = panel.update(cx, |_, cx| cx.emit(ChatPanelEvent::RunCommand(text)));
         })
+}
+
+/// Whether `command` is Keleuo's own restart script (`./scripts/restart`), which quits the app.
+fn restarts_keleuo(command: &str) -> bool {
+    command.trim().trim_start_matches('!').split_whitespace().next().is_some_and(|w| w.ends_with("scripts/restart"))
+}
+
+#[cfg(test)]
+mod run_pill_tests {
+    use crate::agent_session::AgentSession;
+    use crate::chat_panel::ChatPanel;
+    use gpui_kit::{AppContext, TestAppContext};
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    #[::core::prelude::v1::test]
+    fn keleuos_restart_is_told_from_other_commands() {
+        assert!(super::restarts_keleuo("./scripts/restart"));
+        assert!(super::restarts_keleuo("! ./scripts/restart"));
+        assert!(super::restarts_keleuo("scripts/restart --release"));
+        assert!(!super::restarts_keleuo("cargo test"));
+        assert!(!super::restarts_keleuo("echo ./scripts/restart"));
+    }
+
+    /// The Run pill is drawn while its panel is being drawn, so the panel is leased then:
+    /// reading the panel from inside it panics (gpui's double lease). Drawn inside the panel's
+    /// own update, as its render draws the message.
+    #[gpui_kit::test]
+    fn restart_pill_is_drawn_while_its_panel_is_leased(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        cx.update(|cx| {
+            cx.set_global(crate::AppSettings(std::rc::Rc::new(std::cell::RefCell::new(keleuo_core::settings::Settings::load(None)))));
+            cx.set_global(crate::backends::Backends(crate::backends::registry()));
+        });
+        let mut panel = None;
+        cx.update(|cx| {
+            let backend = crate::backends::backend(None, cx);
+            gpui_kit::open_window(Default::default(), cx, |window, cx| {
+                let session = cx.new(|_| AgentSession::new(Arc::new(keleuo_core::host::LocalHost), backend, PathBuf::from("/")));
+                let p = cx.new(|cx| ChatPanel::new(session, window, cx));
+                panel = Some(p.clone());
+                p
+            })
+            .unwrap();
+        });
+        let panel = panel.unwrap();
+        cx.update(|cx| {
+            panel.update(cx, |_, cx| {
+                let _ = super::run_pill("restart", "./scripts/restart".into(), 0, panel.downgrade(), cx);
+            });
+        });
+    }
 }

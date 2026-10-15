@@ -93,6 +93,8 @@ pub enum Event {
         input_tokens: u64,
         output_tokens: u64,
         session_id: String,
+        /// The largest context window among the models the process used (`modelUsage`).
+        context_window: Option<u64>,
     },
     /// A subagent (Agent or Task tool call) started.
     TaskStarted {
@@ -266,6 +268,11 @@ pub fn parse_value(v: &Value) -> Event {
                     + tokens("cache_creation_input_tokens"),
                 output_tokens: tokens("output_tokens"),
                 session_id: s(v, "session_id"),
+                // Subagents may run a smaller model; the session's own is the largest window.
+                context_window: v
+                    .get("modelUsage")
+                    .and_then(Value::as_object)
+                    .and_then(|m| m.values().filter_map(|u| u.get("contextWindow")?.as_u64()).filter(|n| *n > 0).max()),
             }
         }
         other => Event::Other(other.to_string()),

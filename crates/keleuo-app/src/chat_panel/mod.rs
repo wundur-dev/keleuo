@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use gpui_kit::component::input::{Enter, Escape, IndentInline, MoveDown, MoveUp, InlineToken, TextDecoration, TextDecorationCollection, TextareaMode, InlineTokenContext, Input, InputContent, InputEvent, InputState, Textarea, TextareaState};
 
-use crate::agent_session::{Asking, Spend, View};
+use crate::agent_session::{Asking, Fill, Spend, View};
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::menu::DropdownMenu;
 use crate::sheet_tabs::{self, Joined, Palette, StripState};
@@ -40,7 +40,6 @@ pub enum ChatPanelEvent {
     OpenFile(PathBuf, Option<u32>),
     /// Open the file as a diff of what the session changed in it.
     OpenDiff(PathBuf),
-    NewSession,
     /// The session's tab was closed.
     Closed,
     /// Its tab became the shown one.
@@ -105,8 +104,10 @@ pub struct ChatPanel {
     toggled: HashSet<String>,
     pub index: Arc<FileIndex>,
     last_revision: u64,
-    /// Redraws once a second while subagents or tool calls run (their elapsed time).
+    /// Turns the spinners and the clocks while something runs, a few steps a second; slower,
+    /// and drawing nothing, while the chat is not on screen.
     ticker: Option<Task<()>>,
+    on_screen: crate::on_screen::OnScreen,
     /// When the agent became busy with the current turn (for the time on the thinking line).
     busy_since: Option<std::time::Instant>,
     /// The step the spinners are at: the ticker moves it on while something runs.
@@ -127,6 +128,8 @@ const MONO: &str = crate::terminal_view::FONT_FAMILY;
 /// How often the chat redraws while something runs: the spinners' step and the clocks.
 /// Ten a second reads as motion; continuous animation would redraw every frame.
 const TICK: std::time::Duration = std::time::Duration::from_millis(100);
+/// The ticker's pace while the chat is not shown: enough to notice the work has ended.
+const UNSEEN_TICK: std::time::Duration = std::time::Duration::from_secs(1);
 /// Steps in a spinner's turn (one turn a little over a second at the tick above).
 const SPINNER_STEPS: u32 = 12;
 /// Space below the Chat / Terminal tabs, before the window's bottom edge.
@@ -175,19 +178,26 @@ impl ChatPanel {
                 if running && panel.ticker.is_none() {
                     panel.ticker = Some(cx.spawn(
                         async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+                            let mut wait = TICK;
                             loop {
-                                cx.background_executor().timer(TICK).await;
+                                cx.background_executor().timer(wait).await;
                                 let alive = this.update(cx, |p, cx| {
-                                    let still = clocks_running(&p.session.read(cx).chat);
+                                    let session = p.session.read(cx);
+                                    let still = clocks_running(&session.chat);
+                                    // Drawn only where the clocks show: on screen, in Chat.
+                                    let shown = p.on_screen.now() && session.view == View::Chat;
                                     p.phase = p.phase.wrapping_add(1);
-                                    cx.notify();
+                                    if shown {
+                                        cx.notify();
+                                    }
                                     if !still {
                                         p.ticker = None;
                                     }
-                                    still
+                                    (still, shown)
                                 });
-                                if !matches!(alive, Ok(true)) {
-                                    break;
+                                match alive {
+                                    Ok((true, shown)) => wait = if shown { TICK } else { UNSEEN_TICK },
+                                    _ => break,
                                 }
                             }
                         },
@@ -230,6 +240,7 @@ impl ChatPanel {
             busy_since: None,
             phase: 0,
             ticker: None,
+            on_screen: Default::default(),
             views: Rc::new(StripState::default()),
             _subs: vec![s1, s2],
         }
@@ -514,7 +525,9 @@ impl ChatPanel {
         }
         // Cost when billed per use (or the setting says so), else how full the context is.
         let setting = cx.global::<crate::AppSettings>().0.borrow().cost_display.clone();
-        let (spend, spend_tip) = match session.spend(cx) {
+        let current = session.spend(cx);
+        let showing_context = matches!(current, Some(Spend::Context { .. }));
+        let (spend, spend_tip) = match current {
             Some(Spend::Cost { total, turn, estimated }) => {
                 // "~": worked out from token counts and published prices.
                 let est = if estimated { "~" } else { "" };
@@ -526,17 +539,26 @@ impl ChatPanel {
                 )
             }
             // How much of the model's context the conversation fills: "180k of 1M context".
-            Some(Spend::Context { percent, tokens, window }) if tokens > 0 && window > 0 => (
+            Some(Spend::Context { tokens, window, fill, .. }) => (
                 Some(format!("{} of {} context", short_tokens(tokens), short_tokens(window))),
-                if percent > 100 {
-                    "The conversation as of the last request, against the model's context window (over 100%: the agent will compact it)"
-                } else {
-                    "The conversation as of the last request, against the model's context window"
+                match fill {
+                    Fill::Room => "The conversation as of the last request, against the model's context window",
+                    Fill::Filling => "The conversation as of the last request, against the model's context window: filling up",
+                    Fill::Nearly => "The conversation as of the last request, against the model's context window: the agent compacts it soon",
                 },
             ),
-            Some(Spend::Context { percent, .. }) => (Some(format!("{percent}% of context")), ""),
             None => (None, ""),
         };
+        // Amber, then red, on the way to where the agent compacts by itself.
+        let used = session.context_use();
+        let fill = used.map(|u| u.fill()).unwrap_or(Fill::Room);
+        let spend_color = match fill {
+            Fill::Filling if showing_context => theme.warning,
+            Fill::Nearly if showing_context => theme.danger,
+            _ => muted,
+        };
+        let compact = session.backend.compact_command().is_some();
+        let offer_compact = compact && fill != Fill::Room;
         let spend_tip = format!(
             "{spend_tip}. Cost shows: {}. Click to change.",
             match setting.as_str() {
@@ -545,8 +567,8 @@ impl ChatPanel {
                 _ => "auto (only when billed per use)",
             }
         );
-        let backend_name = session.backend.name();
         let weak = cx.entity().downgrade();
+        let weak_session = self.session.downgrade();
         // As tall as a tool panel's title bar, a hairline under it.
         div()
             .h(px(crate::dock_skin::HEADER_HEIGHT))
@@ -577,6 +599,7 @@ impl ChatPanel {
                         .rounded_sm()
                         .cursor_pointer()
                         .hover(|d| d.bg(hover))
+                        .text_color(spend_color)
                         .child(spend)
                         .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(spend_tip.clone()).build(w, cx))
                         .on_click(|_, window, cx| {
@@ -593,24 +616,33 @@ impl ChatPanel {
                         }),
                 )
             })
-            .child(
-                div()
-                    .id("new-chat")
-                    .px_1()
-                    .rounded_sm()
-                    .cursor_pointer()
-                    .hover(|d| d.bg(hover))
-                    .flex()
-                    .items_center()
-                    .gap_1()
-                    .child(Icon::new(IconName::Plus).xsmall())
-                    .child("New session")
-                    .tooltip(move |w, cx| {
-                        gpui_kit::component::tooltip::Tooltip::new(format!("New {backend_name} session (Cmd+N)"))
+            // Once the context fills up, compacting is a click away (agents that can be asked).
+            .when(offer_compact, |d| {
+                let session = self.session.downgrade();
+                d.child(
+                    div()
+                        .id("compact")
+                        .flex_none()
+                        .px_2()
+                        .rounded_full()
+                        .border_1()
+                        .border_color(spend_color)
+                        .text_color(spend_color)
+                        .text_size(px(12.))
+                        .cursor_pointer()
+                        .hover(|d| d.bg(hover))
+                        .child("Compact")
+                        .tooltip(|w, cx| {
+                            gpui_kit::component::tooltip::Tooltip::new(
+                                "Summarise the conversation so far to free up context (sends /compact; waits for the turn to end)",
+                            )
                             .build(w, cx)
-                    })
-                    .on_click(cx.listener(|_, _, _, cx| cx.emit(ChatPanelEvent::NewSession))),
-            )
+                        })
+                        .on_click(move |_, _, cx| {
+                            let _ = session.update(cx, |s, cx| s.compact(cx));
+                        }),
+                )
+            })
             .child(
                 Button::new("chat-options")
                     .icon(IconName::Ellipsis)
@@ -619,6 +651,7 @@ impl ChatPanel {
                     .tab_stop(false)
                     .dropdown_menu(move |menu, _, _| {
                         let weak = weak.clone();
+                        let session = weak_session.clone();
                         menu.item(
                             gpui_kit::component::menu::PopupMenuItem::new("Copy conversation (Cmd+Alt+C)").on_click(
                                 move |_, window, cx| {
@@ -626,6 +659,13 @@ impl ChatPanel {
                                 },
                             ),
                         )
+                        .when(compact, |menu| {
+                            menu.item(gpui_kit::component::menu::PopupMenuItem::new("Compact the context").on_click(
+                                move |_, _, cx| {
+                                    let _ = session.update(cx, |s, cx| s.compact(cx));
+                                },
+                            ))
+                        })
                     }),
             )
             .into_any_element()
@@ -765,6 +805,7 @@ impl Focusable for ChatPanel {
 
 impl Render for ChatPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        crate::perf::count(crate::perf::Count::Chat);
         if let Some(id) = self.agent.clone() {
             return self.render_agent_view(&id, cx);
         }
@@ -806,9 +847,17 @@ impl Render for ChatPanel {
             .track_focus(&self.focus)
             .on_action(cx.listener(|p, _: &CopyConversation, window, cx| p.copy_conversation(window, cx)))
             .child(self.render_header(cx))
+            // The agent's terminal as a view of its own, cached: drawing the chat (its header,
+            // a clock) does not paint the whole grid again; the terminal does when it changes.
             .when_some(terminal.clone(), |d, term| {
-                d.child(div().flex_1().min_h_0().relative().child(term))
-                    .children(self.render_edits(cx))
+                d.child(
+                    div()
+                        .flex_1()
+                        .min_h_0()
+                        .relative()
+                        .child(AnyView::from(term).cached(StyleRefinement::default().size_full())),
+                )
+                .children(self.render_edits(cx))
             })
             .when(terminal.is_none(), |d| d.child(
                 div()
@@ -825,6 +874,8 @@ impl Render for ChatPanel {
                             .size_full(),
                     )),
             )
+            .children(self.render_working_line(cx))
+            .children(self.render_background_agents(cx))
             .children(self.render_asking(cx))
             .child({
                 let slash = self.render_slash(cx);
@@ -833,6 +884,11 @@ impl Render for ChatPanel {
             }))
             .children(self.render_views(cx))
             .children(self.render_fix(cx))
+            // Marks the chat as on screen while a frame shows it (see `on_screen`).
+            .child({
+                let on_screen = self.on_screen.clone();
+                canvas(|_, _, _| {}, move |_, _, window, _| on_screen.mark(window)).absolute().size_0()
+            })
             .relative()
     }
 }

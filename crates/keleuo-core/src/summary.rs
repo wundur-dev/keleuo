@@ -171,6 +171,9 @@ pub struct TurnSummary {
     pub checked: Vec<Check>,
     #[serde(default)]
     pub needs_you: Vec<Todo>,
+    /// The model that wrote it (its id on the server), shown with it.
+    #[serde(default)]
+    pub model: String,
 }
 
 /// A turn's summary in the chat, as it comes.
@@ -605,7 +608,7 @@ pub fn parse(response: &Value, pieces: &[Piece]) -> Result<TurnSummary> {
         .filter(|t| !t.text.is_empty())
         .collect();
     let needs_you = fold_commands(needs_you, pieces).into_iter().take(5).collect();
-    Ok(TurnSummary { status: a.status, headline: one_line(&a.headline), changed: lines(a.changed), checked, needs_you })
+    Ok(TurnSummary { status: a.status, headline: one_line(&a.headline), changed: lines(a.changed), checked, needs_you, model: String::new() })
 }
 
 /// An item that is only one of the agent's commands written out joins the item before it, as
@@ -653,7 +656,9 @@ pub fn summarize(config: &Config, turn: &TurnText) -> Result<TurnSummary> {
         r => r,
     }
     .with_context(|| format!("could not reach {}", base(&config.endpoint)))?;
-    parse(&response, &turn.pieces)
+    let mut summary = parse(&response, &turn.pieces)?;
+    summary.model = config.model.trim().to_string();
+    Ok(summary)
 }
 
 /// A request with the server's key, when there is one.

@@ -315,6 +315,8 @@ fn paint_sheet(bounds: Bounds<Pixels>, joined: Joined, shown: bool, hot: bool, p
 pub struct StripState {
     slots: RefCell<Vec<(usize, Bounds<Pixels>)>>,
     hot: Cell<Option<usize>>,
+    /// The view that draws the strip: a hover redraws it, not the whole window.
+    owner: Cell<Option<EntityId>>,
 }
 
 impl StripState {
@@ -326,6 +328,7 @@ impl StripState {
         canvas(
             |_, _, _| (),
             move |b, _, window, _| {
+                state.owner.set(Some(window.current_view()));
                 let y = match joined {
                     Joined::Top => b.origin.y,
                     Joined::Bottom => b.origin.y + b.size.height - px(1.),
@@ -362,7 +365,7 @@ impl StripState {
     /// For tab `ix`'s `on_hover`: the tab under the pointer is drawn a shade lighter.
     pub fn hover(self: &Rc<Self>, ix: usize) -> impl Fn(&bool, &mut Window, &mut App) + 'static {
         let state = self.clone();
-        move |hovered, window, _| {
+        move |hovered, window, cx| {
             let now = if *hovered {
                 Some(ix)
             } else if state.hot.get() == Some(ix) {
@@ -372,7 +375,10 @@ impl StripState {
             };
             if now != state.hot.get() {
                 state.hot.set(now);
-                window.refresh();
+                match state.owner.get() {
+                    Some(view) => cx.notify(view),
+                    None => window.refresh(),
+                }
             }
         }
     }

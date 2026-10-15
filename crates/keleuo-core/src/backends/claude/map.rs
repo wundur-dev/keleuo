@@ -214,8 +214,11 @@ impl Mapper {
                     duration_ms,
                 }]
             }
-            Raw::Result { is_error, subtype, text, total_cost_usd, duration_ms, input_tokens, output_tokens, session_id, .. } => {
-                vec![Event::TurnEnded {
+            Raw::Result {
+                is_error, subtype, text, total_cost_usd, duration_ms, input_tokens, output_tokens, session_id, context_window, ..
+            } => {
+                let window = context_window.map(Event::ContextWindow);
+                window.into_iter().chain([Event::TurnEnded {
                     error: is_error.then(|| text.unwrap_or(subtype)),
                     cost_total_usd: total_cost_usd,
                     // The context's size at the last request, not the turn's total.
@@ -223,7 +226,8 @@ impl Mapper {
                     output_tokens,
                     duration_ms,
                     session_id: Some(session_id).filter(|s| !s.is_empty()),
-                }]
+                }])
+                .collect()
             }
             Raw::Unparsed(line) => vec![Event::Notice(line)],
             Raw::Other(_) => Vec::new(),

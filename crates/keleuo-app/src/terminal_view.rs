@@ -26,6 +26,9 @@ pub const FONT_FAMILY: &str = if cfg!(windows) { "Consolas" } else if cfg!(targe
 /// long after its first output at most, looked for this often, and fades out over this.
 const SETTLE_QUIET: std::time::Duration = std::time::Duration::from_millis(250);
 const SETTLE_AT_MOST: std::time::Duration = std::time::Duration::from_secs(3);
+/// A program silent this long after it started: the placeholder's spinner stops (an animation
+/// draws the window on every frame), its words stay.
+const SPIN_AT_MOST: std::time::Duration = std::time::Duration::from_secs(20);
 const SETTLE_CHECK: std::time::Duration = std::time::Duration::from_millis(80);
 const PLACEHOLDER_FADE: std::time::Duration = std::time::Duration::from_millis(180);
 /// The font size, from Settings.
@@ -109,6 +112,13 @@ pub struct TerminalView {
     wheel_rest: f32,
     /// 1, 2, ... in opening order: the key of its saved name.
     pub number: usize,
+    /// Drawn in a frame on screen now: output redraws the window only then (or when the tab's
+    /// title changes).
+    on_screen: crate::on_screen::OnScreen,
+    started: std::time::Instant,
+    /// The foreground program and when it was asked: the tab's title asks on every frame, the
+    /// system once a second.
+    program: std::cell::RefCell<(Option<std::time::Instant>, Option<String>)>,
     /// For the automatic name: the folder, its git branch and the login shell.
     pub folder: std::path::PathBuf,
     pub branch: Option<String>,
@@ -204,6 +214,9 @@ pub struct Placeholder {
 pub enum TerminalEvent {
     Closed,
     Activated,
+    /// The program wrote something (or exited): sent for every batch, drawn or not, for whoever
+    /// follows what it shows (an agent's interface read for its reply).
+    Output,
     /// Cmd+click: the text of the row clicked and the column (in characters), for whoever
     /// knows the project's files to open the file named there.
     OpenLink { line: String, column: usize },
@@ -247,6 +260,9 @@ impl TerminalView {
                             batch.push(more);
                         }
                         let alive = this.update(cx, |view, cx| {
+                            // What the tab's title shows, before: a change there redraws even
+                            // when the screen is not shown.
+                            let before = (view.unseen, view.exited, view.title.clone());
                             for ev in batch {
                                 match ev {
                                     PtyEvent::Wakeup => {
@@ -269,7 +285,11 @@ impl TerminalView {
                                     }
                                 }
                             }
-                            cx.notify();
+                            cx.emit(TerminalEvent::Output);
+                            let titled = before != (view.unseen, view.exited, view.title.clone()) || view.program_changed();
+                            if view.on_screen.now() || titled {
+                                cx.notify();
+                            }
                         });
                         if alive.is_err() {
                             break;
@@ -301,6 +321,9 @@ impl TerminalView {
             selecting: false,
             wheel_rest: 0.,
             number: 0,
+            on_screen: Default::default(),
+            started: std::time::Instant::now(),
+            program: Default::default(),
             folder: std::path::PathBuf::new(),
             branch: None,
             _events: events,
@@ -837,8 +860,8 @@ fn key_bytes(ks: &Keystroke, mode: TermMode) -> Option<Vec<u8>> {
 impl TerminalView {
     /// The program in the foreground when it is not the shell, else the folder and branch.
     pub fn auto_name(&self) -> String {
-        let program = self.pty.as_ref().and_then(|p| p.foreground_program());
-        let shell = std::env::var("SHELL").unwrap_or_default();
+        let program = self.program();
+        let shell = login_shell();
         let mut name = keleuo_core::tabs::auto_name(
             &self.folder,
             self.branch.as_deref(),
@@ -855,6 +878,29 @@ impl TerminalView {
     }
 }
 
+impl TerminalView {
+    /// The program in the foreground, asked of the system at most once a second.
+    fn program(&self) -> Option<String> {
+        let mut cached = self.program.borrow_mut();
+        if cached.0.is_none_or(|t| t.elapsed() >= std::time::Duration::from_secs(1)) {
+            *cached = (Some(std::time::Instant::now()), self.pty.as_ref().and_then(|p| p.foreground_program()));
+        }
+        cached.1.clone()
+    }
+
+    /// Whether the foreground program changed since it was last asked (at most once a second).
+    fn program_changed(&self) -> bool {
+        let was = self.program.borrow().1.clone();
+        self.program() != was
+    }
+}
+
+/// The login shell, read once.
+fn login_shell() -> String {
+    static SHELL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    SHELL.get_or_init(|| std::env::var("SHELL").unwrap_or_default()).clone()
+}
+
 impl Focusable for TerminalView {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus.clone()
@@ -866,6 +912,10 @@ impl Render for TerminalView {
         let focused = self.focus.is_focused(window);
         let pty = self.pty.clone();
         let pty_paint = self.pty.clone();
+        let on_screen = self.on_screen.clone();
+        // The placeholder covers the screen until it fades: nothing of the grid shows.
+        let covered = self.placeholder.is_some() && !self.settled && !self.exited && self.revealed.is_none();
+        let spinning = self.started.elapsed() < SPIN_AT_MOST;
         let bounds_cell = self.bounds.clone();
         let cell_cell = self.cell.clone();
         let cell_paint = self.cell.clone();
@@ -940,7 +990,11 @@ impl Render for TerminalView {
                         .gap_2()
                         .text_size(px(text_size))
                         .text_color(hsla(palette::dim()))
-                        .child(gpui_kit::component::spinner::Spinner::new().color(hsla(palette::dim())))
+                        .child(if spinning {
+                            gpui_kit::component::spinner::Spinner::new().color(hsla(palette::dim())).into_any_element()
+                        } else {
+                            div().size(px(6.)).rounded_full().bg(hsla(palette::dim())).into_any_element()
+                        })
                         .child(p.label.clone()),
                 )
             })
@@ -976,6 +1030,10 @@ impl Render for TerminalView {
                 },
                 move |bounds, (), window, cx| {
                     let Some(pty) = &pty_paint else { return };
+                    on_screen.mark(window);
+                    if covered {
+                        return;
+                    }
                     let start = std::time::Instant::now();
                     paint_grid(pty, bounds, cell_paint.get(), focused, window, cx);
                     crate::perf::record("terminal paint", start.elapsed());
@@ -1011,6 +1069,7 @@ fn paint_grid(
     window: &mut Window,
     cx: &mut App,
 ) {
+    crate::perf::count(crate::perf::Count::Terminal);
     let term = pty.term.lock();
     let content = term.renderable_content();
     let colors = content.colors;

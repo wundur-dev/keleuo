@@ -200,6 +200,8 @@ pub struct Conversation {
     turn_cost_from: f64,
     pub last_turn_tokens: Option<(u64, u64)>,
     pub last_turn_ms: Option<u64>,
+    /// The model's context window, when the agent reported it.
+    pub context_window: Option<u64>,
     /// The latest status note (`requesting`, ...), cleared at the end of a turn.
     pub status: Option<String>,
     /// Index of the assistant text item receiving streamed deltas.
@@ -793,6 +795,7 @@ impl Conversation {
                     tool.images = images;
                 }
             }
+            Event::ContextWindow(n) => self.context_window = Some(n),
             Event::ToolOutput { id, text } => {
                 if let Some(tool) = self.tool_mut(&id)
                     && !tool.done()
@@ -857,6 +860,15 @@ impl Conversation {
                 let agent = self.agent_entry(&id);
                 agent.status = if failed { AgentStatus::Failed } else { AgentStatus::Done };
                 agent.current_tool = None;
+                // Its unfinished calls end with it: their clocks stop (a background agent can
+                // end after the turn did, and nothing else would stop them).
+                for item in agent.items.iter_mut() {
+                    if let Item::Tool(t) = item
+                        && !t.done()
+                    {
+                        t.stop_clock();
+                    }
+                }
                 agent.summary = summary.or(agent.summary.take());
                 agent.total_tokens = tokens.or(agent.total_tokens);
                 agent.duration_ms =

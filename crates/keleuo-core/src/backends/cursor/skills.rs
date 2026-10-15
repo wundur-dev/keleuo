@@ -13,6 +13,15 @@ use crate::skills::{Catalog, Entry, Group, Kind};
 /// The folders that hold skill folders, in the order Cursor looks.
 const FOLDERS: [&str; 5] = [".cursor/skills", ".claude/skills", ".codex/skills", ".grok/skills", ".agents/skills"];
 
+/// The folders Cursor reads skills from for `scope`, its own first.
+pub fn folders(host: &dyn Host, project: &Path, scope: crate::skill_install::Scope) -> Vec<PathBuf> {
+    let base = match scope {
+        crate::skill_install::Scope::Project => Some(project.to_path_buf()),
+        crate::skill_install::Scope::User => host.home_dir(),
+    };
+    base.map(|b| FOLDERS.iter().map(|f| b.join(f)).collect()).unwrap_or_default()
+}
+
 /// Every skill Cursor would load for `project`, grouped for the sidebar.
 pub fn discover(host: &dyn Host, project: &Path) -> Catalog {
     let home = host.home_dir();

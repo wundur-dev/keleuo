@@ -17,7 +17,8 @@
 //! - [`web`]: what an address typed in the Web panel means;
 //! - [`compose`]: writing a message (lists that continue on Shift+Enter);
 //! - [`outbox`]: messages sent while the agent works, waiting their turn;
-//! - [`summary`]: turn summaries from a language model server the person chose.
+//! - [`summary`]: turn summaries from a language model server the person chose;
+//! - [`skill_install`]: installing skills from git repositories.
 
 pub mod acp;
 pub mod agent;
@@ -38,6 +39,7 @@ pub mod paste;
 pub mod platform;
 pub mod questions;
 pub mod settings;
+pub mod skill_install;
 pub mod skills;
 pub mod slash;
 pub mod summary;

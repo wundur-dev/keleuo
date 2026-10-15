@@ -37,7 +37,52 @@ pub enum Spend {
     /// Dollars (`estimated`: from token counts and published prices).
     Cost { total: f64, turn: Option<f64>, estimated: bool },
     /// How full the context window is after the last turn.
-    Context { percent: u32, tokens: u64, window: u64 },
+    Context { percent: u32, tokens: u64, window: u64, fill: Fill },
+}
+
+/// Whether cost shows rather than the context, as the setting says and, on auto, for a session
+/// billed per use (`per_use`).
+pub fn shows_cost(per_use: Option<bool>, cx: &App) -> bool {
+    match cx.global::<crate::AppSettings>().0.borrow().cost_display.as_str() {
+        "always" => true,
+        "never" => false,
+        _ => per_use == Some(true),
+    }
+}
+
+/// How close a session's context is to where its agent compacts it by itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Fill {
+    Room,
+    /// From 70% of the way to the compaction point.
+    Filling,
+    /// From 90%: the agent compacts soon.
+    Nearly,
+}
+
+impl Fill {
+    pub fn of(tokens: u64, compacts_at: u64) -> Self {
+        match tokens * 100 / compacts_at.max(1) {
+            90.. => Fill::Nearly,
+            70.. => Fill::Filling,
+            _ => Fill::Room,
+        }
+    }
+}
+
+/// How much of its context a session uses, after the last turn.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ContextUse {
+    pub tokens: u64,
+    pub window: u64,
+    /// Where the agent compacts by itself (a little short of the window).
+    pub compacts_at: u64,
+}
+
+impl ContextUse {
+    pub fn fill(&self) -> Fill {
+        Fill::of(self.tokens, self.compacts_at)
+    }
 }
 
 impl Spend {
@@ -110,6 +155,8 @@ pub struct AgentSession {
     pub dormant: bool,
     /// When the reply preview was last read off the terminal (at most ten times a second).
     preview_read: Option<std::time::Instant>,
+    /// The preview last shown (this turn's): the same words again change nothing.
+    previewed: Option<String>,
     /// Messages the interface reported submitted (its prompt hook), to tell a sent message
     /// from one whose Enter was lost.
     prompts_seen: u64,
@@ -218,6 +265,7 @@ impl AgentSession {
             host,
             dormant: false,
             preview_read: None,
+            previewed: None,
             prompts_seen: 0,
             listed_models: None,
             chat: Conversation::new(cwd.to_string_lossy().to_string()),
@@ -414,7 +462,11 @@ impl AgentSession {
     /// The terminal drew: while the agent works and Chat shows, read the reply it is writing
     /// off the screen as a preview (the record has it only once it is finished).
     fn read_preview(&mut self, view: &Entity<TerminalView>, cx: &mut Context<Self>) {
-        if !self.chat.busy || self.view != View::Chat {
+        if !self.chat.busy {
+            self.previewed = None;
+            return;
+        }
+        if self.view != View::Chat {
             return;
         }
         let now = std::time::Instant::now();
@@ -423,7 +475,11 @@ impl AgentSession {
         }
         self.preview_read = Some(now);
         let Some((lines, columns)) = view.read(cx).recent_lines(PREVIEW_LINES) else { return };
-        if let Some(text) = self.backend.reply_preview(&lines, columns) {
+        // Claude Code redraws its screen many times a second; the chat only when the words do.
+        if let Some(text) = self.backend.reply_preview(&lines, columns)
+            && self.previewed.as_deref() != Some(text.as_str())
+        {
+            self.previewed = Some(text.clone());
             self.chat.apply(Event::TextPreview(text));
             cx.notify();
         }
@@ -449,12 +505,11 @@ impl AgentSession {
     /// Cost when it is billed per use (or the setting says always), else how full the context
     /// is. `None` before there is anything to show.
     pub fn spend(&self, cx: &App) -> Option<Spend> {
-        let setting = cx.global::<crate::AppSettings>().0.borrow().cost_display.clone();
-        let cost = match setting.as_str() {
-            "always" => true,
-            "never" => false,
-            _ => self.per_use == Some(true),
-        };
+        self.spend_as(shows_cost(self.per_use, cx))
+    }
+
+    /// What it used, as cost (`cost`) or as how full its context is.
+    pub fn spend_as(&self, cost: bool) -> Option<Spend> {
         if cost {
             return (self.chat.total_cost_usd > 0.0).then_some(Spend::Cost {
                 total: self.chat.total_cost_usd,
@@ -462,10 +517,30 @@ impl AgentSession {
                 estimated: self.chat.cost_estimated,
             });
         }
+        let used = self.context_use()?;
+        let ContextUse { tokens, window, .. } = used;
+        Some(Spend::Context { percent: ((tokens * 100) / window.max(1)) as u32, tokens, window, fill: used.fill() })
+    }
+
+    /// How much of its context the session uses: the window as the agent reported it, else
+    /// as Keleuo knows the model. `None` before a turn has ended, or when the agent says nothing.
+    pub fn context_use(&self) -> Option<ContextUse> {
         let tokens = self.chat.last_turn_tokens?.0;
-        let model = self.chat.model.clone().or_else(|| self.model.clone())?;
-        let window = self.backend.context_window(&model)?;
-        Some(Spend::Context { percent: ((tokens * 100) / window.max(1)) as u32, tokens, window })
+        let window = match self.chat.context_window {
+            Some(w) => w,
+            None => {
+                let model = self.chat.model.clone().or_else(|| self.model.clone())?;
+                self.backend.context_window(&model)?
+            }
+        };
+        (tokens > 0 && window > 0).then(|| ContextUse { tokens, window, compacts_at: self.backend.compacts_at(window) })
+    }
+
+    /// Ask the agent to compact its context now, when it can be asked.
+    pub fn compact(&mut self, cx: &mut Context<Self>) {
+        if let Some(command) = self.backend.compact_command() {
+            self.send(command, cx);
+        }
     }
 
     // ----- questions before the interface is up -----
@@ -621,7 +696,11 @@ impl AgentSession {
             v
         });
         self.pasted_images.clear();
-        let exit = cx.observe(&view, |s, view, cx| {
+        // On each batch of output, shown or not (a hidden terminal draws nothing).
+        let exit = cx.subscribe(&view, |s, view, ev: &TerminalEvent, cx| {
+            if !matches!(ev, TerminalEvent::Output) {
+                return;
+            }
             // A parked interface (Chat showing) is not the session's to follow.
             if s.terminal.as_ref().is_none_or(|t| t.view != view) {
                 return;
@@ -1721,4 +1800,20 @@ fn copy_images_to(host: &dyn keleuo_core::host::Host, images: &[PathBuf]) -> Vec
             Some(there)
         })
         .collect()
+}
+
+#[cfg(test)]
+mod fill_tests {
+    use super::Fill;
+
+    /// Measured against where the agent compacts, not the whole window.
+    #[test]
+    fn the_context_turns_amber_then_red_on_the_way_to_compaction() {
+        let at = 167_000; // a 200k window, compacting 33k short of it
+        assert_eq!(Fill::of(100_000, at), Fill::Room);
+        assert_eq!(Fill::of(117_000, at), Fill::Filling);
+        assert_eq!(Fill::of(151_000, at), Fill::Nearly);
+        assert_eq!(Fill::of(190_000, at), Fill::Nearly);
+        assert_eq!(Fill::of(5, 0), Fill::Nearly);
+    }
 }
