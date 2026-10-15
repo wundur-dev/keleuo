@@ -84,7 +84,7 @@ impl Catalog {
         };
         let mut groups = vec![group("project", "Project".into(), self.project, false)];
         if !self.project_docs.is_empty() {
-            groups.push(group("docs", "CLAUDE.md, agents, commands".into(), self.project_docs, false));
+            groups.push(group("docs", "Instructions, agents, commands".into(), self.project_docs, false));
         }
         groups.push(group("user", "User".into(), self.user, false));
         for (name, entries) in self.plugins {
@@ -108,6 +108,22 @@ impl Catalog {
     }
 }
 
+/// Claude Code's `instructionFiles` setting (which instruction files it loads): the project's
+/// local settings, then its shared ones, then the user's; `claude-md-or-agents-md` (its
+/// default) when none says.
+fn instruction_files(host: &dyn Host, project: &Path, claude_home: Option<&Path>) -> String {
+    let mut files = vec![project.join(".claude/settings.local.json"), project.join(".claude/settings.json")];
+    if let Some(home) = claude_home {
+        files.push(home.join("settings.json"));
+    }
+    files
+        .iter()
+        .filter_map(|f| host.read_to_string(f).ok())
+        .filter_map(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+        .find_map(|v| v.get("instructionFiles").and_then(|m| m.as_str()).map(str::to_string))
+        .unwrap_or_else(|| "claude-md-or-agents-md".into())
+}
+
 /// Scan everything for `project`, with `claude_home` the user's `~/.claude`.
 pub fn discover(host: &dyn Host, project: &Path, claude_home: Option<&Path>) -> Catalog {
     let mut catalog = Catalog {
@@ -118,9 +134,11 @@ pub fn discover(host: &dyn Host, project: &Path, claude_home: Option<&Path>) -> 
         catalog.user = skills_in(host, &home.join("skills"), Source::User);
         catalog.plugins = plugin_skills(host, home, project);
     }
+    let mut imports = String::new();
     for name in ["CLAUDE.md", ".claude/CLAUDE.md", "CLAUDE.local.md"] {
         let path = project.join(name);
         if host.is_file(&path) {
+            imports.push_str(&host.read_to_string(&path).unwrap_or_default());
             catalog.project_docs.push(Entry {
                 kind: Kind::ClaudeMd,
                 source: Source::Project,
@@ -129,6 +147,38 @@ pub fn discover(host: &dyn Host, project: &Path, claude_home: Option<&Path>) -> 
                 path,
             });
         }
+    }
+    // AGENTS.md, when Claude reads it: imported by a CLAUDE.md (`@AGENTS.md`), or as the
+    // project's instructions (`instructionFiles`: in place of a missing CLAUDE.md by default,
+    // beside it when set so).
+    let has_claude_md = !catalog.project_docs.is_empty();
+    let mode = instruction_files(host, project, claude_home);
+    for name in ["AGENTS.md", ".claude/AGENTS.md"] {
+        let path = project.join(name);
+        if !host.is_file(&path) {
+            continue;
+        }
+        let imported = imports.lines().any(|l| {
+            let l = l.trim();
+            l.strip_prefix('@').is_some_and(|i| i.trim_start_matches("./") == name)
+        });
+        let description = if imported {
+            "Imported by CLAUDE.md"
+        } else {
+            match mode.as_str() {
+                "claude-md-and-agents-md" => "Read beside CLAUDE.md",
+                "claude-md" | "managed-only" => continue,
+                _ if has_claude_md => continue,
+                _ => "Read as the project's instructions (there is no CLAUDE.md)",
+            }
+        };
+        catalog.project_docs.push(Entry {
+            kind: Kind::ClaudeMd,
+            source: Source::Project,
+            name: name.to_string(),
+            description: description.into(),
+            path,
+        });
     }
     catalog.project_docs.extend(markdown_files_in(
         host,
@@ -407,6 +457,25 @@ mod tests {
             ]
         );
         assert_eq!(catalog.skill_count(), 4);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn agents_md_is_listed_when_claude_reads_it() {
+        let root = temp("agents-md");
+        let project = root.join("proj");
+        let names = |c: &Catalog| c.project_docs.iter().map(|e| (e.name.clone(), e.description.clone())).collect::<Vec<_>>();
+        write(&project.join("AGENTS.md"), "# Shared rules");
+        // No CLAUDE.md: Claude reads AGENTS.md in its place.
+        let c = discover(&LocalHost, &project, None);
+        assert_eq!(names(&c), [("AGENTS.md".into(), "Read as the project's instructions (there is no CLAUDE.md)".into())]);
+        // A CLAUDE.md of its own, not importing it: AGENTS.md is not read.
+        write(&project.join("CLAUDE.md"), "# Rules");
+        assert_eq!(discover(&LocalHost, &project, None).project_docs.len(), 1);
+        // Imported: listed as such.
+        write(&project.join("CLAUDE.md"), "@AGENTS.md\n\n- more");
+        let c = discover(&LocalHost, &project, None);
+        assert_eq!(names(&c)[1], ("AGENTS.md".into(), "Imported by CLAUDE.md".into()));
         let _ = std::fs::remove_dir_all(root);
     }
 

@@ -40,6 +40,7 @@ pub fn discover(host: &dyn Host, project: &Path) -> Catalog {
         None => Vec::new(),
     };
     let mut groups = vec![
+        Group { key: "rules".into(), title: "Instructions and rules".into(), entries: rules(host, project), folded: false },
         Group { key: "project".into(), title: "Project".into(), entries: project_skills, folded: false },
         Group { key: "user".into(), title: "User".into(), entries: user_skills, folded: false },
     ];
@@ -55,6 +56,38 @@ pub fn discover(host: &dyn Host, project: &Path) -> Catalog {
         }
     }
     Catalog { groups }
+}
+
+/// The project's standing instructions as Cursor reads them: `AGENTS.md`, `CLAUDE.md`,
+/// `CLAUDE.local.md`, `.cursorrules`, and the rule files under `.cursor/rules` (`*.mdc`).
+fn rules(host: &dyn Host, project: &Path) -> Vec<Entry> {
+    let mut out = Vec::new();
+    for (name, about) in [
+        ("AGENTS.md", "Project instructions Cursor reads every session"),
+        ("CLAUDE.md", "Project instructions Cursor reads too"),
+        ("CLAUDE.local.md", "Your own project instructions, read too"),
+        (".cursorrules", "Project rules (the older single file)"),
+    ] {
+        let path = project.join(name);
+        if host.is_file(&path) {
+            out.push(Entry { kind: Kind::Instructions, name: name.into(), description: about.into(), path, read_only: false });
+        }
+    }
+    // Rule files, in folders too.
+    let mut dirs = vec![project.join(".cursor/rules")];
+    while let Some(dir) = dirs.pop() {
+        let Ok(items) = host.read_dir(&dir) else { continue };
+        for item in items {
+            let path = dir.join(&item.name);
+            if item.is_dir {
+                dirs.push(path);
+            } else if path.extension().is_some_and(|e| e == "mdc") {
+                let name = path.strip_prefix(project.join(".cursor/rules")).unwrap_or(&path).display().to_string();
+                out.push(Entry { kind: Kind::Instructions, name, description: "A Cursor rule".into(), path, read_only: false });
+            }
+        }
+    }
+    out
 }
 
 /// A new project skill, in `.cursor/skills`.
@@ -85,6 +118,12 @@ mod tests {
         assert!(found.contains(&("review", "from .cursor/skills")), "{found:?}");
         assert!(found.contains(&("deploy", "from .agents/skills")));
         assert_eq!(found.iter().filter(|(n, _)| *n == "review").count(), 1);
+        std::fs::write(project.join("AGENTS.md"), "# Rules").unwrap();
+        std::fs::create_dir_all(project.join(".cursor/rules/web")).unwrap();
+        std::fs::write(project.join(".cursor/rules/web/style.mdc"), "---\n---\nrule").unwrap();
+        let catalog = discover(&LocalHost, &project);
+        let rules: Vec<&str> = catalog.groups.iter().find(|g| g.key == "rules").unwrap().entries.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(rules, ["AGENTS.md", "web/style.mdc"]);
         let made = create(&LocalHost, &project, "New thing").unwrap();
         assert!(made.starts_with(project.join(".cursor/skills")));
         let _ = std::fs::remove_dir_all(&project);
