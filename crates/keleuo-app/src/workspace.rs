@@ -503,6 +503,21 @@ impl Workspace {
                 a.move_panel(changes, InsertTarget::Tabs { node, ix: None, activate: false }, window, cx);
             });
         }
+        // A layout saved while the backend had no skills (Cursor before it had them): Skills
+        // joins the Files group, right after Files.
+        let skills = PanelId::from(self.skills.entity_id());
+        let files = PanelId::from(self.files.entity_id());
+        if self.session.read(cx).backend.capabilities().skills
+            && !self.in_dock(skills, cx)
+            && let Some(node) = self.find_node(files, cx)
+        {
+            let ix = self.group_panels(node, cx).iter().position(|p| *p == files).map(|i| i + 1);
+            let view = panel_handle(self.skills.clone());
+            self.dock.update(cx, |a, cx| {
+                a.add_panel_view(view, DockPlacement::Center, None, window, cx);
+                a.move_panel(skills, InsertTarget::Tabs { node, ix, activate: false }, window, cx);
+            });
+        }
         if !self.in_dock(PanelId::from(self.claude.entity_id()), cx) {
             let view = panel_handle(self.claude.clone());
             self.place(view, None, None, window, cx);
