@@ -118,6 +118,10 @@ pub trait Host: Send + Sync {
     fn rename(&self, _from: &Path, _to: &Path) -> io::Result<()> {
         Err(io::Error::new(io::ErrorKind::Unsupported, "this host cannot rename"))
     }
+    /// Remove the file `path`.
+    fn remove_file(&self, _path: &Path) -> io::Result<()> {
+        Err(io::Error::new(io::ErrorKind::Unsupported, "this host cannot remove files"))
+    }
     /// Remove the folder `path` and everything in it.
     fn remove_dir_all(&self, _path: &Path) -> io::Result<()> {
         Err(io::Error::new(io::ErrorKind::Unsupported, "this host cannot remove folders"))
@@ -272,6 +276,10 @@ impl Host for LocalHost {
 
     fn remove_dir_all(&self, path: &Path) -> io::Result<()> {
         std::fs::remove_dir_all(path)
+    }
+
+    fn remove_file(&self, path: &Path) -> io::Result<()> {
+        std::fs::remove_file(path)
     }
 
     fn link_dir(&self, target: &Path, link: &Path) -> io::Result<()> {
@@ -546,6 +554,10 @@ impl Host for SshHost {
 
     fn remove_dir_all(&self, path: &Path) -> io::Result<()> {
         self.run(&format!("rm -rf {}", q(path)), None).map(|_| ())
+    }
+
+    fn remove_file(&self, path: &Path) -> io::Result<()> {
+        self.run(&format!("rm -f {}", q(path)), None).map(|_| ())
     }
 
     fn exists(&self, path: &Path) -> bool {

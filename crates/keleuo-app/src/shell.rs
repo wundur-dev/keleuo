@@ -1359,6 +1359,7 @@ impl Shell {
             col = col.child(
                 div()
                     .id(("session-row", number))
+                    .group(SharedString::from(format!("session-row-{number}")))
                     .relative()
                     .mx(px(6.))
                     .px_2()
@@ -1434,6 +1435,43 @@ impl Shell {
                                 None => activity.map(|a| div().flex().text_size(px(11.)).text_color(muted.opacity(0.8)).child(div().min_w_0().truncate().child(a))),
                             }),
                     )
+                    // Rename and close, on hover (right-click is easy to miss on a Mac).
+                    .child({
+                        let (k2, a2, c2) = (k1.clone(), a1.clone(), c1.clone());
+                        div()
+                            .absolute()
+                            .top(px(4.))
+                            .right(px(4.))
+                            .flex()
+                            .rounded(px(6.))
+                            .bg(if active { sel } else { hover })
+                            .invisible()
+                            .group_hover(SharedString::from(format!("session-row-{number}")), |d| d.visible())
+                            .child(
+                                Button::new(("session-rename", number))
+                                    .icon(gpui_kit::assets::IconName::Pencil)
+                                    .xsmall()
+                                    .ghost()
+                                    .tooltip("Rename")
+                                    .on_click(move |_, window, cx| {
+                                        cx.stop_propagation();
+                                        start_tab_rename(k2.clone(), a2.clone(), c2.clone(), window, cx);
+                                    }),
+                            )
+                            .child(
+                                Button::new(("session-close", number))
+                                    .icon(IconName::Close)
+                                    .xsmall()
+                                    .ghost()
+                                    .tooltip("Close the session (its history stays)")
+                                    .on_click(cx.listener(move |s, _, window, cx| {
+                                        cx.stop_propagation();
+                                        if let Some(ix) = s.tabs.iter().position(|t| t.number == number) {
+                                            s.request_close(ix, window, cx);
+                                        }
+                                    })),
+                            )
+                    })
                     .on_click(cx.listener(move |s, ev: &ClickEvent, window, cx| {
                         if ev.click_count() >= 2 {
                             start_tab_rename(k1.clone(), a1.clone(), c1.clone(), window, cx);

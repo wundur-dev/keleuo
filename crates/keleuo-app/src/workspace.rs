@@ -232,6 +232,18 @@ impl Workspace {
             window,
             |ws, _, ev: &FileTreeEvent, window, cx| match ev {
                 FileTreeEvent::Open(path) => ws.open(path.clone(), None, false, false, window, cx),
+                // Open tabs of what was renamed follow it (a save would write the old name).
+                FileTreeEvent::Renamed(from, to) => {
+                    for doc in ws.docs.clone() {
+                        let moved = doc.read(cx).path.strip_prefix(from).ok().map(|rest| if rest.as_os_str().is_empty() { to.clone() } else { to.join(rest) });
+                        if let Some(path) = moved {
+                            doc.update(cx, |d, cx| {
+                                d.path = path;
+                                cx.notify();
+                            });
+                        }
+                    }
+                }
                 FileTreeEvent::Indexed(index) => {
                     *ws.doc_ctx.index.borrow_mut() = index.clone();
                     ws.build_symbols(index.clone(), cx);

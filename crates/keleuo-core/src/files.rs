@@ -164,8 +164,54 @@ pub fn create(host: &dyn Host, dir: &Path, name: &str, folder: bool) -> Result<P
     made.map(|()| path).map_err(|e| e.to_string())
 }
 
+/// Give `path` (a file or folder) the name `name`, in the same folder. The error is said to the
+/// person as it is.
+pub fn rename(host: &dyn Host, path: &Path, name: &str) -> Result<PathBuf, String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("Type a name.".into());
+    }
+    if name.contains('/') || name.contains('\\') || name == "." || name == ".." {
+        return Err("A name, not a path (use Move to move it).".into());
+    }
+    let to = path.with_file_name(name);
+    if to == path {
+        return Ok(to);
+    }
+    if host.exists(&to) {
+        return Err(format!("{name} already exists."));
+    }
+    host.rename(path, &to).map(|()| to).map_err(|e| e.to_string())
+}
+
+/// Take `path` (a file or folder) away: into the Trash on this machine (true), deleted over
+/// SSH, where there is none (false).
+pub fn discard(host: &dyn Host, path: &Path) -> Result<bool, String> {
+    if host.is_remote() {
+        let gone = if host.is_file(path) { host.remove_file(path) } else { host.remove_dir_all(path) };
+        gone.map(|()| false).map_err(|e| e.to_string())
+    } else {
+        trash::delete(path).map(|()| true).map_err(|e| format!("Could not move it to the Trash: {e}"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_file_is_renamed_in_its_folder() {
+        use crate::host::LocalHost;
+        let dir = std::env::temp_dir().join(format!("keleuo-rename-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.txt"), "x").unwrap();
+        std::fs::write(dir.join("b.txt"), "y").unwrap();
+        assert_eq!(super::rename(&LocalHost, &dir.join("a.txt"), "c.txt"), Ok(dir.join("c.txt")));
+        assert!(dir.join("c.txt").is_file() && !dir.join("a.txt").exists());
+        assert!(super::rename(&LocalHost, &dir.join("c.txt"), "b.txt").is_err(), "taken");
+        assert!(super::rename(&LocalHost, &dir.join("c.txt"), "sub/d.txt").is_err(), "a path");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     use super::*;
 
     #[test]
