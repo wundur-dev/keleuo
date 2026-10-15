@@ -33,3 +33,8 @@ pub fn kill_group(child: &mut std::process::Child) {
     }
     let _ = child.kill();
 }
+
+/// A symbolic link.
+pub fn link_dir(target: &std::path::Path, link: &std::path::Path) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(target, link)
+}

@@ -110,6 +110,19 @@ pub trait Host: Send + Sync {
     fn create_dir_all(&self, path: &Path) -> io::Result<()>;
     fn exists(&self, path: &Path) -> bool;
     fn is_file(&self, path: &Path) -> bool;
+    /// Whether `path` is a link (to a folder or a file), not what it points to.
+    fn is_link(&self, _path: &Path) -> bool {
+        false
+    }
+    /// Move `from` to `to` (the same filesystem).
+    fn rename(&self, _from: &Path, _to: &Path) -> io::Result<()> {
+        Err(io::Error::new(io::ErrorKind::Unsupported, "this host cannot rename"))
+    }
+    /// Make `link` a folder that is `target`: a symbolic link, or on Windows a directory
+    /// junction (which needs no administrator rights).
+    fn link_dir(&self, _target: &Path, _link: &Path) -> io::Result<()> {
+        Err(io::Error::new(io::ErrorKind::Unsupported, "this host cannot make links"))
+    }
     /// Modification time in seconds since the epoch, when the host can tell.
     fn modified(&self, _path: &Path) -> Option<u64> {
         None
@@ -242,6 +255,19 @@ impl Host for LocalHost {
 
     fn is_file(&self, path: &Path) -> bool {
         path.is_file()
+    }
+
+    fn is_link(&self, path: &Path) -> bool {
+        // A junction counts too (the standard library reports it as a link on Windows).
+        path.is_symlink()
+    }
+
+    fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
+        std::fs::rename(from, to)
+    }
+
+    fn link_dir(&self, target: &Path, link: &Path) -> io::Result<()> {
+        crate::platform::link_dir(target, link)
     }
 
     fn modified(&self, path: &Path) -> Option<u64> {
@@ -496,6 +522,18 @@ impl Host for SshHost {
 
     fn create_dir_all(&self, path: &Path) -> io::Result<()> {
         self.run(&format!("mkdir -p {}", q(path)), None).map(|_| ())
+    }
+
+    fn is_link(&self, path: &Path) -> bool {
+        self.run(&format!("test -L {}", q(path)), None).is_ok()
+    }
+
+    fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
+        self.run(&format!("mv {} {}", q(from), q(to)), None).map(|_| ())
+    }
+
+    fn link_dir(&self, target: &Path, link: &Path) -> io::Result<()> {
+        self.run(&format!("ln -s {} {}", q(target), q(link)), None).map(|_| ())
     }
 
     fn exists(&self, path: &Path) -> bool {

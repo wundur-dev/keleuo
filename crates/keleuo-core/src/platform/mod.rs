@@ -28,6 +28,12 @@ pub fn without_vars(program: PathBuf, args: &[String], unset: &[String]) -> (Pat
     os::without_vars(program, args, unset)
 }
 
+/// Make `link` a folder that is `target`: a symbolic link on macOS and Linux, a directory
+/// junction on Windows (a symbolic link there needs administrator rights or Developer Mode).
+pub fn link_dir(target: &std::path::Path, link: &std::path::Path) -> std::io::Result<()> {
+    os::link_dir(target, link)
+}
+
 /// Start `cmd`'s program as the head of a group of its own, so [`kill_group`] reaches the
 /// programs it starts too.
 pub fn own_group(cmd: &mut Command) -> &mut Command {

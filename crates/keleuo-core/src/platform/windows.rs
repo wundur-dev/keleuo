@@ -30,3 +30,13 @@ pub fn kill_group(child: &mut std::process::Child) {
     let _ = command(OsStr::new("taskkill")).args(["/T", "/F", "/PID", &child.id().to_string()]).output();
     let _ = child.kill();
 }
+
+/// A directory junction (`mklink /J`), which any user may make.
+pub fn link_dir(target: &std::path::Path, link: &std::path::Path) -> std::io::Result<()> {
+    let out = command(OsStr::new("cmd")).arg("/C").arg("mklink").arg("/J").arg(link).arg(target).output()?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(std::io::Error::other(String::from_utf8_lossy(&out.stderr).trim().to_string()))
+    }
+}

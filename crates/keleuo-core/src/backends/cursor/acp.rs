@@ -86,11 +86,9 @@ impl Agent for CursorAcpAgent {
         }
         let options = options.clone();
         let sink2 = sink.clone();
-        // Where Cursor keeps its chats, to share one between Chat and Terminal (this machine).
-        let cursor_home = (!host.is_remote()).then(|| host.home_dir().map(|h| h.join(".cursor"))).flatten();
         // The handshake waits on the agent: off the window's thread.
         std::thread::spawn(move || {
-            if let Err(e) = open_session(&conn, &state, &options, cursor_home.as_deref(), &sink2) {
+            if let Err(e) = open_session(&conn, &state, &options, host.as_ref(), &sink2) {
                 sink2(Message::Event(Event::TurnEnded {
                     error: Some(format!("Cursor could not open the session: {e}")),
                     cost_total_usd: None,
@@ -176,12 +174,10 @@ impl Agent for CursorAcpAgent {
 
 /// Initialize, then continue the chat (`options.resume`) or start one, in the mode and with
 /// the model asked for.
-fn open_session(conn: &Connection, state: &Shared, options: &StartOptions, cursor_home: Option<&std::path::Path>, sink: &Sink) -> anyhow::Result<()> {
+fn open_session(conn: &Connection, state: &Shared, options: &StartOptions, host: &dyn Host, sink: &Sink) -> anyhow::Result<()> {
     // One chat for both views: Cursor keeps ACP sessions and its interface's chats apart.
     let share = |id: &str| {
-        if let Some(home) = cursor_home
-            && let Err(e) = super::store::share(home, &options.cwd, id)
-        {
+        if let Err(e) = super::store::share(host, &options.cwd, id) {
             sink(Message::Event(Event::Notice(format!("Chat and Terminal may show different Cursor chats: {e}."))));
         }
     };

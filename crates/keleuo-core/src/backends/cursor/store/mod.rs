@@ -58,21 +58,32 @@ pub fn chat_dir(host: &dyn Host, project: &Path, id: &str) -> Option<PathBuf> {
         .find(|dir| host.is_file(&dir.join("store.db")))
 }
 
-/// Make chat `id` of `project` one conversation for both of Cursor's ways in (on this
-/// machine): its ACP sessions live in `acp-sessions/<id>`, its own interface's chats in
-/// `chats/<md5 of the folder>/<id>`, in the same layout, and neither finds the other's. One
-/// is made a link to the other (Cursor follows it both ways): the one that has the chat stays.
-/// An empty one left by the other way (no conversation in it) is moved aside first, never
-/// deleted. Two with a conversation each are left alone (an error says so).
-pub fn share(cursor: &Path, project: &Path, id: &str) -> std::io::Result<()> {
+/// Make chat `id` of `project` one conversation for both of Cursor's ways in, on `host`: its
+/// ACP sessions live in `acp-sessions/<id>`, its own interface's chats in
+/// `chats/<md5 of the folder>/<id>`, in the same layout, and neither finds the other. One is
+/// made a link to the other (a symbolic link; a junction on Windows), which Cursor follows
+/// both ways: the one that has the chat stays. An empty one left by the other way (no
+/// conversation in it) is moved aside first, never deleted. Two with a conversation each are
+/// left alone (an error says so).
+pub fn share(host: &dyn Host, project: &Path, id: &str) -> std::io::Result<()> {
+    let cursor = host.home_dir().ok_or_else(|| std::io::Error::other("no home folder"))?.join(".cursor");
     let acp = cursor.join("acp-sessions").join(id);
-    // Cursor names the folder after the path it runs in, symlinks resolved.
-    let project = std::fs::canonicalize(project).unwrap_or_else(|_| project.to_path_buf());
+    // Cursor names the folder after the path it runs in, symlinks resolved (here; another
+    // machine's paths are taken as given).
+    let project = if host.is_remote() { project.to_path_buf() } else { std::fs::canonicalize(project).unwrap_or_else(|_| project.to_path_buf()) };
     let chat = cursor.join("chats").join(md5_hex(project.to_string_lossy().as_bytes())).join(id);
-    let real = |p: &Path| p.is_dir() && !p.is_symlink();
+    // Shared already: both resolve to one folder (here; however the platform reports links).
+    if !host.is_remote()
+        && let (Ok(a), Ok(c)) = (std::fs::canonicalize(&acp), std::fs::canonicalize(&chat))
+        && a == c
+    {
+        return Ok(());
+    }
+    let real = |p: &Path| host.exists(p) && !host.is_file(p) && !host.is_link(p);
     let has_chat = |p: &Path| {
-        p.join("store.db").is_file()
-            && std::fs::read_to_string(p.join("meta.json"))
+        host.is_file(&p.join("store.db"))
+            && host
+                .read_to_string(&p.join("meta.json"))
                 .ok()
                 .and_then(|t| serde_json::from_str::<Value>(&t).ok())
                 .is_none_or(|m| m.get("hasConversation").and_then(Value::as_bool) != Some(false))
@@ -88,21 +99,17 @@ pub fn share(cursor: &Path, project: &Path, id: &str) -> std::io::Result<()> {
         // Not made yet by either, or linked already.
         (false, false) => return Ok(()),
     };
-    if link.is_symlink() {
+    if host.is_link(&link) {
         return Ok(());
     }
-    if link.exists() {
+    if host.exists(&link) {
         let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
-        std::fs::rename(&link, link.with_file_name(format!("{id}.keleuo-empty-{stamp}")))?;
+        host.rename(&link, &link.with_file_name(format!("{id}.keleuo-empty-{stamp}")))?;
     }
     if let Some(parent) = link.parent() {
-        std::fs::create_dir_all(parent)?;
+        host.create_dir_all(parent)?;
     }
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(&keep, &link)?;
-    #[cfg(windows)]
-    std::os::windows::fs::symlink_dir(&keep, &link)?;
-    Ok(())
+    host.link_dir(&keep, &link)
 }
 
 /// Chat `id` of `project`, read from Cursor's database. An error when it is not there or no
@@ -334,11 +341,12 @@ mod tests {
         assert!(failed.is_empty(), "failed: {failed:?}");
     }
 
-    #[cfg(unix)]
     #[test]
     fn a_chat_is_shared_by_both_ways_in() {
-        let root = std::env::temp_dir().join(format!("keleuo-share-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
+        // A home of its own: `<tmp>/keleuo-share-N/.cursor`.
+        let home = std::env::temp_dir().join(format!("keleuo-share-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let root = home.join(".cursor");
         let project = Path::new("/p");
         let hashed = root.join("chats").join(md5_hex(b"/p"));
         let write = |dir: &Path, conversation: bool| {
@@ -348,26 +356,84 @@ mod tests {
         };
         // Started over ACP: the interface's place becomes a link to it.
         write(&root.join("acp-sessions/a"), true);
-        share(&root, project, "a").unwrap();
+        let host = HomeAt(root.parent().unwrap().to_path_buf());
+        share(&host, project, "a").unwrap();
         assert!(hashed.join("a").is_symlink());
         assert_eq!(std::fs::read_link(hashed.join("a")).unwrap(), root.join("acp-sessions/a"));
-        share(&root, project, "a").unwrap();
+        share(&host, project, "a").unwrap();
         // Started in the interface: ACP's place becomes a link to it.
         write(&hashed.join("b"), true);
-        share(&root, project, "b").unwrap();
+        share(&host, project, "b").unwrap();
         assert!(root.join("acp-sessions/b").is_symlink());
         // An empty twin is moved aside, not deleted.
         write(&root.join("acp-sessions/c"), true);
         write(&hashed.join("c"), false);
-        share(&root, project, "c").unwrap();
+        share(&host, project, "c").unwrap();
         assert!(hashed.join("c").is_symlink());
         assert!(std::fs::read_dir(&hashed).unwrap().flatten().any(|e| e.file_name().to_string_lossy().starts_with("c.keleuo-empty-")));
         // Two real chats: left alone.
         write(&root.join("acp-sessions/d"), true);
         write(&hashed.join("d"), true);
-        assert!(share(&root, project, "d").is_err());
+        assert!(share(&host, project, "d").is_err());
         assert!(!hashed.join("d").is_symlink());
-        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// This machine, with its home folder elsewhere.
+    struct HomeAt(std::path::PathBuf);
+
+    impl Host for HomeAt {
+        fn label(&self) -> String {
+            "test".into()
+        }
+        fn is_remote(&self) -> bool {
+            false
+        }
+        fn home_dir(&self) -> Option<std::path::PathBuf> {
+            Some(self.0.clone())
+        }
+        fn read(&self, path: &Path) -> std::io::Result<Vec<u8>> {
+            crate::host::LocalHost.read(path)
+        }
+        fn write(&self, path: &Path, contents: &[u8]) -> std::io::Result<()> {
+            crate::host::LocalHost.write(path, contents)
+        }
+        fn create_dir_all(&self, path: &Path) -> std::io::Result<()> {
+            crate::host::LocalHost.create_dir_all(path)
+        }
+        fn exists(&self, path: &Path) -> bool {
+            crate::host::LocalHost.exists(path)
+        }
+        fn is_file(&self, path: &Path) -> bool {
+            crate::host::LocalHost.is_file(path)
+        }
+        fn is_link(&self, path: &Path) -> bool {
+            crate::host::LocalHost.is_link(path)
+        }
+        fn rename(&self, from: &Path, to: &Path) -> std::io::Result<()> {
+            crate::host::LocalHost.rename(from, to)
+        }
+        fn link_dir(&self, target: &Path, link: &Path) -> std::io::Result<()> {
+            crate::host::LocalHost.link_dir(target, link)
+        }
+        fn read_dir(&self, path: &Path) -> std::io::Result<Vec<crate::host::DirEntry>> {
+            crate::host::LocalHost.read_dir(path)
+        }
+        fn list_files(&self, root: &Path, max: usize) -> Vec<(std::path::PathBuf, bool)> {
+            crate::host::LocalHost.list_files(root, max)
+        }
+        fn watch(&self, root: &Path, changes: std::sync::mpsc::Sender<crate::host::Change>) -> Option<crate::host::Watch> {
+            crate::host::LocalHost.watch(root, changes)
+        }
+        fn shell_command(&self, cwd: &Path) -> crate::host::CommandSpec {
+            crate::host::LocalHost.shell_command(cwd)
+        }
+        fn program_command(&self, spec: &crate::host::ProgramSpec) -> crate::host::CommandSpec {
+            crate::host::LocalHost.program_command(spec)
+        }
+        fn git(&self, dir: &Path, args: &[&str]) -> Option<Vec<u8>> {
+            crate::host::LocalHost.git(dir, args)
+        }
     }
 
     #[test]
