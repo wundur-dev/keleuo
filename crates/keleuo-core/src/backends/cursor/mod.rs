@@ -1,14 +1,16 @@
-//! Cursor Agent (the `cursor-agent` command line), headless. Everything Cursor specific lives
-//! in this module: the command line (here) and its output mapped onto neutral events ([`map`]).
+//! Cursor Agent (the `cursor-agent` command line). Everything Cursor specific lives in this
+//! module.
 //!
-//! Unlike Claude Code it takes no input stream: each message is a run of its own,
-//! `cursor-agent -p` with the message on stdin, continuing one chat (`--resume <chat id>`,
-//! the id made with `create-chat` before the first message). Stopping a turn ends that run.
+//! Chat runs it over ACP ([`acp`]): one process per session, asking before acting and asking
+//! questions through the window. Terminal runs its own interface, Chat following the chat's
+//! record ([`store`]). [`CursorAgent`] is the older way, a headless run per message
+//! (`cursor-agent -p`, its output mapped by [`map`]), which can neither ask permission nor ask
+//! questions; it is kept for a Cursor without ACP.
 //!
-//! It never asks before acting when run like this. What it may do is its permission mode:
-//! the person's Cursor allowlist (`~/.cursor/cli-config.json`; anything else is refused),
-//! everything (`--force`), or read-only planning or questions (`--mode plan|ask`).
+//! Its modes: the default asks before anything outside the person's Cursor allowlist
+//! (`~/.cursor/cli-config.json`), Run everything allows all, Plan and Ask are read-only.
 
+pub mod acp;
 pub mod map;
 pub mod store;
 
@@ -30,7 +32,7 @@ pub const ID: &str = "cursor";
 
 /// The permission modes: Keleuo's name, and what the window calls it.
 const MODES: [(&str, &str); 4] =
-    [("default", "Allowlist only"), ("force", "Run everything"), ("plan", "Plan (read-only)"), ("ask", "Ask (read-only)")];
+    [("default", "Ask before acting"), ("force", "Run everything"), ("plan", "Plan (read-only)"), ("ask", "Ask (read-only)")];
 
 /// Cursor Agent as a [`Backend`].
 #[derive(Default)]
@@ -52,6 +54,8 @@ impl Backend for CursorBackend {
         Capabilities {
             // Its Task tool (reported when each subagent starts and ends).
             subagents: true,
+            // Over ACP it asks before acting, answered in the window.
+            permission_prompts: true,
             // `cursor-agent` itself in Terminal; Chat follows its record (see `follow_session`).
             terminal_view: true,
             // A few of `cursor-agent models`; any other name is typed in.
@@ -63,7 +67,7 @@ impl Backend for CursorBackend {
     }
 
     fn new_agent(&self) -> Box<dyn Agent> {
-        Box::new(CursorAgent::default())
+        Box::new(acp::CursorAcpAgent::default())
     }
 
     fn permission_modes(&self) -> Vec<(&'static str, &'static str)> {

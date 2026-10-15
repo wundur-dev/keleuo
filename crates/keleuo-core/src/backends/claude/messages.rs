@@ -32,11 +32,12 @@ pub fn is_interruption(v: &Value) -> bool {
     line_text(v).is_some_and(|t| t.trim_start().starts_with("[Request interrupted by user"))
 }
 
-/// A `<task-notification>`: `(the tool call that started the task, failed)`.
+/// A `<task-notification>`: `(the tool call that started the task, failed)`. A task stopped
+/// from outside (its process ended) names only its own id (`<task-id>`); that is given then.
 pub fn task_ended(v: &Value) -> Option<(String, bool)> {
     let text = line_text(v)?;
     let text = text.trim_start().strip_prefix("<task-notification>")?;
-    let id = tag(text, "tool-use-id")?;
+    let id = tag(text, "tool-use-id").or_else(|| tag(text, "task-id"))?;
     let status = tag(text, "status").unwrap_or_default();
     if matches!(status.as_str(), "running" | "") {
         return None;
