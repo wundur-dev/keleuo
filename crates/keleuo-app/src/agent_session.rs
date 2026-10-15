@@ -26,7 +26,7 @@ use keleuo_core::conversation::Conversation;
 use keleuo_core::host::Host;
 
 use crate::hooks::{self, Registration, Reply};
-use crate::terminal_view::{ImageSupport, Placeholder, TerminalEvent, TerminalView};
+use crate::terminal_view::{ImageSupport, PasteImage, Placeholder, TerminalEvent, TerminalView};
 use std::rc::Rc;
 
 /// What a session has used, as the window shows it.
@@ -516,17 +516,29 @@ impl AgentSession {
         };
         let weak = cx.entity().downgrade();
         // A pasted image is kept here, where the agent on another machine cannot read it.
-        let images = self.backend.terminal_paste_image().filter(|_| !self.host.is_remote()).map(|paste_key| {
+        // Its own clipboard key if it has one, else the kept copy's path typed in.
+        let backend = self.backend.clone();
+        let attach = self.backend.terminal_attach(std::path::Path::new("image.png"), false).is_some().then(|| {
+            Rc::new(move |path: &std::path::Path, bracketed| backend.terminal_attach(path, bracketed)) as Rc<crate::terminal_view::AttachFn>
+        });
+        let paste = match self.backend.terminal_paste_image() {
+            Some(key) => Some(PasteImage::Key(key)),
+            None => attach.clone().map(PasteImage::Path),
+        };
+        let images = paste.filter(|_| !self.host.is_remote()).map(|paste| {
             let (w1, w2) = (weak.clone(), weak.clone());
             ImageSupport {
-                paste_key,
+                paste,
+                attach: attach.clone(),
                 pasted: Rc::new(move |bytes, ext, cx| {
-                    let _ = w1.update(cx, |s, _| {
+                    w1.update(cx, |s, _| {
                         let dir = keleuo_core::images::session_dir(s.chat.session_id.as_deref());
-                        if let Some(path) = dir.and_then(|d| keleuo_core::images::store(&d, &bytes, ext).ok()) {
-                            s.pasted_images.push(path);
-                        }
-                    });
+                        let path = dir.and_then(|d| keleuo_core::images::store(&d, &bytes, ext).ok())?;
+                        s.pasted_images.push(path.clone());
+                        Some(path)
+                    })
+                    .ok()
+                    .flatten()
                 }),
                 image: Rc::new(move |n, cx| w2.upgrade().and_then(|s| s.read(cx).image_n(n))),
             }

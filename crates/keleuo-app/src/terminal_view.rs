@@ -119,19 +119,61 @@ pub struct TerminalView {
     save: Option<Task<()>>,
 }
 
-/// Keeps a pasted image (its bytes and file extension).
-pub type PastedFn = dyn Fn(Vec<u8>, &'static str, &mut App);
+/// Keeps a pasted image (its bytes and file extension); the file it is kept in.
+pub type PastedFn = dyn Fn(Vec<u8>, &'static str, &mut App) -> Option<std::path::PathBuf>;
+/// What to type to attach an image file (bracketed paste or not).
+pub type AttachFn = dyn Fn(&std::path::Path, bool) -> Option<Vec<u8>>;
+
+/// How an image on the clipboard reaches the interface.
+#[derive(Clone)]
+pub enum PasteImage {
+    /// A key that makes the interface read the clipboard itself.
+    Key(Vec<u8>),
+    /// The kept copy's path, typed in (the interface attaches the file at that path).
+    Path(Rc<AttachFn>),
+}
 /// The image behind `[Image #N]`.
 pub type ImageFn = dyn Fn(usize, &App) -> Option<std::path::PathBuf>;
 
-/// Images in an agent's interface: Cmd+V with an image on the clipboard sends `paste_key` (the
-/// interface reads the clipboard itself) after `pasted` keeps a copy; `image` gives the image
+/// Images in an agent's interface: Cmd+V with an image on the clipboard has `pasted` keep a
+/// copy, then hands it over as `paste` says; image files on the clipboard (copied in Finder)
+/// are kept the same way and the copy's path typed with `attach`; `image` gives the image
 /// behind an `[Image #N]` marker on screen, for a preview while the pointer is over it.
 #[derive(Clone)]
 pub struct ImageSupport {
-    pub paste_key: Vec<u8>,
+    pub paste: PasteImage,
+    pub attach: Option<Rc<AttachFn>>,
     pub pasted: Rc<PastedFn>,
     pub image: Rc<ImageFn>,
+}
+
+/// The extension of an image file an agent's interface takes (`None` for any other file).
+fn image_ext(path: &std::path::Path) -> Option<&'static str> {
+    match path.extension()?.to_str()?.to_ascii_lowercase().as_str() {
+        "png" => Some("png"),
+        "jpg" | "jpeg" => Some("jpg"),
+        "gif" => Some("gif"),
+        "webp" => Some("webp"),
+        _ => None,
+    }
+}
+
+/// Paths as the macOS Terminal pastes them: whole, a backslash before each space and other
+/// character a shell would read, separated by spaces.
+pub fn shell_paths(paths: &[std::path::PathBuf]) -> String {
+    paths
+        .iter()
+        .map(|p| {
+            p.to_string_lossy()
+                .chars()
+                .flat_map(|c| {
+                    let special = c.is_whitespace() || "\\'\"$`!&*()[]{}<>|;?#~".contains(c);
+                    special.then_some('\\').into_iter().chain(std::iter::once(c))
+                })
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// The `N` of an `[Image #N]` marker in `line` covering column `col`.
@@ -441,6 +483,32 @@ impl TerminalView {
         }
     }
 
+    /// Files pasted or dropped: images an agent's interface takes are kept and attached (the
+    /// copy's path typed, which it turns into `[Image #N]`); the rest are typed as whole paths,
+    /// as the macOS Terminal does.
+    fn paste_files(&self, files: Vec<std::path::PathBuf>, cx: &mut Context<Self>) {
+        let Some(pty) = self.pty.clone() else { return };
+        let bracketed = self.mode().contains(TermMode::BRACKETED_PASTE);
+        let mut rest = Vec::new();
+        for path in files {
+            let attached = match (&self.images, image_ext(&path)) {
+                (Some(images), Some(ext)) => images.attach.as_ref().and_then(|attach| {
+                    let kept = std::fs::read(&path).ok().and_then(|bytes| (images.pasted)(bytes, ext, cx))?;
+                    attach(&kept, bracketed)
+                }),
+                _ => None,
+            };
+            match attached {
+                Some(keys) => pty.write(keys),
+                None => rest.push(path),
+            }
+        }
+        if !rest.is_empty() {
+            let text = shell_paths(&rest);
+            self.write_str(&if bracketed { format!("\x1b[200~{text}\x1b[201~") } else { text });
+        }
+    }
+
     /// Tests: Cmd+V.
     pub fn test_paste(&mut self, cx: &mut Context<Self>) {
         self.paste(cx);
@@ -454,19 +522,39 @@ impl TerminalView {
                 _ => None,
             });
             if let Some(image) = image {
-                // The interface pastes it itself (its own `[Image #N]`); keep a copy to show.
+                // A copy is kept (to show, and for an interface that takes a path); the
+                // interface makes its own `[Image #N]`.
                 let ext = match image.format {
                     ImageFormat::Jpeg => "jpg",
                     ImageFormat::Gif => "gif",
                     ImageFormat::Webp => "webp",
                     _ => "png",
                 };
-                (images.pasted)(image.bytes.clone(), ext, cx);
-                if let Some(pty) = &self.pty {
-                    pty.write(images.paste_key.clone());
+                let kept = (images.pasted)(image.bytes.clone(), ext, cx);
+                let bracketed = self.mode().contains(TermMode::BRACKETED_PASTE);
+                let keys = match &images.paste {
+                    PasteImage::Key(key) => Some(key.clone()),
+                    PasteImage::Path(attach) => kept.and_then(|path| attach(&path, bracketed)),
+                };
+                if let (Some(pty), Some(keys)) = (&self.pty, keys) {
+                    pty.write(keys);
                 }
                 return;
             }
+        }
+        // Files copied in Finder: the clipboard has their paths (its text is only their names).
+        let files: Vec<std::path::PathBuf> = item
+            .iter()
+            .flat_map(|i| i.entries())
+            .filter_map(|e| match e {
+                ClipboardEntry::ExternalPaths(paths) => Some(paths.paths().to_vec()),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        if !files.is_empty() {
+            self.paste_files(files, cx);
+            return;
         }
         let Some(text) = item.and_then(|c| c.text()) else {
             return;
@@ -789,6 +877,8 @@ impl Render for TerminalView {
             .key_context("Terminal")
             .on_key_down(cx.listener(Self::on_key))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::mouse_down))
+            // Files dropped in: as if pasted.
+            .on_drop(cx.listener(|v, paths: &ExternalPaths, _, cx| v.paste_files(paths.paths().to_vec(), cx)))
             .on_mouse_move(cx.listener(Self::mouse_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::mouse_up))
             .on_scroll_wheel(cx.listener(Self::scroll))
@@ -1123,6 +1213,14 @@ mod tests {
         // alternate screen, so nothing reaches the shell (no history cycling).
         assert_eq!(wheel_input(TermMode::default(), 3, 5, 5), Wheel::Scrollback(3));
         assert_eq!(wheel_input(TermMode::default(), -2, 5, 5), Wheel::Scrollback(-2));
+    }
+
+    #[::core::prelude::v1::test]
+    fn files_paste_as_the_macos_terminal_pastes_them() {
+        let paths = [std::path::PathBuf::from("/Volumes/Extreme SSD/shot (1).png"), std::path::PathBuf::from("/tmp/a.txt")];
+        assert_eq!(super::shell_paths(&paths), "/Volumes/Extreme\\ SSD/shot\\ \\(1\\).png /tmp/a.txt");
+        assert_eq!(super::image_ext(std::path::Path::new("x.JPEG")), Some("jpg"));
+        assert_eq!(super::image_ext(std::path::Path::new("x.pdf")), None);
     }
 
     #[::core::prelude::v1::test]
