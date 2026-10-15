@@ -383,6 +383,90 @@ pub fn remove(host: &dyn Host, skill: &Installed) -> Result<()> {
     record.save()
 }
 
+/// Rename the skill whose file is `skill_md` (`<folder>/SKILL.md`): its folder, and the
+/// `name:` in its header (what agents call it). The install record follows. Returns the new
+/// SKILL.md.
+pub fn rename_skill(host: &dyn Host, skill_md: &Path, new_name: &str) -> Result<PathBuf> {
+    let name = new_name.trim();
+    let folder = safe_folder(name).ok_or_else(|| anyhow!("give it a name"))?;
+    let old_dir = skill_md.parent().ok_or_else(|| anyhow!("not a skill's file"))?;
+    let new_dir = old_dir.with_file_name(&folder);
+    if new_dir != old_dir && host.exists(&new_dir) {
+        bail!("there is already a skill folder called {folder}");
+    }
+    let text = host.read_to_string(skill_md)?;
+    host.write(skill_md, with_name(&text, name).as_bytes())?;
+    if new_dir != old_dir {
+        host.rename(old_dir, &new_dir).with_context(|| format!("could not rename the folder to {folder}"))?;
+    }
+    let mut record = Record::load();
+    let mut changed = false;
+    for s in &mut record.skills {
+        for c in &mut s.copies {
+            if c.dir == old_dir {
+                c.dir = new_dir.clone();
+                s.name = name.to_string();
+                s.folder = folder.clone();
+                changed = true;
+            }
+        }
+    }
+    if changed {
+        record.save()?;
+    }
+    Ok(new_dir.join("SKILL.md"))
+}
+
+/// `text` (a SKILL.md) with its header's `name:` set to `name` (a header made when it has
+/// none).
+fn with_name(text: &str, name: &str) -> String {
+    let line = format!("name: {name}");
+    let Some(rest) = text.strip_prefix("---\n").or_else(|| text.strip_prefix("---\r\n")) else {
+        return format!("---\n{line}\n---\n{text}");
+    };
+    let Some(end) = rest.find("\n---") else { return format!("---\n{line}\n---\n{text}") };
+    let (header, after) = rest.split_at(end);
+    let mut found = false;
+    let mut lines: Vec<String> = header
+        .lines()
+        .map(|l| {
+            if !found && l.trim_start().starts_with("name:") {
+                found = true;
+                line.clone()
+            } else {
+                l.to_string()
+            }
+        })
+        .collect();
+    if !found {
+        lines.insert(0, line);
+    }
+    format!("---\n{}{after}", lines.join("\n"))
+}
+
+/// Take the skill whose file is `skill_md` away: its folder goes in the Trash on this machine
+/// (true), or is deleted over SSH, where there is none (false). The install record follows.
+pub fn discard_skill(host: &dyn Host, skill_md: &Path) -> Result<bool> {
+    let dir = skill_md.parent().ok_or_else(|| anyhow!("not a skill's file"))?;
+    let trashed = if host.is_remote() {
+        host.remove_dir_all(dir)?;
+        false
+    } else {
+        trash::delete(dir).map_err(|e| anyhow!("could not move it to the Trash: {e}"))?;
+        true
+    };
+    let mut record = Record::load();
+    let before = record.skills.len();
+    for s in &mut record.skills {
+        s.copies.retain(|c| c.dir != dir);
+    }
+    record.skills.retain(|s| !s.copies.is_empty());
+    if record.skills.len() != before {
+        record.save()?;
+    }
+    Ok(trashed)
+}
+
 /// The copies of `skill` that were edited since they were installed.
 pub fn edited_copies(host: &dyn Host, skill: &Installed) -> Vec<PathBuf> {
     skill
@@ -413,6 +497,29 @@ pub fn today() -> String {
 mod tests {
     use super::*;
     use crate::host::LocalHost;
+
+    #[test]
+    fn a_skills_name_is_set_in_its_header() {
+        assert_eq!(with_name("---\nname: old\ndescription: d\n---\nbody", "new one"), "---\nname: new one\ndescription: d\n---\nbody");
+        assert_eq!(with_name("---\ndescription: d\n---\nbody", "x"), "---\nname: x\ndescription: d\n---\nbody");
+        assert_eq!(with_name("just text", "x"), "---\nname: x\n---\njust text");
+    }
+
+    #[test]
+    fn a_skill_is_renamed_folder_and_name() {
+        let root = std::env::temp_dir().join(format!("keleuo-skill-rename-{}", unique()));
+        let dir = root.join("skills/new-skill");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("SKILL.md"), "---\nname: new-skill\ndescription: d\n---\nbody").unwrap();
+        let made = rename_skill(&LocalHost, &dir.join("SKILL.md"), "Tidy prose").unwrap();
+        assert_eq!(made, root.join("skills/Tidy-prose/SKILL.md"));
+        assert!(!dir.exists());
+        assert!(std::fs::read_to_string(&made).unwrap().starts_with("---\nname: Tidy prose\n"));
+        // A name already taken by another folder is refused.
+        std::fs::create_dir_all(root.join("skills/other")).unwrap();
+        assert!(rename_skill(&LocalHost, &made, "other").is_err());
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn sources_are_read_in_their_usual_forms() {

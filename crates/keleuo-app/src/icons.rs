@@ -42,6 +42,10 @@ icon_assets!(
         FileDiff,
         MessageCircleQuestionMark,
         CornerDownRight,
+        Download,
+        Pencil,
+        Trash,
+        RefreshCw,
     ]
 );
 
@@ -194,7 +198,7 @@ mod tests {
 
     #[::core::prelude::v1::test]
     fn every_extra_icon_is_embedded() {
-        for icon in [Lucide::FileCode, Lucide::Sparkles, Lucide::Puzzle, Lucide::FolderOpen] {
+        for icon in [Lucide::FileCode, Lucide::Sparkles, Lucide::Puzzle, Lucide::FolderOpen, Lucide::Download, Lucide::Pencil, Lucide::Trash, Lucide::RefreshCw] {
             let path = icon.path();
             assert!(AppAssets.load(&path).unwrap().is_some(), "{path}");
         }

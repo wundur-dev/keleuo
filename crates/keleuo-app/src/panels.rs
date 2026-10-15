@@ -268,22 +268,7 @@ impl Panel for SkillsPanel {
     fn title(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         list_title(IconName::BookOpen, "Skills")
     }
-    fn toolbar_buttons(&mut self, _: &mut Window, cx: &mut Context<Self>) -> Option<Vec<Button>> {
-        Some(vec![
-            Button::new("install-skills")
-                .ghost()
-                .xsmall()
-                .icon(gpui_kit::assets::IconName::Download)
-                .tooltip("Install skills from git")
-                .on_click(cx.listener(|s, _, window, cx| s.install_from_git(None, window, cx))),
-            Button::new("new-skill")
-                .ghost()
-                .xsmall()
-                .icon(IconName::Plus)
-                .tooltip("New project skill")
-                .on_click(cx.listener(|s, _, _, cx| s.new_skill(cx))),
-        ])
-    }
+    // New skill and Install from GitHub are buttons with words at the top of the list.
     fn zoom_control(&self, _: &App) -> Option<gpui_kit::component::dock::PanelControl> {
         None
     }
