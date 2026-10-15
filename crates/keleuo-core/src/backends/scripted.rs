@@ -157,6 +157,10 @@ impl Turn {
         let input = json!({ "path": path, "old": "old line", "new": "new line" });
 
         send(Event::Status("thinking".into()));
+        // "think N ...": thinks N seconds first, saying nothing (to measure a long think).
+        if let Some(secs) = self.text.strip_prefix("think ").and_then(|r| r.split_whitespace().next()?.parse::<u64>().ok()) {
+            std::thread::sleep(Duration::from_secs(secs));
+        }
         send(Event::TextStart);
         for word in ["Working ", "on: ", &self.text] {
             send(Event::TextDelta(word.to_string()));

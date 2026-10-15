@@ -9,6 +9,7 @@
 #
 #   idle       one session, nothing happening, the app in the background
 #   working    a scripted agent playing turns (text, a tool call, a permission, a subagent)
+#   thinking   the agent thinking for a while, saying nothing (only the working line moves)
 #   terminal   a terminal printing 20 lines a second in a tab that is not shown
 #   hidden     that terminal, and a turn, in a session that is not shown
 #
@@ -56,6 +57,13 @@ while [ $SECONDS -lt $end ]; do
   sleep 2.5
 done
 sleep 2
+
+# A long think: the agent works and says nothing, so only the working line moves.
+mark thinking
+ctl send "think $phase_secs"
+sleep "$phase_secs"
+ctl allow
+sleep 3
 
 ctl run "while :; do date; sleep 0.05; done"
 sleep 1

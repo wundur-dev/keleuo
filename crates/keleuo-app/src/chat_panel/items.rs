@@ -751,7 +751,9 @@ impl ChatPanel {
     /// The same at the foot of the conversation, as a chat app shows it: a spinner and grey
     /// words under the last message ("Thinking · 12s", or the tool running), while the agent
     /// works.
-    pub(super) fn render_working_line(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    /// What the working line says ("Thinking · 12s", or the tool running), or `None` when it
+    /// does not show (idle, a question waiting, the Terminal view).
+    pub(super) fn working_label(&self, cx: &App) -> Option<String> {
         let session = self.session.read(cx);
         if !session.chat.busy || session.chat.needs_input() || session.view == View::Terminal {
             return None;
@@ -773,32 +775,52 @@ impl ChatPanel {
             (_, None, None | Some("thinking" | "working" | "sending" | "requesting")) => "Thinking".into(),
             (_, None, Some(_)) => "Working".into(),
         };
-        let label = match self.busy_since.map(|t| format_elapsed(t.elapsed())) {
+        Some(match self.busy_since.map(|t| format_elapsed(t.elapsed())) {
             Some(e) => format!("{doing} · {e}"),
             None => doing,
-        };
-        let muted = cx.theme().muted_foreground;
+        })
+    }
+
+    /// The working line's place at the foot of the conversation, as a chat app shows it while
+    /// the agent works. The session's own chat keeps the place empty and the workspace draws
+    /// the line over it ([`Self::working_overlay`]): GPUI rebuilds a view, and everything in
+    /// it, whenever it changes, so a spinner turning ten times a second inside the chat laid
+    /// the whole conversation out ten times a second. Drawn apart, it turns alone and the chat
+    /// stays cached. An agent's own chat draws it in place.
+    pub(super) fn render_working_line(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let label = self.working_label(cx)?;
+        if self.agent.is_some() {
+            let muted = cx.theme().muted_foreground;
+            return Some(working_line(label, spinner_at(self.pulse.read(cx).0, muted), muted).into_any_element());
+        }
+        let slot = self.working_slot.clone();
         Some(
             div()
                 .flex_none()
                 .w_full()
-                .flex()
-                .justify_center()
-                .px_4()
-                .pb_2()
-                .child(
-                    div()
-                        .w_full()
-                        .max_w(px(COLUMN))
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .text_size(px(13.))
-                        .text_color(muted)
-                        .child(self.spinner(muted).small())
-                        .child(div().min_w_0().truncate().child(label)),
-                )
+                .h(px(WORKING_LINE_HEIGHT))
+                .child(canvas(move |b, _, _| slot.set(Some(b)), |_, _, _, _| {}).size_full())
                 .into_any_element(),
+        )
+    }
+
+    /// The working line, for the workspace to draw over its place in the chat (in window
+    /// coordinates). `None` when the chat is not on screen or the line does not show.
+    pub fn working_overlay(&self, cx: &App) -> Option<AnyElement> {
+        if !self.on_screen.now() {
+            return None;
+        }
+        let bounds = self.working_slot.get()?;
+        let label = self.working_label(cx)?;
+        let muted = cx.theme().muted_foreground;
+        let spinner = spinner_at(self.pulse.read(cx).0, muted);
+        Some(
+            deferred(
+                anchored().position_mode(AnchoredPositionMode::Window).position(bounds.origin).child(
+                    div().w(bounds.size.width).h(bounds.size.height).child(working_line(label, spinner, muted)),
+                ),
+            )
+            .into_any_element(),
         )
     }
 
@@ -1075,4 +1097,24 @@ mod run_pill_tests {
             });
         });
     }
+}
+
+/// The working line's height: its place in the chat is kept to it.
+const WORKING_LINE_HEIGHT: f32 = 28.;
+
+/// A spinner and grey words, in the conversation's column.
+fn working_line(label: String, spinner: Icon, muted: Hsla) -> Div {
+    div().flex_none().w_full().h(px(WORKING_LINE_HEIGHT)).flex().justify_center().px_4().pb_2().child(
+        div()
+            .w_full()
+            .h_full()
+            .max_w(px(COLUMN))
+            .flex()
+            .items_center()
+            .gap_2()
+            .text_size(px(13.))
+            .text_color(muted)
+            .child(spinner.small())
+            .child(div().min_w_0().truncate().child(label)),
+    )
 }

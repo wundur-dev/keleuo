@@ -110,8 +110,11 @@ pub struct ChatPanel {
     on_screen: crate::on_screen::OnScreen,
     /// When the agent became busy with the current turn (for the time on the thinking line).
     busy_since: Option<std::time::Instant>,
-    /// The step the spinners are at: the ticker moves it on while something runs.
-    phase: u32,
+    /// The step the working line's spinner is at, moved on by the ticker: kept apart from the
+    /// panel so a step redraws the line, not the chat (see `render_working_line`).
+    pulse: Entity<Pulse>,
+    /// Where the working line goes, as last laid out (window coordinates).
+    working_slot: Rc<std::cell::Cell<Option<Bounds<Pixels>>>>,
     /// The Chat and Terminal view tabs.
     views: Rc<StripState>,
     _subs: Vec<Subscription>,
@@ -130,6 +133,10 @@ const MONO: &str = crate::terminal_view::FONT_FAMILY;
 const TICK: std::time::Duration = std::time::Duration::from_millis(100);
 /// The ticker's pace while the chat is not shown: enough to notice the work has ended.
 const UNSEEN_TICK: std::time::Duration = std::time::Duration::from_secs(1);
+const TICKS_PER_SECOND: u32 = 10;
+
+/// The working line spinner's step.
+pub struct Pulse(u32);
 /// Steps in a spinner's turn (one turn a little over a second at the tick above).
 const SPINNER_STEPS: u32 = 12;
 /// Space below the Chat / Terminal tabs, before the window's bottom edge.
@@ -179,6 +186,7 @@ impl ChatPanel {
                     panel.ticker = Some(cx.spawn(
                         async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
                             let mut wait = TICK;
+                            let mut ticks: u32 = 0;
                             loop {
                                 cx.background_executor().timer(wait).await;
                                 let alive = this.update(cx, |p, cx| {
@@ -186,9 +194,20 @@ impl ChatPanel {
                                     let still = clocks_running(&session.chat);
                                     // Drawn only where the clocks show: on screen, in Chat.
                                     let shown = p.on_screen.now() && session.view == View::Chat;
-                                    p.phase = p.phase.wrapping_add(1);
                                     if shown {
-                                        cx.notify();
+                                        ticks = ticks.wrapping_add(1);
+                                        // The working line turns on every tick, drawn apart from
+                                        // the chat; the chat's own clocks (running calls, agents)
+                                        // move once a second.
+                                        if p.working_label(cx).is_some() {
+                                            p.pulse.update(cx, |pulse, cx| {
+                                                pulse.0 = pulse.0.wrapping_add(1);
+                                                cx.notify();
+                                            });
+                                        }
+                                        if ticks.is_multiple_of(TICKS_PER_SECOND) {
+                                            cx.notify();
+                                        }
                                     }
                                     if !still {
                                         p.ticker = None;
@@ -238,7 +257,8 @@ impl ChatPanel {
             index: Arc::new(FileIndex::default()),
             last_revision: 0,
             busy_since: None,
-            phase: 0,
+            pulse: cx.new(|_| Pulse(0)),
+            working_slot: Default::default(),
             ticker: None,
             on_screen: Default::default(),
             views: Rc::new(StripState::default()),
@@ -272,9 +292,10 @@ impl ChatPanel {
 
     /// A spinner at the panel's step: turned by the ticker, a few steps a second, rather
     /// than animated every frame (an animation redraws the whole chat on every frame).
+    /// Inside the chat: still, beside a clock that moves each second. Turning it would lay the
+    /// whole chat out on every step; the working line at the foot turns (see `spinner_at`).
     fn spinner(&self, color: Hsla) -> Icon {
-        let turn = (self.phase % SPINNER_STEPS) as f32 / SPINNER_STEPS as f32;
-        Icon::new(IconName::LoaderCircle).text_color(color).transform(Transformation::rotate(percentage(turn)))
+        Icon::new(IconName::LoaderCircle).text_color(color)
     }
 
     /// Tests: scroll by `dy` pixels (down is positive). Every item is reachable already.
@@ -806,6 +827,8 @@ impl Focusable for ChatPanel {
 impl Render for ChatPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::perf::count(crate::perf::Count::Chat);
+        // Laid out again below, if the working line shows.
+        self.working_slot.set(None);
         if let Some(id) = self.agent.clone() {
             return self.render_agent_view(&id, cx);
         }
@@ -959,4 +982,10 @@ mod context_label_tests {
         assert_eq!(super::short_tokens(1_250_000), "1.2M");
         assert_eq!(super::short_tokens(200_000), "200k");
     }
+}
+
+/// A spinner at step `phase` of its turn.
+fn spinner_at(phase: u32, color: Hsla) -> Icon {
+    let turn = (phase % SPINNER_STEPS) as f32 / SPINNER_STEPS as f32;
+    Icon::new(IconName::LoaderCircle).text_color(color).transform(Transformation::rotate(percentage(turn)))
 }

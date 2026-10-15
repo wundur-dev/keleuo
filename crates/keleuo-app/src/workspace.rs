@@ -1713,6 +1713,8 @@ impl Render for Workspace {
                     .flex()
                     .child(div().flex_1().min_w_0().h_full().child(self.dock.clone())),
             )
+            // The chat's working line, over its place: it turns without the chat being drawn.
+            .children(self.claude.read(cx).working_overlay(cx))
     }
 }
 
