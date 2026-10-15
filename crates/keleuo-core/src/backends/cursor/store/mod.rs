@@ -58,6 +58,53 @@ pub fn chat_dir(host: &dyn Host, project: &Path, id: &str) -> Option<PathBuf> {
         .find(|dir| host.is_file(&dir.join("store.db")))
 }
 
+/// Make chat `id` of `project` one conversation for both of Cursor's ways in (on this
+/// machine): its ACP sessions live in `acp-sessions/<id>`, its own interface's chats in
+/// `chats/<md5 of the folder>/<id>`, in the same layout, and neither finds the other's. One
+/// is made a link to the other (Cursor follows it both ways): the one that has the chat stays.
+/// An empty one left by the other way (no conversation in it) is moved aside first, never
+/// deleted. Two with a conversation each are left alone (an error says so).
+pub fn share(cursor: &Path, project: &Path, id: &str) -> std::io::Result<()> {
+    let acp = cursor.join("acp-sessions").join(id);
+    // Cursor names the folder after the path it runs in, symlinks resolved.
+    let project = std::fs::canonicalize(project).unwrap_or_else(|_| project.to_path_buf());
+    let chat = cursor.join("chats").join(md5_hex(project.to_string_lossy().as_bytes())).join(id);
+    let real = |p: &Path| p.is_dir() && !p.is_symlink();
+    let has_chat = |p: &Path| {
+        p.join("store.db").is_file()
+            && std::fs::read_to_string(p.join("meta.json"))
+                .ok()
+                .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+                .is_none_or(|m| m.get("hasConversation").and_then(Value::as_bool) != Some(false))
+    };
+    let (keep, link) = match (real(&acp), real(&chat)) {
+        (true, true) => match (has_chat(&acp), has_chat(&chat)) {
+            (true, true) => return Err(std::io::Error::other("Cursor has two different chats under this id; each view keeps its own")),
+            (true, false) => (acp, chat),
+            (false, _) => (chat, acp),
+        },
+        (true, false) => (acp, chat),
+        (false, true) => (chat, acp),
+        // Not made yet by either, or linked already.
+        (false, false) => return Ok(()),
+    };
+    if link.is_symlink() {
+        return Ok(());
+    }
+    if link.exists() {
+        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+        std::fs::rename(&link, link.with_file_name(format!("{id}.keleuo-empty-{stamp}")))?;
+    }
+    if let Some(parent) = link.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&keep, &link)?;
+    #[cfg(windows)]
+    std::os::windows::fs::symlink_dir(&keep, &link)?;
+    Ok(())
+}
+
 /// Chat `id` of `project`, read from Cursor's database. An error when it is not there or no
 /// reader could make sense of it.
 pub fn load(host: &dyn Host, project: &Path, id: &str) -> anyhow::Result<Conversation> {
@@ -285,6 +332,42 @@ mod tests {
         }
         eprintln!("read {read}, without messages {empty}, failed {}", failed.len());
         assert!(failed.is_empty(), "failed: {failed:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_chat_is_shared_by_both_ways_in() {
+        let root = std::env::temp_dir().join(format!("keleuo-share-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let project = Path::new("/p");
+        let hashed = root.join("chats").join(md5_hex(b"/p"));
+        let write = |dir: &Path, conversation: bool| {
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(dir.join("store.db"), b"db").unwrap();
+            std::fs::write(dir.join("meta.json"), format!("{{\"schemaVersion\":1,\"hasConversation\":{conversation}}}")).unwrap();
+        };
+        // Started over ACP: the interface's place becomes a link to it.
+        write(&root.join("acp-sessions/a"), true);
+        share(&root, project, "a").unwrap();
+        assert!(hashed.join("a").is_symlink());
+        assert_eq!(std::fs::read_link(hashed.join("a")).unwrap(), root.join("acp-sessions/a"));
+        share(&root, project, "a").unwrap();
+        // Started in the interface: ACP's place becomes a link to it.
+        write(&hashed.join("b"), true);
+        share(&root, project, "b").unwrap();
+        assert!(root.join("acp-sessions/b").is_symlink());
+        // An empty twin is moved aside, not deleted.
+        write(&root.join("acp-sessions/c"), true);
+        write(&hashed.join("c"), false);
+        share(&root, project, "c").unwrap();
+        assert!(hashed.join("c").is_symlink());
+        assert!(std::fs::read_dir(&hashed).unwrap().flatten().any(|e| e.file_name().to_string_lossy().starts_with("c.keleuo-empty-")));
+        // Two real chats: left alone.
+        write(&root.join("acp-sessions/d"), true);
+        write(&hashed.join("d"), true);
+        assert!(share(&root, project, "d").is_err());
+        assert!(!hashed.join("d").is_symlink());
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

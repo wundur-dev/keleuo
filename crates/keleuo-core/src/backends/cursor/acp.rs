@@ -17,6 +17,10 @@
 //!   its default for next time.
 //! - `session/load` streams the chat again as updates; Keleuo has it already (from Cursor's
 //!   record), so they are not shown.
+//! - ACP sessions are kept in `~/.cursor/acp-sessions/<id>`, the interface's chats in
+//!   `~/.cursor/chats/<md5 of the folder>/<id>`, same layout, neither finding the other. A link
+//!   from one to the other ([`super::store::share`]) makes them one chat: Terminal opens a
+//!   session started in Chat, and ACP continues one started in Terminal or before ACP.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -82,9 +86,11 @@ impl Agent for CursorAcpAgent {
         }
         let options = options.clone();
         let sink2 = sink.clone();
+        // Where Cursor keeps its chats, to share one between Chat and Terminal (this machine).
+        let cursor_home = (!host.is_remote()).then(|| host.home_dir().map(|h| h.join(".cursor"))).flatten();
         // The handshake waits on the agent: off the window's thread.
         std::thread::spawn(move || {
-            if let Err(e) = open_session(&conn, &state, &options, &sink2) {
+            if let Err(e) = open_session(&conn, &state, &options, cursor_home.as_deref(), &sink2) {
                 sink2(Message::Event(Event::TurnEnded {
                     error: Some(format!("Cursor could not open the session: {e}")),
                     cost_total_usd: None,
@@ -170,7 +176,15 @@ impl Agent for CursorAcpAgent {
 
 /// Initialize, then continue the chat (`options.resume`) or start one, in the mode and with
 /// the model asked for.
-fn open_session(conn: &Connection, state: &Shared, options: &StartOptions, sink: &Sink) -> anyhow::Result<()> {
+fn open_session(conn: &Connection, state: &Shared, options: &StartOptions, cursor_home: Option<&std::path::Path>, sink: &Sink) -> anyhow::Result<()> {
+    // One chat for both views: Cursor keeps ACP sessions and its interface's chats apart.
+    let share = |id: &str| {
+        if let Some(home) = cursor_home
+            && let Err(e) = super::store::share(home, &options.cwd, id)
+        {
+            sink(Message::Event(Event::Notice(format!("Chat and Terminal may show different Cursor chats: {e}."))));
+        }
+    };
     // Models as plain ids with their settings apart (see the module's notes).
     let mut init = acp::initialize_params();
     init["clientCapabilities"]["_meta"] = json!({"parameterizedModelPicker": true});
@@ -178,6 +192,8 @@ fn open_session(conn: &Connection, state: &Shared, options: &StartOptions, sink:
     let cwd = options.cwd.to_string_lossy().to_string();
     let mut opened = None;
     if let Some(id) = &options.resume {
+        // A chat started in Terminal (or before ACP) is found through the link.
+        share(id);
         state.lock().unwrap().loading = true;
         let loaded = conn.call("session/load", json!({"sessionId": id, "cwd": cwd, "mcpServers": []}));
         state.lock().unwrap().loading = false;
@@ -191,6 +207,7 @@ fn open_session(conn: &Connection, state: &Shared, options: &StartOptions, sink:
         None => {
             let r = conn.call("session/new", json!({"cwd": cwd, "mcpServers": []}))?;
             let id = r.get("sessionId").and_then(Value::as_str).ok_or_else(|| anyhow::anyhow!("no session id"))?.to_string();
+            share(&id);
             (id, r)
         }
     };
