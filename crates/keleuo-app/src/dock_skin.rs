@@ -268,7 +268,16 @@ impl SheetGroup {
     fn header(&self, group: &TabGroupContext, window: &mut Window, cx: &mut App) -> AnyElement {
         let theme = cx.theme();
         // The tool panels' light grey, as the panel below it.
-        let (bar, border, fg, muted) = (crate::theme::tool_ground(cx), theme.border, theme.foreground, theme.muted_foreground);
+        // The title in a dark grey rather than black, on a bar that sits slightly in.
+        let (bar, border, muted) = (crate::theme::tool_ground(cx), theme.border, theme.muted_foreground);
+        let fg = sheet_tabs::mix(theme.foreground, muted, 0.4);
+        let inset = BoxShadow {
+            color: gpui_kit::black().opacity(if theme.is_dark() { 0.35 } else { 0.07 }),
+            offset: point(px(0.), px(1.)),
+            blur_radius: px(3.),
+            spread_radius: px(0.),
+            inset: true,
+        };
         let Some(ix) = shown_ix(group, cx) else {
             return div().into_any_element();
         };
@@ -312,6 +321,7 @@ impl SheetGroup {
             .items_center()
             .gap_1()
             .bg(bar)
+            .shadow(vec![inset])
             .border_b_1()
             .border_color(border)
             .when(group.is_droppable(), |d| {
