@@ -17,6 +17,7 @@
 //! - [`web`]: what an address typed in the Web panel means;
 //! - [`compose`]: writing a message (lists that continue on Shift+Enter).
 
+pub mod acp;
 pub mod agent;
 pub mod backends;
 pub mod changes;
