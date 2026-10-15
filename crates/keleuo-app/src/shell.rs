@@ -1061,7 +1061,8 @@ impl Shell {
             }
             "new-scripted" => {
                 // A session on the scripted test backend (needs KELEUO_TEST_BACKENDS=1).
-                let Some(b) = crate::backends::all(cx).into_iter().find(|b| b.id() != crate::backends::backend(None, cx).id()) else {
+                // It is registered last.
+                let Some(b) = crate::backends::all(cx).into_iter().skip(1).last() else {
                     return Some("no second backend".into());
                 };
                 let root = if arg.is_empty() { default_folder(cx) } else { PathBuf::from(arg) };

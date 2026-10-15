@@ -24,6 +24,7 @@ use gpui_kit::*;
 use keleuo_core::agent::{Agent, Backend, Event, Follow, Hook, Launch, Message, ModelOption, StartOptions};
 use keleuo_core::conversation::Conversation;
 use keleuo_core::host::Host;
+use keleuo_core::outbox::{Outbox, SendNow, Waiting};
 
 use crate::hooks::{self, Registration, Reply};
 use crate::terminal_view::{ImageSupport, PasteImage, Placeholder, TerminalEvent, TerminalView};
@@ -173,6 +174,10 @@ pub struct AgentSession {
     closing: bool,
     /// Messages sent while the interface ends, sent once it has.
     held: Vec<(String, Vec<PathBuf>)>,
+    /// Messages sent while the agent works, each sent when the turn before it ends.
+    outbox: Outbox,
+    /// The person stopped the turn: what waits stays until they send it, or send another.
+    outbox_paused: bool,
     /// Without the hybrid, the view not shown keeps its agent, idle, in case the conversation
     /// has not moved on when it shows again (then switching back restarts nothing): the
     /// interface, Terminal hidden...
@@ -244,6 +249,8 @@ impl AgentSession {
             hybrid: false,
             closing: false,
             held: Vec::new(),
+            outbox: Outbox::default(),
+            outbox_paused: false,
             parked: None,
             agent_parked_at: None,
             switches: 0,
@@ -275,6 +282,60 @@ impl AgentSession {
     /// Messages waiting for the agent to be up.
     pub fn queued_count(&self) -> usize {
         self.queued.len() + self.held.len()
+    }
+
+    /// Messages sent while the agent works, in the order they go.
+    pub fn waiting(&self) -> impl Iterator<Item = &Waiting> {
+        self.outbox.items()
+    }
+
+    /// Whether what waits stays until the person sends it (they stopped the turn).
+    pub fn waiting_paused(&self) -> bool {
+        self.outbox_paused && !self.outbox.is_empty()
+    }
+
+    /// Whether a message sent now goes into the running turn: the agent reads it as it works.
+    pub fn takes_mid_turn(&self) -> bool {
+        if self.interactive() { self.backend.terminal_takes_mid_turn() } else { self.agent.takes_mid_turn() }
+    }
+
+    /// Send waiting message `id` now: into the running turn when the agent takes it, else it
+    /// goes first once the turn has been stopped.
+    pub fn send_waiting_now(&mut self, id: u64, cx: &mut Context<Self>) {
+        self.outbox_paused = false;
+        match SendNow::decide(self.chat.busy, self.takes_mid_turn()) {
+            SendNow::Now if self.chat.busy => {
+                if let Some(w) = self.outbox.remove(id) {
+                    self.deliver(&w.text, w.images, cx);
+                }
+            }
+            SendNow::Now => {
+                self.outbox.to_front(id);
+                self.send_waiting(cx);
+            }
+            SendNow::StopFirst => {
+                if self.outbox.to_front(id) {
+                    self.stop_turn(cx);
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    /// Drop waiting message `id`.
+    pub fn remove_waiting(&mut self, id: u64, cx: &mut Context<Self>) {
+        self.outbox.remove(id);
+        cx.notify();
+    }
+
+    /// Send what waits while the agent is free: the first message, which starts a turn; the
+    /// next waits for that turn to end.
+    fn send_waiting(&mut self, cx: &mut Context<Self>) {
+        while !self.chat.busy && !self.closing && !self.outbox_paused && self.waiting_for.is_none() {
+            let Some(w) = self.outbox.next(self.chat.busy) else { break };
+            self.deliver(&w.text, w.images, cx);
+            cx.notify();
+        }
     }
 
     /// Whether the agent's own terminal interface drives this session now: in Terminal, or in
@@ -376,6 +437,7 @@ impl AgentSession {
         if self.interactive() && self.terminal.is_none() {
             self.start_terminal(cx);
         }
+        self.send_waiting(cx);
         cx.notify();
     }
 
@@ -957,6 +1019,7 @@ impl AgentSession {
             }
             Hook::Attention(_) => self.unseen = true,
         }
+        self.send_waiting(cx);
         self.chat.revision += 1;
         cx.notify();
     }
@@ -1004,6 +1067,7 @@ impl AgentSession {
                     for m in batch {
                         session.handle(m, cx);
                     }
+                    session.send_waiting(cx);
                     session.unseen = true;
                     cx.notify();
                 });
@@ -1116,8 +1180,24 @@ impl AgentSession {
     }
 
     /// Send a user turn with images (files). Pastes marked in `text` (see
-    /// [`keleuo_core::paste`]) show folded in the chat and go without their markers.
+    /// [`keleuo_core::paste`]) show folded in the chat and go without their markers. While the
+    /// agent works it waits its turn (see [`keleuo_core::outbox`]), as it does behind others
+    /// waiting; it shows in the chat when it goes.
     pub fn send_with(&mut self, text: &str, images: Vec<PathBuf>, cx: &mut Context<Self>) {
+        self.outbox_paused = false;
+        if (self.chat.busy || !self.outbox.is_empty())
+            && !(keleuo_core::paste::without_markers(text).trim().is_empty() && images.is_empty())
+        {
+            self.outbox.push(text, images);
+            self.send_waiting(cx);
+            cx.notify();
+            return;
+        }
+        self.deliver(text, images, cx);
+    }
+
+    /// Send a user turn now, starting the agent when needed.
+    fn deliver(&mut self, text: &str, images: Vec<PathBuf>, cx: &mut Context<Self>) {
         if self.closing {
             self.held.push((text.to_string(), images));
             cx.notify();
@@ -1182,6 +1262,10 @@ impl AgentSession {
         }
         if !text.is_empty() {
             self.chat.push_user(shown);
+        } else if !images.is_empty() {
+            // Images alone start a turn too: what waits goes after it.
+            self.chat.busy = true;
+            self.chat.status = Some("sending".into());
         }
         let images = if self.agent.takes_images() {
             images
@@ -1234,7 +1318,16 @@ impl AgentSession {
         }
     }
 
+    /// The person stops the turn: what waits stays until they send it, or send another.
     pub fn interrupt(&mut self, cx: &mut Context<Self>) {
+        if self.chat.busy && !self.outbox.is_empty() {
+            self.outbox_paused = true;
+        }
+        self.stop_turn(cx);
+    }
+
+    /// Stop the current turn, keeping the agent.
+    fn stop_turn(&mut self, cx: &mut Context<Self>) {
         if self.interactive() {
             if let Some(pty) = self.terminal.as_ref().and_then(|t| t.view.read(cx).pty.clone()) {
                 pty.write(self.backend.terminal_interrupt());
@@ -1242,6 +1335,7 @@ impl AgentSession {
             // No hooks to say the turn stopped (nor a record of a stopped turn): it has.
             if self.backend.hook_settings(&|_| String::new()).is_none() && self.chat.busy {
                 self.chat.apply(Event::Interrupted);
+                self.send_waiting(cx);
             }
         } else {
             let _ = self.agent.interrupt();
@@ -1422,6 +1516,7 @@ impl AgentSession {
                 for (text, images) in std::mem::take(&mut s.held) {
                     s.send_with(&text, images, cx);
                 }
+                s.send_waiting(cx);
                 cx.notify();
             });
         })

@@ -231,6 +231,12 @@ impl Backend for ClaudeBackend {
         Some(vec![0x16])
     }
 
+    /// A message typed while it works is queued by the interface and read into the running
+    /// turn (its record keeps it as a queued attachment).
+    fn terminal_takes_mid_turn(&self) -> bool {
+        true
+    }
+
     fn builtin_commands(&self) -> &'static [(&'static str, &'static str)] {
         // Not /clear, /resume or /exit (they would leave the conversation Keleuo follows), nor
         // /model (the model menu does that, without changing the default for every session).
@@ -416,6 +422,12 @@ impl Agent for ClaudeCode {
     }
 
     fn takes_images(&self) -> bool {
+        true
+    }
+
+    /// A user message written while a turn runs is read into that turn: one `result` comes
+    /// for both (Claude Code 2.1.300).
+    fn takes_mid_turn(&self) -> bool {
         true
     }
 

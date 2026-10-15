@@ -93,6 +93,12 @@ impl Backend for CursorBackend {
         Some(if bracketed { format!("\x1b[200~{p}\x1b[201~") } else { p.to_string() }.into_bytes())
     }
 
+    /// While it works its box says "Add a follow-up": a message typed then is read into the
+    /// running turn (cursor-agent 2026.10.14).
+    fn terminal_takes_mid_turn(&self) -> bool {
+        true
+    }
+
     /// Its interface stops a turn on Ctrl+C ("ctrl+c to stop" while it works).
     fn terminal_interrupt(&self) -> Vec<u8> {
         vec![0x03]

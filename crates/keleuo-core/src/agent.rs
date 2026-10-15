@@ -241,6 +241,12 @@ pub trait Agent: Send {
     fn takes_images(&self) -> bool {
         false
     }
+    /// Whether a message sent while a turn runs goes into that turn (the agent reads it as it
+    /// works). When not, the window keeps it until the turn ends, or stops the turn to send it
+    /// at once (see [`crate::outbox`]).
+    fn takes_mid_turn(&self) -> bool {
+        false
+    }
     /// Answer a permission prompt; `input` is what to run with when allowed.
     fn answer_permission(&mut self, request_id: &str, allow: bool, input: &Value) -> std::io::Result<()>;
     /// Stop the current turn, keeping the process.
@@ -445,6 +451,11 @@ pub trait Backend: Send + Sync {
     /// The permission mode a hook call reports the interface is in.
     fn hook_mode(&self, _payload: &Value) -> Option<String> {
         None
+    }
+    /// Whether the terminal interface takes a message typed while it works (it adds it to the
+    /// running turn, or queues it itself), as [`Agent::takes_mid_turn`] says for the agent.
+    fn terminal_takes_mid_turn(&self) -> bool {
+        false
     }
     /// What to type to stop the current turn.
     fn terminal_interrupt(&self) -> Vec<u8> {
