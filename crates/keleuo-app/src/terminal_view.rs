@@ -1089,10 +1089,7 @@ fn paint_grid(
             if c.flags.contains(Flags::ITALIC) {
                 f.style = FontStyle::Italic;
             }
-            let mut color = hsla(fg);
-            if c.flags.contains(Flags::DIM) {
-                color.a = 0.7;
-            }
+            let color = hsla(palette::readable(fg, bg, c.flags.contains(Flags::DIM)));
             let underline = c
                 .flags
                 .intersects(Flags::ALL_UNDERLINES)

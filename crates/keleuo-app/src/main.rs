@@ -266,6 +266,10 @@ fn main() {
                 _ => None,
             };
             sheet_tabs::set_style(&settings.tab_style);
+            // The chat is the fixed centre: nothing docks into its group, it is not dragged.
+            gpui_kit::base::dock::pin_panels(&["Chat"]);
+            // The chat's group is fixed: nothing docks into it, it is not dragged.
+            gpui_kit::base::dock::pin_panels(&[dock_skin::CHAT]);
             cx.set_global(AppSettings(Rc::new(RefCell::new(settings))));
             cx.set_window_appearance(forced);
             cx.set_global(panels::Names(Rc::new(RefCell::new(

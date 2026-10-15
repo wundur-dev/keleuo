@@ -50,6 +50,17 @@ pub enum TabGroupEvent {
     ZoomOut,
 }
 
+thread_local! {
+    static PINNED: std::cell::RefCell<Vec<&'static str>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Pin the panels with these names (their `panel_name`): a group holding one
+/// takes no drops (nothing docks into it or splits it) and is not dragged.
+/// An app's fixed centre, say. Replaces any earlier list.
+pub fn pin_panels(names: &[&'static str]) {
+    PINNED.with(|p| *p.borrow_mut() = names.to_vec());
+}
+
 /// Everything the container knows about a group's place in the dock.
 ///
 /// Pushed as one value rather than one setter per fact. These are read
@@ -281,7 +292,7 @@ impl TabGroup {
             constraints: self.constraints,
             active_panel_closable: self.is_closable(cx),
             draggable: self.draggable(cx),
-            droppable: self.droppable(),
+            droppable: self.droppable(cx),
             // A stale indicator would otherwise outlive a drag that was
             // cancelled while hovering this group.
             drop_indicator: cx
@@ -452,11 +463,20 @@ impl TabGroup {
     }
 
     fn draggable(&self, cx: &App) -> bool {
-        !self.is_locked() && !self.is_last_panel(cx)
+        !self.is_locked() && !self.is_last_panel(cx) && !self.holds_pinned(cx)
     }
 
-    fn droppable(&self) -> bool {
-        !self.is_locked()
+    fn droppable(&self, cx: &App) -> bool {
+        !self.is_locked() && !self.holds_pinned(cx)
+    }
+
+    /// Whether a panel of this group is pinned (see [`pin_panels`]): the
+    /// group then stays as it is.
+    fn holds_pinned(&self, cx: &App) -> bool {
+        PINNED.with(|names| {
+            let names = names.borrow();
+            !names.is_empty() && self.panels.iter().any(|p| names.contains(&p.panel_name(cx)))
+        })
     }
 
     fn focus_active_panel(&self, window: &mut Window, cx: &mut Context<Self>) {

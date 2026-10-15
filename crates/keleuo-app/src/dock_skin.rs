@@ -163,6 +163,13 @@ fn is_tool_group(group: &TabGroupContext, cx: &App) -> bool {
     !group.panels().is_empty() && group.panels().iter().all(|p| TOOLS.contains(&p.panel_name(cx)))
 }
 
+/// The session's chat: pinned in the centre (see `main`), drawn without a tab.
+pub const CHAT: &str = "Chat";
+
+fn is_chat_group(group: &TabGroupContext, cx: &App) -> bool {
+    group.panels().iter().any(|p| p.panel_name(cx) == CHAT)
+}
+
 fn visible(group: &TabGroupContext, cx: &App) -> Vec<usize> {
     group
         .panels()
@@ -530,7 +537,8 @@ impl TabGroupRenderer for SheetGroup {
     }
 
     fn render_tab_bar(&self, group: &TabGroupContext, window: &mut Window, cx: &mut App) -> AnyElement {
-        if visible(group, cx).is_empty() {
+        // The chat stands alone in the centre, fixed: no tab (its header says what it is).
+        if visible(group, cx).is_empty() || is_chat_group(group, cx) {
             return Empty.into_any_element();
         }
         if is_tool_group(group, cx) {
@@ -702,5 +710,51 @@ mod tests {
             w.try_find(tab(&files)).is_some_and(|t| t.bounds().top() < px(40.))
         })
         .await;
+    }
+
+    #[gpui_kit::test]
+    async fn the_chat_has_no_tab_and_takes_no_drops(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        gpui_kit::base::dock::pin_panels(&[super::CHAT]);
+        let mut probes = Vec::new();
+        let handle = cx.update(|cx| {
+            let options = WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(gpui_kit::Bounds { origin: Default::default(), size: size(px(1000.), px(600.)) })),
+                ..Default::default()
+            };
+            gpui_kit::open_window(options, cx, |window, cx| {
+                let (area, _) = KeleuoSkin::dock_area("test", None, window, cx);
+                let make = |kind, id, cx: &mut App| cx.new(|cx| Probe { kind, id, focus: cx.focus_handle() });
+                let chat = make(super::CHAT, "chat", cx);
+                let doc_a = make("Doc", "doc-a", cx);
+                let doc_b = make("Doc", "doc-b", cx);
+                probes = vec![chat.clone(), doc_a.clone(), doc_b.clone()];
+                let layout = DockLayout::h_split()
+                    .child(DockLayout::tabs().panel_view(panel_handle(chat), cx), Some(px(500.)))
+                    .child(DockLayout::tabs().panel_view(panel_handle(doc_a), cx).panel_view(panel_handle(doc_b), cx), None);
+                area.update(cx, |a, cx| a.set_center(layout, window, cx));
+                cx.new(|_| Root(area))
+            })
+            .unwrap()
+            .0
+        });
+        let (chat, doc_a) = (probes[0].clone(), probes[1].clone());
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            // No tab for the chat; its content starts at the top.
+            assert!(window.try_find(tab(&chat)).is_none());
+            assert!(window.find("chat").bounds().top() < px(4.));
+            // A document dragged onto the chat stays where it was.
+            window.drag_to(tab(&doc_a), "chat", cx);
+            window.render_frame(cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.try_find(tab(&doc_a)).is_some_and(|t| t.bounds().left() >= px(500.)), "the document stays right of the chat");
+        })
+        .unwrap();
+        gpui_kit::base::dock::pin_panels(&[]);
     }
 }

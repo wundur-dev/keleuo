@@ -198,5 +198,6 @@ pub use state::{DockAreaState, DockPlacement, DockState, PanelInfo, PanelState};
 /// could name the trait its parameter requires.
 pub use state_convert::{PanelBuilder, PanelSource};
 pub use tab_group::{
+    pin_panels,
     TabGroup, TabGroupConstraints, TabGroupContext, TabGroupEvent, TabGroupRenderer,
 };

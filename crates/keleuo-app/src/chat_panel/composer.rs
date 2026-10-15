@@ -448,7 +448,6 @@ impl ChatPanel {
                     .border_1()
                     .border_color(border)
                     .bg(field)
-                    .shadow_md()
                     .drag_over::<ExternalPaths>(move |d, _, _, _| d.border_color(accent))
                     .on_drop(cx.listener(|p, paths: &ExternalPaths, _, cx| p.attach(paths.paths().to_vec(), cx)))
                     // Shift+Enter on a list item: before the box puts in its plain new line.

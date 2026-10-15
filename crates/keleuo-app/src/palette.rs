@@ -107,11 +107,93 @@ pub fn resolve(color: Color, overrides: &Colors, is_fg: bool) -> u32 {
     }
 }
 
+/// The least contrast text has against its background: below it, the text is darkened (on a
+/// light background) or lightened (on a dark one) until it reads, as Ghostty's and iTerm2's
+/// "minimum contrast" do. Programs pick colours for one kind of background (Claude Code's
+/// for a dark one); this keeps them readable on the other. Faint text needs less.
+const MIN_CONTRAST: f32 = 4.5;
+const MIN_CONTRAST_FAINT: f32 = 3.0;
+
+fn channels(c: u32) -> [f32; 3] {
+    [((c >> 16) & 0xff) as f32 / 255., ((c >> 8) & 0xff) as f32 / 255., (c & 0xff) as f32 / 255.]
+}
+
+fn pack(c: [f32; 3]) -> u32 {
+    let b = |v: f32| (v.clamp(0., 1.) * 255.).round() as u32;
+    (b(c[0]) << 16) | (b(c[1]) << 8) | b(c[2])
+}
+
+/// WCAG relative luminance.
+fn luminance(c: u32) -> f32 {
+    let lin = |v: f32| if v <= 0.03928 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) };
+    let [r, g, b] = channels(c);
+    0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b)
+}
+
+fn contrast(a: u32, b: u32) -> f32 {
+    let (la, lb) = (luminance(a), luminance(b));
+    (la.max(lb) + 0.05) / (la.min(lb) + 0.05)
+}
+
+fn mix(a: u32, b: u32, t: f32) -> u32 {
+    let (a, b) = (channels(a), channels(b));
+    pack([a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t])
+}
+
+/// The colour to draw text in: `fg` on `bg`, faint text a step toward the background, then
+/// moved toward black or white just as far as it takes to read. Remembered per pair (a screen
+/// has few).
+pub fn readable(fg: u32, bg: u32, faint: bool) -> u32 {
+    thread_local! {
+        static SEEN: std::cell::RefCell<std::collections::HashMap<(u32, u32, bool), u32>> = Default::default();
+    }
+    if let Some(c) = SEEN.with(|s| s.borrow().get(&(fg, bg, faint)).copied()) {
+        return c;
+    }
+    let start = if faint { mix(fg, bg, 0.3) } else { fg };
+    let min = if faint { MIN_CONTRAST_FAINT } else { MIN_CONTRAST };
+    let toward = if luminance(bg) > 0.4 { 0x000000 } else { 0xffffff };
+    let mut c = start;
+    let mut t = 0.0;
+    while contrast(c, bg) < min && t < 1.0 {
+        t += 0.05;
+        c = mix(start, toward, t);
+    }
+    SEEN.with(|s| {
+        let mut s = s.borrow_mut();
+        if s.len() > 4096 {
+            s.clear();
+        }
+        s.insert((fg, bg, faint), c);
+    });
+    c
+}
+
 /// Bold text uses the bright variant of the eight basic colours, like most terminals.
 pub fn brighten(color: Color) -> Color {
     match color {
         Color::Named(n) if (n as usize) < 8 => Color::Named(n.to_bright()),
         Color::Indexed(i) if i < 8 => Color::Indexed(i + 8),
         c => c,
+    }
+}
+
+#[cfg(test)]
+mod contrast_tests {
+    use super::*;
+
+    #[test]
+    fn pale_text_is_darkened_on_white_and_readable_text_is_left_alone() {
+        let white = 0xffffff;
+        // A dark theme's pale yellow-green on white: darkened until it reads.
+        let c = readable(0xa6e22e, white, false);
+        assert!(contrast(c, white) >= MIN_CONTRAST && c != 0xa6e22e);
+        // Black on white is fine as it is.
+        assert_eq!(readable(0x1f2227, white, false), 0x1f2227);
+        // On black, dark text is lightened.
+        assert!(contrast(readable(0x202020, 0x000000, false), 0x000000) >= MIN_CONTRAST);
+        // Faint text stays fainter than plain, but readable.
+        let faint = readable(0x1f2227, white, true);
+        assert!(contrast(faint, white) >= MIN_CONTRAST_FAINT && faint != 0x1f2227);
     }
 }

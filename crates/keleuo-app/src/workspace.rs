@@ -526,6 +526,18 @@ impl Workspace {
             let view = panel_handle(self.claude.clone());
             self.place(view, None, None, window, cx);
         }
+        // A layout saved before the chat stood alone: what shared its group moves out (its
+        // group shows no tabs any more).
+        let chat = PanelId::from(self.claude.entity_id());
+        if let Some(node) = self.find_node(chat, cx) {
+            for other in self.group_panels(node, cx).into_iter().filter(|p| *p != chat) {
+                let target = self.recent_code_panel(cx).and_then(|r| self.find_node(r, cx)).filter(|n| *n != node);
+                self.dock.update(cx, |a, cx| match target {
+                    Some(t) => a.move_panel(other, InsertTarget::Tabs { node: t, ix: None, activate: false }, window, cx),
+                    None => a.move_panel(other, InsertTarget::Split { node, placement: Placement::Right, size: None }, window, cx),
+                });
+            }
+        }
         true
     }
 
@@ -610,8 +622,20 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let id = view.panel_id(cx);
-        let anchor_node = anchor.and_then(|a| self.find_node(a, cx));
-        let beside_node = beside.and_then(|(b, p)| self.find_node(b, cx).map(|n| (n, p)));
+        let mut anchor_node = anchor.and_then(|a| self.find_node(a, cx));
+        let mut beside_node = beside.and_then(|(b, p)| self.find_node(b, cx).map(|n| (n, p)));
+        // The chat's group holds the chat alone: anything else goes to the latest group of
+        // files and terminals, else beside the chat on its right.
+        let chat = PanelId::from(self.claude.entity_id());
+        let chat_node = self.find_node(chat, cx);
+        if id != chat && chat_node.is_some() {
+            if anchor_node == chat_node {
+                anchor_node = self.recent_code_panel(cx).and_then(|r| self.find_node(r, cx)).filter(|n| Some(*n) != chat_node);
+            }
+            if anchor_node.is_none() && beside_node.is_none_or(|(n, p)| Some(n) == chat_node && p != Placement::Right) {
+                beside_node = chat_node.map(|n| (n, Placement::Right));
+            }
+        }
         self.dock.update(cx, |a, cx| {
             a.add_panel_view(view, DockPlacement::Center, None, window, cx);
             if let Some(node) = anchor_node {
