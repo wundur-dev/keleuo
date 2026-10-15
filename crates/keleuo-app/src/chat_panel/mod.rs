@@ -483,10 +483,16 @@ impl ChatPanel {
                     if estimated { "Estimated from token counts and published per-token prices" } else { "As the agent reported it" },
                 )
             }
-            Some(Spend::Context { percent, tokens, window }) => (
-                Some(format!("{percent}% of context")),
-                if tokens > 0 && window > 0 { "Tokens the last turn sent, against the model's context window" } else { "" },
+            // How much of the model's context the conversation fills: "180k of 1M context".
+            Some(Spend::Context { percent, tokens, window }) if tokens > 0 && window > 0 => (
+                Some(format!("{} of {} context", short_tokens(tokens), short_tokens(window))),
+                if percent > 100 {
+                    "The conversation as of the last request, against the model's context window (over 100%: the agent will compact it)"
+                } else {
+                    "The conversation as of the last request, against the model's context window"
+                },
             ),
+            Some(Spend::Context { percent, .. }) => (Some(format!("{percent}% of context")), ""),
             None => (None, ""),
         };
         let spend_tip = format!(
@@ -776,7 +782,6 @@ impl Render for ChatPanel {
                     )),
             )
             .children(self.render_asking(cx))
-            .children(self.render_thinking(cx))
             .child({
                 let slash = self.render_slash(cx);
                 self.sync_model_select(window, cx);
@@ -802,6 +807,18 @@ impl Render for ChatPanel {
                     }))
             }))
             .relative()
+    }
+}
+
+/// A token count as said briefly: 950, 18k, 1.2M, 1M.
+fn short_tokens(n: u64) -> String {
+    match n {
+        n if n >= 1_000_000 => {
+            let m = n as f64 / 1_000_000.0;
+            if (m - m.round()).abs() < 0.05 { format!("{:.0}M", m) } else { format!("{m:.1}M") }
+        }
+        n if n >= 1_000 => format!("{}k", (n + 500) / 1_000),
+        n => n.to_string(),
     }
 }
 
@@ -840,3 +857,14 @@ mod elapsed_tests {
     }
 }
 
+#[cfg(test)]
+mod context_label_tests {
+    #[::core::prelude::v1::test]
+    fn token_counts_read_briefly() {
+        assert_eq!(super::short_tokens(950), "950");
+        assert_eq!(super::short_tokens(18_400), "18k");
+        assert_eq!(super::short_tokens(1_000_000), "1M");
+        assert_eq!(super::short_tokens(1_250_000), "1.2M");
+        assert_eq!(super::short_tokens(200_000), "200k");
+    }
+}

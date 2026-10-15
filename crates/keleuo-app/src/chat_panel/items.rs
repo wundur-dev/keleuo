@@ -298,6 +298,7 @@ impl ChatPanel {
                 .flex()
                 .items_center()
                 .gap_1()
+                .mr_2()
                 .text_xs()
                 .text_color(muted)
                 .child(self.spinner(muted).xsmall())
@@ -545,41 +546,36 @@ impl ChatPanel {
     /// question, else a pointer to the terminal.
     /// While the agent thinks, before its first text or tool call: a shimmering line above the
     /// composer, so a quiet stretch reads as work in progress rather than a stall.
-    pub(super) fn render_thinking(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    /// While the agent works: a quiet spinner, what it is doing and for how long ("Thinking ·
+    /// 3m 02s"), in the message box beside the stop button. Not while it waits on the person
+    /// (a prompt shows that), nor in Terminal (its interface shows its own).
+    pub(super) fn render_working(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let session = self.session.read(cx);
-        // A streaming text item means the answer has started (its first delta sets the status
-        // to "writing"; the item appears a moment earlier).
-        let answering = matches!(session.chat.items.last(), Some(Item::Assistant { streaming: true, .. }));
-        // Shown for the whole turn while no answer is streaming: a session run through its
-        // terminal reports "working" or the tool it runs, never "thinking".
-        if !session.chat.busy || answering || session.chat.needs_input() || session.view == View::Terminal {
+        if !session.chat.busy || session.chat.needs_input() || session.view == View::Terminal {
             return None;
         }
-        let name = session.backend.name();
-        let label = match session.chat.status.as_deref() {
-            None | Some("thinking" | "working" | "sending" | "requesting") => format!("{name} is thinking…"),
-            Some(_) => format!("{name} is working…"),
+        // A streaming text item means the answer is being written.
+        let answering = matches!(session.chat.items.last(), Some(Item::Assistant { streaming: true, .. }));
+        let doing = match session.chat.status.as_deref() {
+            _ if answering => "Writing",
+            None | Some("thinking" | "working" | "sending" | "requesting") => "Thinking",
+            Some(_) => "Working",
         };
-        let theme = cx.theme();
-        let (ring, border, accent, muted, theme_fg) = (theme.ring, theme.border, theme.accent, theme.muted_foreground, theme.foreground);
-        let elapsed = self.busy_since.map(|t| format_elapsed(t.elapsed()));
+        let muted = cx.theme().muted_foreground;
+        let label = match self.busy_since.map(|t| format_elapsed(t.elapsed())) {
+            Some(e) => format!("{doing} · {e}"),
+            None => doing.to_string(),
+        };
         Some(
             div()
                 .flex_none()
-                .px_2()
-                .py_1()
                 .flex()
                 .items_center()
-                .gap_2()
-                .border_t_1()
-                .border_color(border)
-                .bg(accent)
-                .text_sm()
-                .child(self.spinner(ring).small())
-                .child(div().text_color(theme_fg).child(label))
-                // How long this turn has been going, at the right.
-                .child(div().flex_1())
-                .when_some(elapsed, |d, e| d.child(div().flex_none().text_xs().text_color(muted).child(e)))
+                .gap_1()
+                .text_xs()
+                .text_color(muted)
+                .child(self.spinner(muted).xsmall())
+                .child(label)
                 .into_any_element(),
         )
     }

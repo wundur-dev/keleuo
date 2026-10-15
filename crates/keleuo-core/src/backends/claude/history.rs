@@ -497,7 +497,7 @@ fn subagent_line_events(v: &Value, tool_use_id: &str, mapper: &mut Mapper) -> Ve
     let parent = Some(tool_use_id.to_string());
     let raw = match (v.get("type").and_then(Value::as_str), stream::parse_value(v)) {
         (Some("assistant"), stream::Event::Assistant { message_id, model, blocks, .. }) => {
-            stream::Event::Assistant { message_id, model, blocks, parent_tool_use_id: parent }
+            stream::Event::Assistant { message_id, model, blocks, parent_tool_use_id: parent, context_tokens: None }
         }
         (Some("user"), stream::Event::ToolResult { tool_use_id: id, content, is_error, structured, .. }) => {
             stream::Event::ToolResult { tool_use_id: id, content, is_error, structured, parent_tool_use_id: parent }

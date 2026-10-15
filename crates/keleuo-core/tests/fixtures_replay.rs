@@ -380,3 +380,21 @@ fn cursor_tasks_are_subagents() {
         ]
     );
 }
+
+/// How full the context is comes from the turn's last request, not from the `result`'s usage,
+/// which adds up every request the turn made (a turn of many tool calls counted the context
+/// many times over: "259% of context").
+#[test]
+fn the_context_is_the_last_requests_not_the_turns_total() {
+    let lines = [
+        r#"{"type":"assistant","message":{"id":"m1","model":"claude-opus-5-5","content":[{"type":"tool_use","id":"t1","name":"Read","input":{"file_path":"/tmp/a"}}],"usage":{"input_tokens":2,"cache_read_input_tokens":9000,"cache_creation_input_tokens":998,"output_tokens":50}},"parent_tool_use_id":null}"#,
+        r#"{"type":"assistant","message":{"id":"m2","model":"claude-opus-5-5","content":[{"type":"text","text":"done"}],"usage":{"input_tokens":2,"cache_read_input_tokens":11000,"cache_creation_input_tokens":998,"output_tokens":20}},"parent_tool_use_id":null}"#,
+        r#"{"type":"result","subtype":"success","is_error":false,"duration_ms":1000,"num_turns":2,"result":"done","session_id":"s1","total_cost_usd":0.1,"usage":{"input_tokens":4,"cache_read_input_tokens":48000,"cache_creation_input_tokens":1996,"output_tokens":70}}"#,
+    ];
+    let mut m = Mapper::new("");
+    let ended = m.map_lines(&lines.join("\n")).into_iter().find_map(|e| match e {
+        keleuo_core::agent::Event::TurnEnded { input_tokens, .. } => Some(input_tokens),
+        _ => None,
+    });
+    assert_eq!(ended, Some(12_000));
+}

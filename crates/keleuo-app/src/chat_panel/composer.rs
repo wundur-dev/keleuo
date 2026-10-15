@@ -418,6 +418,7 @@ impl ChatPanel {
         let effort_control = self.render_effort_control(cx);
         let mode_button = permission_prompts.then(|| self.render_mode_button(cx));
         let send = self.render_send(busy, has_text, cx);
+        let working = self.render_working(cx);
         let paste_target = cx.entity().downgrade();
         div()
             .flex_none()
@@ -518,6 +519,7 @@ impl ChatPanel {
                             .children(effort_control)
                             .children(mode_button)
                             .child(div().flex_1())
+                            .children(working)
                             .child(send),
                     ),
             )

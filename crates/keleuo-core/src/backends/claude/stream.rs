@@ -54,6 +54,9 @@ pub enum Event {
         model: String,
         blocks: Vec<Block>,
         parent_tool_use_id: Option<String>,
+        /// The tokens this message's request sent (input, cached or not): how full the
+        /// context was. A turn's `result` adds up every request, which is no measure of that.
+        context_tokens: Option<u64>,
     },
     /// The result of a tool call.
     ToolResult {
@@ -213,6 +216,8 @@ pub fn parse_value(v: &Value) -> Event {
                 .flatten()
                 .filter_map(parse_block)
                 .collect();
+            let usage = message.get("usage");
+            let n = |k: &str| usage.and_then(|u| u.get(k)).and_then(Value::as_u64).unwrap_or(0);
             Event::Assistant {
                 message_id: s(message, "id"),
                 model: s(message, "model"),
@@ -221,6 +226,7 @@ pub fn parse_value(v: &Value) -> Event {
                     .get("parent_tool_use_id")
                     .and_then(Value::as_str)
                     .map(str::to_string),
+                context_tokens: usage.map(|_| n("input_tokens") + n("cache_read_input_tokens") + n("cache_creation_input_tokens")),
             }
         }
         "user" => parse_user(v),

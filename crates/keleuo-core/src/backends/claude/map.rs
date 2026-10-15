@@ -24,6 +24,8 @@ pub struct Mapper {
     tasks: HashMap<String, String>,
     /// Replaying a session file: the person's messages come through as text.
     pub history: bool,
+    /// How full the context was at the turn's last request (see `Raw::Assistant`).
+    context: Option<u64>,
 }
 
 impl Mapper {
@@ -85,7 +87,12 @@ impl Mapper {
                 _ => Vec::new(),
             },
             Raw::TextDelta { text, .. } => vec![Event::TextDelta(text)],
-            Raw::Assistant { blocks, parent_tool_use_id: parent, model, .. } => {
+            Raw::Assistant { blocks, parent_tool_use_id: parent, model, context_tokens, .. } => {
+                if parent.is_none()
+                    && let Some(n) = context_tokens.filter(|n| *n > 0)
+                {
+                    self.context = Some(n);
+                }
                 let mut out = Vec::new();
                 if parent.is_none() && !model.is_empty() {
                     out.push(Event::Started { session_id: None, model: Some(model), permission_mode: None, cwd: None });
@@ -208,7 +215,8 @@ impl Mapper {
                 vec![Event::TurnEnded {
                     error: is_error.then(|| text.unwrap_or(subtype)),
                     cost_total_usd: total_cost_usd,
-                    input_tokens,
+                    // The context's size at the last request, not the turn's total.
+                    input_tokens: self.context.take().unwrap_or(input_tokens),
                     output_tokens,
                     duration_ms,
                     session_id: Some(session_id).filter(|s| !s.is_empty()),
