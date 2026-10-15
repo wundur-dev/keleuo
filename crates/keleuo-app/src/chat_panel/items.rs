@@ -126,6 +126,107 @@ impl ChatPanel {
             .into_any_element()
     }
 
+    /// A turn's summary (see [`keleuo_core::summary`]): how it ended and its headline, then
+    /// what changed, how it was checked and what waits on the person, each section only when
+    /// it has something. While it is being made, the same card with a spinner, so the summary
+    /// fills in where it will stay; when it could not be made, why, quietly.
+    pub(super) fn render_summary(&self, state: &summary::State, cx: &mut Context<Self>) -> AnyElement {
+        // Turned off: kept summaries stay out of sight.
+        if !crate::summaries_on(cx) {
+            return div().into_any_element();
+        }
+        let theme = cx.theme();
+        let (fg, muted, border, card_bg) = (theme.foreground, theme.muted_foreground, theme.border, theme.secondary);
+        let card = div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .px_3()
+            .py(px(10.))
+            .rounded_lg()
+            .border_1()
+            .border_color(border)
+            .bg(card_bg.opacity(0.35))
+            .text_sm()
+            .line_height(rems(1.45));
+        let s = match state {
+            summary::State::Pending => {
+                return card
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .text_color(muted)
+                            .child(self.spinner(muted).small())
+                            .child("Summarizing this turn…"),
+                    )
+                    .into_any_element();
+            }
+            summary::State::Failed(why) => {
+                return div().text_size(px(12.)).text_color(muted).child(format!("No summary: {why}")).into_any_element();
+            }
+            summary::State::Ready(s) => s,
+        };
+        let tone = match s.status {
+            summary::Status::Done => theme.green,
+            summary::Status::NeedsYou => theme.yellow,
+            summary::Status::Failed => theme.red,
+            summary::Status::Partial => theme.blue,
+        };
+        let mut card = card.child(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(
+                    div()
+                        .flex_none()
+                        .px(px(7.))
+                        .py(px(1.))
+                        .rounded(px(5.))
+                        .bg(tone.opacity(0.15))
+                        .text_size(px(12.))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(tone)
+                        .child(s.status.label()),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_size(px(15.))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(fg)
+                        .child(s.headline.clone()),
+                ),
+        );
+        for (title, list) in [("Changed", &s.changed), ("Checked", &s.checked), ("Needs you", &s.needs_you)] {
+            if list.is_empty() {
+                continue;
+            }
+            let mut items = div().flex_1().min_w_0().flex().flex_col().gap(px(3.));
+            for line in list {
+                items = items.child(
+                    div()
+                        .flex()
+                        .gap_2()
+                        .text_color(fg)
+                        .child(div().flex_none().text_color(muted).child("•"))
+                        .child(div().flex_1().min_w_0().child(line.clone())),
+                );
+            }
+            card = card.child(
+                div()
+                    .flex()
+                    .gap_3()
+                    .child(div().flex_none().w(px(76.)).text_size(px(13.)).text_color(muted).child(title))
+                    .child(items),
+            );
+        }
+        card.into_any_element()
+    }
+
     /// The end-of-turn card: the files the turn changed, each opening as its diff.
     pub(super) fn render_turn_changes(&self, ix: usize, changes: &[keleuo_core::changes::FileChange], cx: &mut Context<Self>) -> AnyElement {
         const SHOWN: usize = 8;
@@ -538,6 +639,7 @@ impl ChatPanel {
                     .into_any_element(),
                 Item::AgentMessage { from, title, text, .. } => self.render_agent_message(from, title, text, cx),
                 Item::TurnChanges(changes) => self.render_turn_changes(ix, changes, cx),
+                Item::Summary { state, .. } => self.render_summary(state, cx),
             };
             out.push(el);
         }

@@ -15,12 +15,13 @@
 //! A backend without such an interface runs its structured agent behind the window, and there
 //! is only Chat.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use gpui_kit::prelude::*;
 use gpui_kit::*;
+use keleuo_core::summary;
 use keleuo_core::agent::{Agent, Backend, Event, Follow, Hook, Launch, Message, ModelOption, StartOptions};
 use keleuo_core::conversation::Conversation;
 use keleuo_core::host::Host;
@@ -186,6 +187,8 @@ pub struct AgentSession {
     agent_parked_at: Option<u64>,
     /// Counts switches, so a parked agent's time limit is its own park's.
     switches: u64,
+    /// Turns whose summary was asked for (by key), so a turn's end seen twice asks once.
+    summarized: HashSet<String>,
 }
 
 /// The interface, kept idle while Chat shows (see `parked`).
@@ -254,6 +257,7 @@ impl AgentSession {
             parked: None,
             agent_parked_at: None,
             switches: 0,
+            summarized: HashSet::new(),
         }
     }
 
@@ -262,6 +266,7 @@ impl AgentSession {
     pub fn resumed(host: Arc<dyn Host>, backend: Arc<dyn Backend>, cwd: PathBuf, chat: Conversation, fork: bool) -> Self {
         let mut s = Self::new(host, backend, cwd);
         s.chat = chat;
+        s.attach_summaries();
         s.chat.process_ended();
         s.fork_next = fork;
         s.chat.push_notice(if fork {
@@ -1010,6 +1015,7 @@ impl AgentSession {
                 self.unseen = true;
                 if was_busy {
                     cx.emit(SessionEvent::TurnEnded);
+                    self.summarize_turn(cx);
                 }
                 if std::mem::take(&mut self.restart_after_turn) {
                     self.stop(cx);
@@ -1107,6 +1113,7 @@ impl AgentSession {
                 if applied.turn_ended {
                     self.find_command_changes(cx);
                     cx.emit(SessionEvent::TurnEnded);
+                    self.summarize_turn(cx);
                 }
             }
             Message::Log(line) => {
@@ -1165,6 +1172,57 @@ impl AgentSession {
             });
         })
         .detach();
+    }
+
+    /// Ask for the summary of the turn that just ended, when summaries are set up (see
+    /// [`keleuo_core::summary`]). A moment later, so the files commands changed are found and
+    /// a followed session file has caught up; off the UI thread; kept for when the session is
+    /// opened again.
+    fn summarize_turn(&mut self, cx: &mut Context<Self>) {
+        let config = cx.global::<crate::AppSettings>().0.borrow().summaries.clone();
+        if !config.ready() {
+            return;
+        }
+        let from = self.chat.turn_start();
+        cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            cx.background_executor().timer(std::time::Duration::from_secs(2)).await;
+            let asked = this.update(cx, |s, cx| {
+                let turn = summary::TurnText::of(&s.chat, from, &config)?;
+                let key = turn.key();
+                if !s.summarized.insert(key.clone()) {
+                    return None;
+                }
+                s.chat.set_summary(&key, summary::State::Pending);
+                cx.notify();
+                Some((turn, key, s.chat.session_id.clone()))
+            });
+            let Ok(Some((turn, key, session))) = asked else { return };
+            let result = cx.background_executor().spawn(async move { summary::summarize(&config, &turn) }).await;
+            let _ = this.update(cx, |s, cx| {
+                let state = match result {
+                    Ok(done) => {
+                        if let Some(id) = &session {
+                            summary::keep(id, &key, &done);
+                        }
+                        summary::State::Ready(done)
+                    }
+                    Err(e) => {
+                        eprintln!("keleuo: turn summary: {e:#}");
+                        summary::State::Failed(keleuo_core::conversation::one_line(&format!("{e:#}"), 160))
+                    }
+                };
+                s.chat.set_summary(&key, state);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Show the kept summaries of this session's turns.
+    pub fn attach_summaries(&mut self) {
+        if let Some(id) = self.chat.session_id.clone() {
+            self.chat.attach_summaries(&summary::cached(&id));
+        }
     }
 
     // ----- what the window asks -----

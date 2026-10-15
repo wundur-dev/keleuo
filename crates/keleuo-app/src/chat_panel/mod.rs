@@ -25,6 +25,7 @@ use keleuo_core::diff::{FileDiff, LineKind};
 use keleuo_core::links::{self, FileIndex};
 use keleuo_core::compose::{self, ListBreak};
 use keleuo_core::paste;
+use keleuo_core::summary;
 use keleuo_core::conversation::{one_line, to_markdown};
 
 mod agents;
@@ -314,6 +315,7 @@ impl ChatPanel {
                 let n = items.len();
                 let rev = p.session.update(cx, |s, _| {
                     s.chat.items.splice(ix..ix + 1, items);
+                    s.attach_summaries();
                     s.chat.revision += 1;
                     s.chat.revision
                 });
@@ -380,7 +382,9 @@ impl ChatPanel {
         let top = self.space_above(ix, cx);
         // The end-of-turn card, turned off in Settings: nothing, taking no room (but the last
         // entry keeps the gap at the bottom).
-        if matches!(item, Item::TurnChanges(_)) && !crate::prefs(cx).turn_card {
+        if (matches!(item, Item::TurnChanges(_)) && !crate::prefs(cx).turn_card)
+            || (matches!(item, Item::Summary { .. }) && !crate::summaries_on(cx))
+        {
             return div().when(last, |d| d.pb_4()).into_any_element();
         }
         if let Item::Earlier { from, to, .. } = item {

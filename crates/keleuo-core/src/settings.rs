@@ -177,6 +177,8 @@ pub struct Settings {
     /// Conversations that were working when Keleuo quit, to be told to carry on when it starts
     /// again (the person asked for it on quitting).
     pub continue_on_start: Vec<String>,
+    /// Turn summaries by a language model server (off until set up).
+    pub summaries: crate::summary::Config,
     #[serde(skip)]
     path: Option<PathBuf>,
 }

@@ -68,6 +68,11 @@ pub fn prefs(cx: &App) -> keleuo_core::settings::Prefs {
     cx.try_global::<AppSettings>().map(|s| s.0.borrow().prefs.clone()).unwrap_or_default()
 }
 
+/// Whether turn summaries are on (see [`keleuo_core::summary`]).
+pub fn summaries_on(cx: &App) -> bool {
+    cx.try_global::<AppSettings>().is_some_and(|s| s.0.borrow().summaries.enabled)
+}
+
 /// The command line as a request: which folder, on which machine, browse or start.
 fn parse_args() -> anyhow::Result<(instance::Request, Option<String>)> {
     let args: Vec<String> = std::env::args().skip(1).collect();

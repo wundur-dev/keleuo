@@ -16,7 +16,8 @@
 //! - [`symbols`]: a quick definition index for go to definition and outlines;
 //! - [`web`]: what an address typed in the Web panel means;
 //! - [`compose`]: writing a message (lists that continue on Shift+Enter);
-//! - [`outbox`]: messages sent while the agent works, waiting their turn.
+//! - [`outbox`]: messages sent while the agent works, waiting their turn;
+//! - [`summary`]: turn summaries from a language model server the person chose.
 
 pub mod acp;
 pub mod agent;
@@ -39,6 +40,7 @@ pub mod questions;
 pub mod settings;
 pub mod skills;
 pub mod slash;
+pub mod summary;
 pub mod symbols;
 pub mod tabs;
 pub mod term_history;

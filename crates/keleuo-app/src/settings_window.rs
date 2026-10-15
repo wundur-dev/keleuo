@@ -5,7 +5,9 @@
 use gpui_kit::component::setting::{
     NumberFieldOptions, SettingField, SettingGroup, SettingItem, SettingPage, Settings as SettingsView,
 };
-use gpui_kit::component::{ActiveTheme, IconName};
+use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
+use gpui_kit::component::{ActiveTheme, IconName, Sizable};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 use keleuo_core::settings::{Prefs, Settings, TERMINAL_FONT_SIZE, TERMINAL_FONT_SIZES};
@@ -251,8 +253,155 @@ fn notifications() -> SettingPage {
     )
 }
 
+/// The models the summary server offers, as last asked (for the model list).
+#[derive(Default)]
+struct ServerModels {
+    /// The address they were asked of.
+    endpoint: String,
+    /// `None` while asking.
+    answer: Option<Result<Vec<String>, String>>,
+}
+impl Global for ServerModels {}
+
+/// Ask the summary server for its models when its address changed since last asked.
+fn refresh_models(cx: &mut Context<SettingsWindow>) {
+    let endpoint = get(cx, |s| s.summaries.endpoint.trim().to_string());
+    if cx.try_global::<ServerModels>().is_some_and(|m| m.endpoint == endpoint) || endpoint.is_empty() {
+        return;
+    }
+    cx.set_global(ServerModels { endpoint: endpoint.clone(), answer: None });
+    cx.spawn(async move |_, cx: &mut AsyncApp| {
+        let asked = endpoint.clone();
+        let answer = cx
+            .background_executor()
+            .spawn(async move { keleuo_core::summary::models(&asked).map_err(|e| format!("{e:#}")) })
+            .await;
+        cx.update(|cx| {
+            if cx.global::<ServerModels>().endpoint == endpoint {
+                cx.set_global(ServerModels { endpoint, answer: Some(answer) });
+                cx.refresh_windows();
+            }
+        });
+    })
+    .detach();
+}
+
+/// Open the summary prompt in the window's editor (the shown session's, when it is on this
+/// machine), else in the system's editor for Markdown.
+fn edit_prompt(cx: &mut App) {
+    let path = match keleuo_core::summary::ensure_prompt_file() {
+        Ok(p) => p,
+        Err(e) => return eprintln!("keleuo: could not write the summary prompt: {e}"),
+    };
+    let target = cx.global::<crate::control::ControlTargets>().workspace.clone();
+    let opened = target.is_some_and(|(handle, shell)| {
+        handle
+            .update(cx, |_, window, cx| {
+                let ws = shell.upgrade().and_then(|s| s.read(cx).active_workspace());
+                match ws {
+                    Some(w) if !w.read(cx).host().is_remote() => {
+                        w.update(cx, |w, cx| w.open(path.clone(), None, false, true, window, cx));
+                        window.activate_window();
+                        true
+                    }
+                    _ => false,
+                }
+            })
+            .unwrap_or(false)
+    });
+    if !opened {
+        let _ = std::process::Command::new(if cfg!(windows) { "notepad" } else { "open" }).arg(&path).spawn();
+    }
+}
+
+fn summaries() -> SettingPage {
+    let summary_switch = |title: &'static str, description: &'static str, field: fn(&mut keleuo_core::summary::Config) -> &mut bool, default: bool| {
+        SettingItem::new(
+            title,
+            SettingField::switch(
+                move |cx: &App| get(cx, |s| *field(&mut s.summaries.clone())),
+                move |on: bool, cx: &mut App| change(cx, |s| *field(&mut s.summaries) = on),
+            )
+            .default_value(default),
+        )
+        .description(description)
+    };
+    SettingPage::new("Summaries").icon(IconName::BookOpen).resettable(true).groups([
+        SettingGroup::new()
+            .title("Turn summaries")
+            .description("When a turn ends, a language model you run (LM Studio, Ollama, llama.cpp: any server with the OpenAI API) sums it up: how it ended, what changed, how it was checked and what waits on you. It shows at the end of the turn and in the session list. Only this server gets anything.")
+            .items([
+                summary_switch("Summarize turns", "Ask the server below after each turn.", |c| &mut c.enabled, false),
+                SettingItem::new(
+                    "Server",
+                    SettingField::input(
+                        |cx: &App| get(cx, |s| SharedString::from(s.summaries.endpoint.clone())),
+                        |v: SharedString, cx: &mut App| change(cx, |s| s.summaries.endpoint = v.trim().to_string()),
+                    )
+                    .default_value("http://localhost:1234"),
+                )
+                .description("Its address, such as http://192.168.1.20:1234 (LM Studio) or http://localhost:11434 (Ollama)."),
+                SettingItem::new(
+                    "Model",
+                    SettingField::render(|_, _, cx: &mut App| {
+                        let theme = cx.theme();
+                        let (muted, red) = (theme.muted_foreground, theme.red);
+                        let current = get(cx, |s| s.summaries.model.clone());
+                        match cx.try_global::<ServerModels>().and_then(|m| m.answer.clone()) {
+                            None => div().text_xs().text_color(muted).child("Asking the server…").into_any_element(),
+                            Some(Err(e)) => div().max_w(px(260.)).text_xs().text_color(red).child(format!("Can't reach it: {e}")).into_any_element(),
+                            Some(Ok(models)) if models.is_empty() => {
+                                div().text_xs().text_color(muted).child("The server has no model loaded").into_any_element()
+                            }
+                            Some(Ok(models)) => {
+                                let label = if current.is_empty() { "Choose a model".to_string() } else { current.clone() };
+                                Button::new("summary-model")
+                                    .label(label)
+                                    .small()
+                                    .outline()
+                                    .dropdown_caret(true)
+                                    .dropdown_menu(move |mut m, _, _| {
+                                        for id in &models {
+                                            let pick = id.clone();
+                                            m = m.item(PopupMenuItem::new(id.clone()).checked(*id == current).on_click(
+                                                move |_, _, cx| change(cx, |s| s.summaries.model = pick.clone()),
+                                            ));
+                                        }
+                                        m
+                                    })
+                                    .into_any_element()
+                            }
+                        }
+                    }),
+                )
+                .description("The models the server has; one that runs fast is plenty."),
+            ]),
+        SettingGroup::new().title("What it gets").items([
+            summary_switch("The changed files' paths", "Paths only, never their contents. Keeps the Changed section true to what happened.", |c| &mut c.include_files, true),
+            summary_switch("A line per tool call", "Each call's tool and what it was about (a command, a file name), never its output.", |c| &mut c.include_tools, false),
+            summary_switch("Let the model think first", "For models that reason before answering: slower (seconds become half a minute), sometimes better.", |c| &mut c.thinking, false),
+        ]),
+        SettingGroup::new().title("Prompt").item(
+            SettingItem::new(
+                "Instructions",
+                SettingField::render(|_, _, _| {
+                    div()
+                        .flex()
+                        .gap_2()
+                        .child(Button::new("summary-prompt-edit").label("Edit prompt").small().outline().on_click(|_, _, cx| edit_prompt(cx)))
+                        .child(Button::new("summary-prompt-reset").label("Reset").small().ghost().on_click(|_, _, _| {
+                            let _ = keleuo_core::summary::reset_prompt();
+                        }))
+                }),
+            )
+            .description("What the model is told, as a Markdown file you can change. The summary keeps its fields (status, headline, changed, checked, needs you) whatever it says."),
+        ),
+    ])
+}
+
 impl Render for SettingsWindow {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        refresh_models(cx);
         div()
             .size_full()
             .bg(cx.theme().background)
@@ -262,7 +411,7 @@ impl Render for SettingsWindow {
             .child(
                 SettingsView::new("keleuo-settings")
                     .sidebar_width(px(200.))
-                    .pages([general(), chat(), terminals(), notifications()]),
+                    .pages([general(), chat(), terminals(), notifications(), summaries()]),
             )
     }
 }

@@ -108,6 +108,9 @@ pub enum Item {
     AgentMessage { from: String, agent: Option<String>, title: String, text: String },
     /// The files the turn just ended changed: the end-of-turn card.
     TurnChanges(Vec<crate::changes::FileChange>),
+    /// A turn's summary (see [`crate::summary`]), at the end of its turn, above its card of
+    /// changes. `key`: the turn's (see [`crate::summary::TurnText::key`]).
+    Summary { key: String, state: crate::summary::State },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -456,6 +459,62 @@ impl Conversation {
             None => self.items.push(Item::TurnChanges(changes)),
         }
         self.revision += 1;
+    }
+
+    /// Where the turn starting at `from` ends (the next message, or the end).
+    pub fn turn_end(&self, from: usize) -> usize {
+        self.items.iter().skip(from + 1).position(|i| matches!(i, Item::User(_))).map_or(self.items.len(), |p| from + 1 + p)
+    }
+
+    /// Show a turn's summary: the turn whose key is `key` (found again by it: the chat may
+    /// have moved on, or earlier history been read in, since it was asked for). Nothing when
+    /// the turn is gone.
+    pub fn set_summary(&mut self, key: &str, state: crate::summary::State) {
+        if let Some(Item::Summary { state: s, .. }) =
+            self.items.iter_mut().find(|i| matches!(i, Item::Summary { key: k, .. } if k == key))
+        {
+            *s = state;
+            self.revision += 1;
+            return;
+        }
+        let starts: Vec<usize> = self.items.iter().enumerate().filter(|(_, i)| matches!(i, Item::User(_))).map(|(ix, _)| ix).collect();
+        let Some(from) = starts.into_iter().rev().find(|&from| crate::summary::TurnText::key_at(self, from).as_deref() == Some(key))
+        else {
+            return;
+        };
+        let end = self.turn_end(from);
+        let at = self.items[from..end].iter().position(|i| matches!(i, Item::TurnChanges(_))).map_or(end, |p| from + p);
+        self.items.insert(at, Item::Summary { key: key.to_string(), state });
+        self.revision += 1;
+    }
+
+    /// Show the kept summaries of the turns they belong to (a session read back from its file).
+    pub fn attach_summaries(&mut self, kept: &std::collections::BTreeMap<String, crate::summary::TurnSummary>) {
+        if kept.is_empty() {
+            return;
+        }
+        let starts: Vec<usize> = self.items.iter().enumerate().filter(|(_, i)| matches!(i, Item::User(_))).map(|(ix, _)| ix).collect();
+        for from in starts.into_iter().rev() {
+            let end = self.turn_end(from);
+            if self.items[from..end].iter().any(|i| matches!(i, Item::Summary { .. })) {
+                continue;
+            }
+            if let Some(key) = crate::summary::TurnText::key_at(self, from)
+                && let Some(s) = kept.get(&key)
+            {
+                let at = self.items[from..end].iter().position(|i| matches!(i, Item::TurnChanges(_))).map_or(end, |p| from + p);
+                self.items.insert(at, Item::Summary { key, state: crate::summary::State::Ready(s.clone()) });
+                self.revision += 1;
+            }
+        }
+    }
+
+    /// The latest turn's summary, once it is there.
+    pub fn last_summary(&self) -> Option<&crate::summary::TurnSummary> {
+        self.items[self.turn_start()..].iter().find_map(|i| match i {
+            Item::Summary { state: crate::summary::State::Ready(s), .. } => Some(s),
+            _ => None,
+        })
     }
 
     /// The files the agent's edit tools changed in the turn starting at `turn`.
@@ -899,6 +958,8 @@ pub fn to_markdown(items: &[Item], agent: &str) -> String {
                 format!("- Permission for **{}** {}: {answer}", p.tool_name, one_line(&p.summary, 120))
             }
             Item::Notice(text) => format!("*{}*", text.trim()),
+            // Keleuo's own note, not part of the conversation.
+            Item::Summary { .. } => continue,
             Item::TurnChanges(changes) => {
                 let names: Vec<String> = changes.iter().map(|c| format!("`{}`", c.path.display())).collect();
                 format!("*Changed {}: {}*", plural(changes.len(), "file"), names.join(", "))

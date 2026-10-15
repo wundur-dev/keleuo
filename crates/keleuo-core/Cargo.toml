@@ -22,6 +22,8 @@ base64 = "0.22"
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 # Cursor names its chat folders by the md5 of the project path.
 md5 = { package = "md-5", version = "0.10" }
+# Turn summaries ask a language model server (OpenAI-compatible: LM Studio, Ollama, llama.cpp).
+ureq = { version = "3", features = ["json"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

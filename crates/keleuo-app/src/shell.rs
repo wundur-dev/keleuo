@@ -1316,6 +1316,7 @@ impl Shell {
         let theme = cx.theme();
         let (fg, muted, border, hover, ring, bg, sel) =
             (theme.foreground, theme.muted_foreground, theme.border, theme.secondary_hover, theme.ring, theme.sidebar, theme.secondary);
+        let (yellow, red, blue) = (theme.yellow, theme.red, theme.blue);
         let mut col = div().id("session-list").flex_1().min_h_0().flex().flex_col().overflow_y_scroll();
         for ix in 0..self.tabs.len() {
             let active = ix == self.active && self.browser.is_none();
@@ -1330,6 +1331,11 @@ impl Shell {
             let place = if w.host().is_remote() { format!("{}: {place}", w.host().label()) } else { place };
             let worktree = w.worktree.clone();
             let activity = s.chat.last_activity(80);
+            // Once a turn is over and summarised: its headline, how it ended when it needs the
+            // person or went wrong.
+            let summary = (!s.chat.busy && !s.chat.needs_input() && crate::summaries_on(cx))
+                .then(|| s.chat.last_summary().cloned())
+                .flatten();
             let cost = s.spend(cx).map(|sp| sp.short());
             let short_id = s.chat.session_id.clone();
             let dot = self.dot(ix, cx);
@@ -1395,7 +1401,26 @@ impl Shell {
                                         div().flex_none().px_1().rounded_sm().bg(border).text_size(px(10.)).child("worktree")
                                     })),
                             )
-                            .children(activity.map(|a| div().text_size(px(11.)).text_color(muted.opacity(0.8)).truncate().child(a))),
+                            .children(match summary {
+                                Some(sm) => {
+                                    use keleuo_core::summary::Status;
+                                    let tone = match sm.status {
+                                        Status::NeedsYou => Some(yellow),
+                                        Status::Failed => Some(red),
+                                        Status::Partial => Some(blue),
+                                        Status::Done => None,
+                                    };
+                                    Some(
+                                        div()
+                                            .flex()
+                                            .gap_1()
+                                            .text_size(px(11.))
+                                            .children(tone.map(|t| div().flex_none().text_color(t).child(sm.status.label())))
+                                            .child(div().min_w_0().truncate().text_color(muted.opacity(0.9)).child(sm.headline)),
+                                    )
+                                }
+                                None => activity.map(|a| div().flex().text_size(px(11.)).text_color(muted.opacity(0.8)).child(div().min_w_0().truncate().child(a))),
+                            }),
                     )
                     .on_click(cx.listener(move |s, ev: &ClickEvent, window, cx| {
                         if ev.click_count() >= 2 {
