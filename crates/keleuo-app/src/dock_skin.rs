@@ -267,7 +267,7 @@ impl SheetGroup {
     /// tool panels are neither closed nor zoomed, so it would be empty.)
     fn header(&self, group: &TabGroupContext, window: &mut Window, cx: &mut App) -> AnyElement {
         let theme = cx.theme();
-        // The tool panels' light grey, as the panel below it: the bold title marks it.
+        // The tool panels' light grey, as the panel below it.
         let (bar, border, fg, muted) = (crate::theme::tool_ground(cx), theme.border, theme.foreground, theme.muted_foreground);
         let Some(ix) = shown_ix(group, cx) else {
             return div().into_any_element();
@@ -292,8 +292,8 @@ impl SheetGroup {
                     div()
                         .min_w_0()
                         .truncate()
-                        .text_size(px(17.))
-                        .font_weight(FontWeight::BOLD)
+                        // As a sidebar's labels read (Codex's): regular weight, a little large.
+                        .text_size(px(15.))
                         .text_color(fg)
                         .child(title),
                 ),

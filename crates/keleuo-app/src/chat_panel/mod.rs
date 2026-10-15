@@ -550,17 +550,20 @@ impl ChatPanel {
         );
         let backend_name = session.backend.name();
         let weak = cx.entity().downgrade();
+        // As tall as a tool panel's title bar, a hairline under it.
         div()
-            .h(px(22.))
+            .h(px(crate::dock_skin::HEADER_HEIGHT))
             .flex_none()
-            .px_1()
+            .px(px(10.))
             .flex()
             .items_center()
-            .gap_1()
-            .text_size(px(11.))
+            .gap(px(6.))
+            .text_size(px(13.))
             .text_color(muted)
             .bg(cx.theme().background)
-            .child(Icon::new(IconName::Bot).xsmall())
+            .border_b_1()
+            .border_color(cx.theme().border)
+            .child(Icon::new(IconName::Bot).small())
             .child(
                 div()
                     .flex_1()
