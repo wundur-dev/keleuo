@@ -200,10 +200,9 @@ impl ChatPanel {
                                     if shown {
                                         ticks = ticks.wrapping_add(1);
                                         // The working line turns on every tick, drawn apart from
-                                        // the chat; the chat's own clocks (running calls, agents)
-                                        // move once a second.
-                                        // The system turns its own spinner: the ticker only
-                                        // moves the clocks, once a second.
+                                        // the chat (where the system turns its own spinner, it
+                                        // needs no tick); the chat's own clocks (running calls,
+                                        // agents) move once a second.
                                         if !native && p.working_label(cx).is_some() {
                                             p.pulse.update(cx, |pulse, cx| {
                                                 pulse.0 = pulse.0.wrapping_add(1);
@@ -320,8 +319,16 @@ impl ChatPanel {
         if len < self.list_len {
             self.list.reset(len);
         } else {
+            // Measured again in place: their heights stay as hints and the scroll position
+            // stays where it was (replacing them dropped both, and reading higher up while a
+            // reply streamed could jump).
             let from = self.list_len.saturating_sub(TAIL);
-            self.list.splice(from..self.list_len, len - from);
+            if from < self.list_len {
+                self.list.remeasure_items(from..self.list_len);
+            }
+            if len > self.list_len {
+                self.list.splice(self.list_len..self.list_len, len - self.list_len);
+            }
         }
         self.list_len = len;
     }

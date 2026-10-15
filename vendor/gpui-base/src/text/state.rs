@@ -144,6 +144,8 @@ pub struct TextViewState {
     revision: usize,
     /// The revision of the update `parsed_content` was committed from.
     committed_revision: usize,
+    /// Inside [`Self::set_element_text`]: the text arrives as the element draws.
+    in_element: bool,
     /// The revision of the last update that replaced the text rather than
     /// appending to it.
     full_update_revision: usize,
@@ -228,6 +230,7 @@ impl TextViewState {
             element_text: None,
             revision: 0,
             committed_revision: 0,
+            in_element: false,
             full_update_revision: 0,
             rendered_index: Arc::default(),
             range_highlights: None,
@@ -338,7 +341,12 @@ impl TextViewState {
             return;
         }
         self.element_text = Some(text.clone());
+        // Called while the element draws: what is parsed now is drawn in this frame. Notifying
+        // here would mark the view for the next frame, whatever brings it, and every frame
+        // after a streamed piece would draw the view and all around it again.
+        self.in_element = true;
         self.set_text(text, cx);
+        self.in_element = false;
     }
 
     /// Append partial text content to the existing text.
@@ -539,7 +547,9 @@ impl TextViewState {
                 self.parsed_content = content;
                 self.compatible_layout_update = true;
                 _ = self.tx.try_send(update_options);
-                cx.notify();
+                if !self.in_element {
+                    cx.notify();
+                }
                 return;
             }
         }
@@ -572,7 +582,9 @@ impl TextViewState {
             // later append extends this baseline instead of parsing the delta
             // as a standalone document.
             _ = self.tx.try_send(update_options);
-            cx.notify();
+            if !self.in_element {
+                cx.notify();
+            }
             return;
         }
 

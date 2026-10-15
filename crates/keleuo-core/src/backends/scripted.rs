@@ -174,16 +174,25 @@ impl Turn {
             std::thread::sleep(Duration::from_secs(secs));
         }
         send(Event::TextStart);
-        // "stream N": a long reply in N pieces, as an agent writes one (paragraphs, file paths,
-        // lists, code), to measure the chat while it streams.
-        let pieces = self.text.strip_prefix("stream ").and_then(|r| r.split_whitespace().next()?.parse::<usize>().ok());
+        // "stream N [MS]": a long reply in N pieces, as an agent writes one (paragraphs, file
+        // paths, lists, code), a piece every MS milliseconds (else at the usual pace), to
+        // measure the chat while it streams.
+        let mut words = self.text.strip_prefix("stream ").unwrap_or_default().split_whitespace();
+        let pieces = words.next().and_then(|n| n.parse::<usize>().ok());
+        let pace = words.next().and_then(|ms| ms.parse::<u64>().ok()).map(Duration::from_millis);
         let said = match pieces {
             Some(n) => {
                 let mut said = String::new();
                 for i in 0..n {
                     let piece = STREAM_PIECES[i % STREAM_PIECES.len()];
                     said.push_str(piece);
-                    send(Event::TextDelta(piece.to_string()));
+                    match pace {
+                        Some(pace) => {
+                            std::thread::sleep(pace);
+                            sink(Message::Event(Event::TextDelta(piece.to_string())));
+                        }
+                        None => send(Event::TextDelta(piece.to_string())),
+                    }
                 }
                 said
             }

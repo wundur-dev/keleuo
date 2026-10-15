@@ -98,6 +98,9 @@ impl Spend {
     }
 }
 
+/// The least time between two batches of the agent's messages (see `listen`).
+const BATCH_EVERY: std::time::Duration = std::time::Duration::from_millis(100);
+
 /// Seconds to wait for the interface to say it is up before pointing to the terminal.
 const ASK_AFTER_SECS: u64 = 6;
 
@@ -1159,6 +1162,11 @@ impl AgentSession {
                 if ok.is_err() {
                     break;
                 }
+                // What arrives in the next tenth of a second is taken as one batch: a reply can
+                // stream in dozens of pieces a second, and each change of the session draws the
+                // window (the chat, its row, the working line) again. The first piece after a
+                // quiet spell still shows at once.
+                cx.background_executor().timer(BATCH_EVERY).await;
             }
         })
     }
