@@ -7,7 +7,7 @@
 //! placeholders, the zoom and close actions) to the stock `DockSkin`, and draws tab groups
 //! itself:
 //!
-//! - a group of tool panels (Files, Skills, Terminals, Agent) gets a title bar: a grip to drag
+//! - a group of tool panels (Files, Skills, Changes, Agent) gets a title bar: a grip to drag
 //!   it by, the shown panel's title and actions, and its options on hover. With several panels
 //!   in one group their tabs run along the bottom as sheet tabs joined to the content above;
 //! - any other group (files, terminals, the chat) keeps its tabs on top, as sheet tabs standing
@@ -33,7 +33,7 @@ use gpui_kit::base::TestSupportExt;
 use crate::sheet_tabs::{self, Joined, Palette, StripState};
 
 /// The panels that are tools (lists beside the work) rather than documents.
-const TOOLS: [&str; 3] = ["Files", "Skills", "Agent"];
+const TOOLS: [&str; 4] = ["Files", "Skills", "Changes", "Agent"];
 
 /// A tool group's title bar.
 pub const HEADER_HEIGHT: f32 = 26.;

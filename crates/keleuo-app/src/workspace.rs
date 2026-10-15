@@ -413,17 +413,21 @@ impl Workspace {
         let center = DockLayout::h_split()
             .child(claude, Some(px(settings.claude_width)))
             .child(code, None);
-        // Two groups of tool panels: what you look things up in (files, skills), and what is
-        // running (the agent's subagents; terminals are tabs among the documents). Panels the
+        // Two groups of tool panels: the folder (files, changes), and the agent (its subagents,
+        // then its skills; terminals are tabs among the documents). Panels the
         // backend has no use for are left out.
         let caps = self.session.read(cx).backend.capabilities();
-        let mut look = DockLayout::tabs().panel_view(panel_handle(self.files.clone()), cx);
-        if caps.skills {
-            look = look.panel_view(panel_handle(self.skills.clone()), cx);
+        let look = DockLayout::tabs()
+            .panel_view(panel_handle(self.files.clone()), cx)
+            .panel_view(panel_handle(self.changes.clone()), cx);
+        let mut running = DockLayout::tabs();
+        if caps.subagents {
+            running = running.panel_view(panel_handle(self.agent_side.clone()), cx);
         }
-        look = look.panel_view(panel_handle(self.changes.clone()), cx);
-        let left = if caps.subagents {
-            let running = DockLayout::tabs().panel_view(panel_handle(self.agent_side.clone()), cx);
+        if caps.skills {
+            running = running.panel_view(panel_handle(self.skills.clone()), cx);
+        }
+        let left = if caps.subagents || caps.skills {
             DockLayout::v_split().child(look, None).child(running, Some(px(300.)))
         } else {
             DockLayout::v_split().child(look, None)
@@ -504,18 +508,18 @@ impl Workspace {
             });
         }
         // A layout saved while the backend had no skills (Cursor before it had them): Skills
-        // joins the Files group, right after Files.
+        // joins the Agent group as its last tab, or the Files group when there is no Agent.
         let skills = PanelId::from(self.skills.entity_id());
-        let files = PanelId::from(self.files.entity_id());
         if self.session.read(cx).backend.capabilities().skills
             && !self.in_dock(skills, cx)
-            && let Some(node) = self.find_node(files, cx)
+            && let Some(node) = self
+                .find_node(PanelId::from(self.agent_side.entity_id()), cx)
+                .or_else(|| self.find_node(PanelId::from(self.files.entity_id()), cx))
         {
-            let ix = self.group_panels(node, cx).iter().position(|p| *p == files).map(|i| i + 1);
             let view = panel_handle(self.skills.clone());
             self.dock.update(cx, |a, cx| {
                 a.add_panel_view(view, DockPlacement::Center, None, window, cx);
-                a.move_panel(skills, InsertTarget::Tabs { node, ix, activate: false }, window, cx);
+                a.move_panel(skills, InsertTarget::Tabs { node, ix: None, activate: false }, window, cx);
             });
         }
         if !self.in_dock(PanelId::from(self.claude.entity_id()), cx) {
