@@ -172,6 +172,61 @@ impl Agent for CursorAcpAgent {
     }
 }
 
+/// Chat `id` of `project` as Cursor replays it over ACP (`session/load` streams the whole
+/// conversation): what a reopened session shows when Cursor's record cannot be read here, as
+/// on another machine, where copying the record over would mean megabytes of file snapshots.
+/// Starts Cursor for the moment it takes.
+pub fn replay(host: &dyn Host, project: &std::path::Path, id: &str) -> anyhow::Result<Vec<Event>> {
+    let spec = host.program_command(&ProgramSpec { program: "cursor-agent".into(), args: vec!["acp".into()], cwd: project.to_path_buf(), ..Default::default() });
+    let updates: Arc<Mutex<Vec<Value>>> = Arc::default();
+    let u = updates.clone();
+    let conn = Connection::spawn(&spec, move |m| {
+        if let Incoming::Notification { method, mut params } = m
+            && method == "session/update"
+        {
+            u.lock().unwrap().push(params["update"].take());
+        }
+    })?;
+    conn.call("initialize", acp::initialize_params())?;
+    // A chat started in Terminal is found through the link.
+    let _ = super::store::share(host, project, id);
+    let loaded = conn.call("session/load", json!({"sessionId": id, "cwd": project.to_string_lossy(), "mcpServers": []}));
+    conn.kill();
+    loaded?;
+    let mut mapper = acp::map::Mapper::default();
+    let mut events: Vec<Event> = updates.lock().unwrap().iter().flat_map(|u| mapper.update(u).unwrap_or_default()).collect();
+    events.extend(mapper.finish());
+    // Pieces of each reply as whole replies (a replay is finished text, not a stream).
+    Ok(whole_replies(events))
+}
+
+/// Streamed reply pieces (`TextStart`, `TextDelta`...) as one `Text` each.
+fn whole_replies(events: Vec<Event>) -> Vec<Event> {
+    let mut out = Vec::new();
+    let mut text: Option<String> = None;
+    for e in events {
+        match e {
+            Event::TextStart => {
+                if let Some(t) = text.take() {
+                    out.push(Event::Text { text: t, parent: None });
+                }
+                text = Some(String::new());
+            }
+            Event::TextDelta(d) => text.get_or_insert_with(String::new).push_str(&d),
+            other => {
+                if let Some(t) = text.take() {
+                    out.push(Event::Text { text: t, parent: None });
+                }
+                out.push(other);
+            }
+        }
+    }
+    if let Some(t) = text {
+        out.push(Event::Text { text: t, parent: None });
+    }
+    out
+}
+
 /// Initialize, then continue the chat (`options.resume`) or start one, in the mode and with
 /// the model asked for.
 fn open_session(conn: &Connection, state: &Shared, options: &StartOptions, host: &dyn Host, sink: &Sink) -> anyhow::Result<()> {
@@ -511,5 +566,37 @@ mod tests {
         assert_eq!(third.last(), Some(&Event::Interrupted));
         agent.stop();
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_replay_reads_as_whole_replies() {
+        let events = vec![
+            Event::UserText("hi".into()),
+            Event::TextStart,
+            Event::TextDelta("Hel".into()),
+            Event::TextDelta("lo.".into()),
+            Event::ToolCall { id: "t".into(), name: "Read".into(), summary: String::new(), input: Value::Null, diff: None, parent: None },
+            Event::TextStart,
+            Event::TextDelta("Done.".into()),
+        ];
+        let out = whole_replies(events);
+        assert_eq!(out[1], Event::Text { text: "Hello.".into(), parent: None });
+        assert!(matches!(out[2], Event::ToolCall { .. }));
+        assert_eq!(out[3], Event::Text { text: "Done.".into(), parent: None });
+    }
+
+    /// A chat replayed by the real `cursor-agent acp` (set KELEUO_REPLAY="<folder>|<id>").
+    /// `KELEUO_REPLAY=... cargo test -p keleuo-core replay_for_real -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn replay_for_real() {
+        let want = std::env::var("KELEUO_REPLAY").expect("KELEUO_REPLAY=<folder>|<id>");
+        let (folder, id) = want.split_once('|').unwrap();
+        let events = replay(&crate::host::LocalHost, std::path::Path::new(folder), id).unwrap();
+        let chat = crate::backends::cursor::store::conversation(folder, id, events);
+        for item in &chat.items {
+            eprintln!("{}", format!("{item:?}").chars().take(120).collect::<String>());
+        }
+        assert!(chat.items.iter().any(|i| matches!(i, crate::conversation::Item::User(_))));
     }
 }

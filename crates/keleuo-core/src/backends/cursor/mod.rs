@@ -158,7 +158,28 @@ impl Backend for CursorBackend {
     /// layout it does not know yet), the session opens with no earlier messages and a note;
     /// its next message still continues the chat.
     fn load_session(&self, host: &dyn Host, project: &Path, id: &str) -> std::io::Result<Conversation> {
-        match store::load(host, project, id) {
+        // Here Cursor's record reads at once; on another machine it would be copied over
+        // (megabytes of file snapshots), so Cursor replays the chat there instead. Each is the
+        // other's fallback.
+        let from_replay = || -> anyhow::Result<Conversation> {
+            let events = acp::replay(host, project, id)?;
+            anyhow::ensure!(events.iter().any(|e| matches!(e, Event::UserText(_))), "no messages found");
+            Ok(store::conversation(&project.to_string_lossy(), id, events))
+        };
+        let loaded = if host.is_remote() {
+            from_replay().or_else(|e| store::load(host, project, id).map_err(|e2| anyhow::anyhow!("{e}; {e2}")))
+        } else {
+            // Only a record none of the readers understands (Cursor changed its layout) is
+            // worth starting Cursor for; an empty or missing one has nothing to replay.
+            store::load(host, project, id).or_else(|e| {
+                if e.to_string().contains("reader v") && !e.to_string().contains("no messages found") {
+                    from_replay().map_err(|e2| anyhow::anyhow!("{e}; {e2}"))
+                } else {
+                    Err(e)
+                }
+            })
+        };
+        match loaded {
             Ok(chat) => Ok(chat),
             Err(e) => {
                 let mut chat = Conversation::new(project.to_string_lossy());
