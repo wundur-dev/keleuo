@@ -56,6 +56,9 @@ pub enum Event {
     ToolCall { id: String, name: String, summary: String, input: Value, diff: Option<FileDiff>, parent: Option<String> },
     /// A tool's result. `diff` and `file_changed`: what it changed.
     ToolResult { id: String, output: String, is_error: bool, diff: Option<FileDiff>, file_changed: Option<PathBuf>, parent: Option<String> },
+    /// Images a tool call returned (a Read of an image file), as files in the session's image
+    /// folder: shown with the call.
+    ToolImages { id: String, images: Vec<PathBuf> },
     /// The agent asks before doing something.
     Permission { request_id: String, tool: String, summary: String, description: Option<String>, input: Value },
     /// A subagent began (`id` is the tool call that started it).

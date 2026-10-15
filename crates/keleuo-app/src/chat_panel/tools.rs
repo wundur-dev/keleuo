@@ -423,6 +423,31 @@ impl ChatPanel {
             .bg(card_bg.opacity(0.5))
             .overflow_hidden()
             .child(header);
+        // Images it returned (a screenshot it looked at): thumbnails, open or not; a click shows
+        // one full size.
+        if !tool.images.is_empty() {
+            let mut row = div().px_2().py(px(6.)).flex().flex_wrap().gap_2();
+            for (n, path) in tool.images.iter().enumerate() {
+                let p = path.clone();
+                row = row.child(
+                    div()
+                        .id(SharedString::from(format!("tool-img-{}-{n}", tool.id)))
+                        .w(px(160.))
+                        .h(px(110.))
+                        .rounded(px(8.))
+                        .overflow_hidden()
+                        .border_1()
+                        .border_color(border)
+                        .cursor_pointer()
+                        .child(img(path.clone()).size_full().object_fit(ObjectFit::Contain))
+                        .on_click(cx.listener(move |panel, _, _, cx| {
+                            panel.preview = Some(p.clone());
+                            cx.notify();
+                        })),
+                );
+            }
+            card = card.child(row);
+        }
         // A known needless failure: what happened, and a way to stop it happening again.
         if let Some(issue) = &tool.issue {
             card = card.child(self.render_issue_notice(&tool.id, issue, cx));

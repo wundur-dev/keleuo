@@ -499,8 +499,8 @@ fn subagent_line_events(v: &Value, tool_use_id: &str, mapper: &mut Mapper) -> Ve
         (Some("assistant"), stream::Event::Assistant { message_id, model, blocks, .. }) => {
             stream::Event::Assistant { message_id, model, blocks, parent_tool_use_id: parent, context_tokens: None }
         }
-        (Some("user"), stream::Event::ToolResult { tool_use_id: id, content, is_error, structured, .. }) => {
-            stream::Event::ToolResult { tool_use_id: id, content, is_error, structured, parent_tool_use_id: parent }
+        (Some("user"), stream::Event::ToolResult { tool_use_id: id, content, is_error, structured, images, .. }) => {
+            stream::Event::ToolResult { tool_use_id: id, content, is_error, structured, parent_tool_use_id: parent, images }
         }
         _ => return Vec::new(),
     };

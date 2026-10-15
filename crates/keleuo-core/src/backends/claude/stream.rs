@@ -68,6 +68,8 @@ pub enum Event {
         structured: Option<Value>,
         /// The subagent's Agent or Task tool call, when a subagent made the call.
         parent_tool_use_id: Option<String>,
+        /// Images in the result (a Read of an image file), stored in the session's image folder.
+        images: Vec<std::path::PathBuf>,
     },
     /// A user message echoed back (with `--replay-user-messages`) or sent by Claude Code.
     UserText(String),
@@ -339,6 +341,7 @@ fn parse_user(v: &Value) -> Event {
                     .get("parent_tool_use_id")
                     .and_then(Value::as_str)
                     .map(str::to_string),
+                images: result_images(v, block.get("content").unwrap_or(&Value::Null)),
             };
         }
     }
@@ -352,6 +355,27 @@ fn parse_user(v: &Value) -> Event {
     } else {
         Event::UserText(text.join("\n"))
     }
+}
+
+/// The images in a tool result's content, stored in the session's image folder (named by
+/// their content, so a result read again is stored once).
+fn result_images(line: &Value, content: &Value) -> Vec<std::path::PathBuf> {
+    let Some(items) = content.as_array() else { return Vec::new() };
+    if !items.iter().any(|i| i.get("type").and_then(Value::as_str) == Some("image")) {
+        return Vec::new();
+    }
+    let session = line.get("session_id").or_else(|| line.get("sessionId")).and_then(Value::as_str);
+    let Some(dir) = crate::images::session_dir(session) else { return Vec::new() };
+    items
+        .iter()
+        .filter(|i| i.get("type").and_then(Value::as_str) == Some("image"))
+        .filter_map(|i| {
+            let source = i.get("source")?;
+            let data = crate::images::base64(source.get("data")?.as_str()?)?;
+            let ext = crate::images::extension(source.get("media_type").and_then(Value::as_str).unwrap_or("image/png"));
+            crate::images::store(&dir, &data, ext).ok()
+        })
+        .collect()
 }
 
 /// A tool result's content is a string or a list of `{type: text, text}` blocks.
@@ -472,6 +496,25 @@ mod tests {
                 assert_eq!(content, "a\n[image]");
                 assert!(!is_error);
                 assert_eq!(structured, None);
+            }
+            e => panic!("{e:?}"),
+        }
+    }
+
+    #[test]
+    fn images_in_a_tool_result_are_kept() {
+        let session = format!("keleuo-test-tool-images-{}", std::process::id());
+        let line = format!(
+            r#"{{"type":"user","session_id":"{session}","message":{{"content":[{{"type":"tool_result","tool_use_id":"t","content":[{{"type":"image","source":{{"type":"base64","media_type":"image/png","data":"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg=="}}}}]}}]}}}}"#
+        );
+        match parse_line(&line).unwrap() {
+            Event::ToolResult { images, content, .. } => {
+                assert_eq!(content, "[image]");
+                assert_eq!(images.len(), 1);
+                assert!(images[0].exists() && images[0].extension().is_some_and(|e| e == "png"));
+                if let Some(dir) = images[0].parent() {
+                    let _ = std::fs::remove_dir_all(dir);
+                }
             }
             e => panic!("{e:?}"),
         }

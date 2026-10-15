@@ -123,7 +123,7 @@ impl Mapper {
                 }
                 out
             }
-            Raw::ToolResult { tool_use_id, content, is_error, structured, parent_tool_use_id } => {
+            Raw::ToolResult { tool_use_id, content, is_error, structured, parent_tool_use_id, images } => {
                 let (name, input) = self.tools.get(&tool_use_id).cloned().unwrap_or_default();
                 let diff = if is_error { None } else { diff::from_tool(&name, &input, structured.as_ref()) };
                 let file_changed = diff.as_ref().map(|d| d.path.clone());
@@ -158,6 +158,9 @@ impl Mapper {
                 });
                 if let Some(issue) = issue {
                     out.push(Event::ToolIssue { id: tool_use_id.clone(), issue });
+                }
+                if !images.is_empty() {
+                    out.push(Event::ToolImages { id: tool_use_id.clone(), images });
                 }
                 if is_agent_tool(&name) && !background {
                     out.push(Event::SubagentEnded {

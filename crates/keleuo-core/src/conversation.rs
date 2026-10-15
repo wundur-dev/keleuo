@@ -42,6 +42,8 @@ pub struct ToolCall {
     pub live: Option<String>,
     /// It failed in a known way, with fixes to offer.
     pub issue: Option<Box<crate::agent::Issue>>,
+    /// Images it returned (see [`Event::ToolImages`]).
+    pub images: Vec<PathBuf>,
 }
 
 impl ToolCall {
@@ -706,6 +708,7 @@ impl Conversation {
                     duration_ms: None,
                     live: None,
                     issue: None,
+                    images: Vec::new(),
                 });
                 match parent {
                     Some(p) => {
@@ -783,6 +786,11 @@ impl Conversation {
             Event::ToolIssue { id, issue } => {
                 if let Some(tool) = self.tool_mut(&id) {
                     tool.issue = Some(Box::new(issue));
+                }
+            }
+            Event::ToolImages { id, images } => {
+                if let Some(tool) = self.tool_mut(&id) {
+                    tool.images = images;
                 }
             }
             Event::ToolOutput { id, text } => {
@@ -1038,10 +1046,10 @@ pub fn shell_command(code: &str) -> Option<String> {
 /// How many tool calls in a row the chat shows as one group.
 pub const TOOL_RUN: usize = 2;
 
-/// Whether a call can be folded into a group at all: a failed call and an edit with its diff
-/// stay in view (what went wrong, and the work itself).
+/// Whether a call can be folded into a group at all: a failed call, an edit with its diff and a
+/// call that returned images stay in view (what went wrong, the work itself, what it saw).
 pub fn foldable(t: &ToolCall) -> bool {
-    !t.is_error && t.diff.is_none()
+    !t.is_error && t.diff.is_none() && t.images.is_empty()
 }
 
 /// The run of tool calls item `ix` belongs to, when it is in one: [`TOOL_RUN`] or more
@@ -1128,6 +1136,7 @@ mod tool_run_tests {
             duration_ms: None,
             live: None,
             issue: None,
+            images: Vec::new(),
         })
     }
 

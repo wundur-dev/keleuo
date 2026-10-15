@@ -1564,8 +1564,16 @@ impl Workspace {
                         _ => None,
                     })
                     .collect();
+                let images: Vec<String> = c
+                    .items
+                    .iter()
+                    .filter_map(|i| match i {
+                        keleuo_core::conversation::Item::Tool(t) if !t.images.is_empty() => Some(format!("{}:{}", t.name, t.images.len())),
+                        _ => None,
+                    })
+                    .collect();
                 return format!(
-                    "view={:?} busy={} items={} agents={} tokens={:?} cost={:.4} session={:?} last={:?} edits={:?}",
+                    "view={:?} busy={} items={} agents={} tokens={:?} cost={:.4} session={:?} last={:?} edits={:?} images={images:?}",
                     s.view,
                     c.busy,
                     c.items.len(),
