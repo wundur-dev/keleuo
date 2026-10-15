@@ -139,7 +139,9 @@ impl Backend for CursorBackend {
         if let Some(known) = self.models.lock().unwrap().clone() {
             return known;
         }
-        let spec = ProgramSpec { program: "cursor-agent".into(), args: vec!["models".into()], ..Default::default() };
+        // Run from the home folder: a program cannot start in an empty one.
+        let cwd = host.home_dir().unwrap_or_else(|| PathBuf::from("/"));
+        let spec = ProgramSpec { program: "cursor-agent".into(), args: vec!["models".into()], cwd, ..Default::default() };
         let Ok(out) = host.program_command(&spec).to_command().stdin(Stdio::null()).output() else { return Vec::new() };
         let models = parse_models(&String::from_utf8_lossy(&out.stdout));
         if !models.is_empty() {
@@ -636,5 +638,16 @@ mod tests {
         assert_eq!(users, ["Reply with just: two"]);
         assert!(got.iter().any(|e| matches!(e, Event::Text { text, .. } if text.to_lowercase().contains("two"))));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The model list as the window gets it, from the real `cursor-agent` (signed in).
+    /// `cargo test -p keleuo-core models_for_real -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn models_for_real() {
+        let models = CursorBackend::default().list_models(&crate::host::LocalHost);
+        eprintln!("{} models", models.len());
+        assert!(models.len() > 20);
+        assert!(models.iter().any(|m| m.family == "Grok"));
     }
 }
