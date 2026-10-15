@@ -12,6 +12,7 @@ use gpui_kit::component::input::{Enter, Escape, IndentInline, MoveDown, MoveUp, 
 use crate::agent_session::{Asking, Spend, View};
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::menu::DropdownMenu;
+use crate::sheet_tabs::{self, Joined, Palette, StripState};
 use gpui_kit::component::text::TextView;
 use gpui_kit::component::{ActiveTheme, Icon, IconName, Sizable};
 use gpui_kit::prelude::*;
@@ -111,6 +112,8 @@ pub struct ChatPanel {
     busy_since: Option<std::time::Instant>,
     /// The step the spinners are at: the ticker moves it on while something runs.
     phase: u32,
+    /// The Chat and Terminal view tabs.
+    views: Rc<StripState>,
     _subs: Vec<Subscription>,
 }
 
@@ -127,6 +130,8 @@ const MONO: &str = crate::terminal_view::FONT_FAMILY;
 const TICK: std::time::Duration = std::time::Duration::from_millis(100);
 /// Steps in a spinner's turn (one turn a little over a second at the tick above).
 const SPINNER_STEPS: u32 = 12;
+/// Space below the Chat / Terminal tabs, before the window's bottom edge.
+const VIEW_STRIP_GAP_BELOW: f32 = 6.;
 
 impl ChatPanel {
     pub fn new(
@@ -227,6 +232,7 @@ impl ChatPanel {
             busy_since: None,
             phase: 0,
             ticker: None,
+            views: Rc::new(StripState::default()),
             _subs: vec![s1, s2],
         }
     }
@@ -478,7 +484,6 @@ impl ChatPanel {
     }
 
     fn render_header(&self, cx: &mut Context<Self>) -> AnyElement {
-        let switch = self.render_view_switch(cx);
         let theme = cx.theme();
         let (muted, hover, border) = (theme.muted_foreground, theme.secondary_hover, theme.border);
         let session = self.session.read(cx);
@@ -526,8 +531,6 @@ impl ChatPanel {
             }
         );
         let backend_name = session.backend.name();
-        let has_views = session.backend.capabilities().terminal_view;
-        let default_terminal = cx.global::<crate::AppSettings>().0.borrow().view_for(None) == "terminal";
         let weak = cx.entity().downgrade();
         div()
             .h(px(22.))
@@ -540,7 +543,6 @@ impl ChatPanel {
             .text_color(muted)
             .border_b_1()
             .border_color(border)
-            .children(switch)
             .child(Icon::new(IconName::Bot).xsmall())
             .child(
                 div()
@@ -607,21 +609,6 @@ impl ChatPanel {
                                 },
                             ),
                         )
-                        // Which view new sessions open in, as the bottom strip offered it (also
-                        // in Settings, Sessions); only where there is a choice.
-                        .when(has_views, |m| {
-                            m.separator().item(
-                                gpui_kit::component::menu::PopupMenuItem::new("New sessions open in Terminal")
-                                    .checked(default_terminal)
-                                    .on_click(move |_, window, cx| {
-                                        let settings = cx.global::<crate::AppSettings>().0.clone();
-                                        let next = if default_terminal { "chat" } else { "terminal" };
-                                        settings.borrow_mut().default_view = next.into();
-                                        let _ = settings.borrow().save();
-                                        window.refresh();
-                                    }),
-                            )
-                        })
                     }),
             )
             .into_any_element()
@@ -629,69 +616,75 @@ impl ChatPanel {
 }
 
 impl ChatPanel {
-    /// Chat or Terminal, as a small segmented switch at the start of the header, for backends
-    /// with a terminal interface. While the switch is not possible (see
-    /// `AgentSession::switch_blocked`) the other half is dimmed, with a spinner and the reason.
-    fn render_view_switch(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    /// The Chat and Terminal tabs along the bottom, for backends with a terminal interface.
+    fn render_views(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let session = self.session.read(cx);
         if !session.backend.capabilities().terminal_view {
             return None;
         }
         let theme = cx.theme();
-        let (track, face, fg, muted, border) =
-            (theme.secondary, theme.background, theme.foreground, theme.muted_foreground, theme.border);
-        let shown = session.view;
-        let locked = session.switch_blocked().map(SharedString::from);
-        let mut row = div()
-            .id("session-view")
-            .flex_none()
-            .h(px(18.))
-            .p(px(2.))
-            .flex()
-            .items_center()
-            .gap(px(2.))
-            .rounded(px(5.))
-            .bg(track);
-        for (ix, (view, label)) in [(View::Chat, "Chat"), (View::Terminal, "Terminal")].into_iter().enumerate() {
-            let on = view == shown;
-            let seg = div()
-                .id(("session-view", ix))
-                .h_full()
-                .px(px(7.))
-                .flex()
-                .items_center()
-                .gap_1()
-                .rounded(px(3.))
-                .text_size(px(10.5))
-                .when(on, |d| d.bg(face).text_color(fg).border_1().border_color(border).shadow_xs())
-                .when(!on, |d| d.text_color(muted));
-            row = row.child(match locked.clone().filter(|_| !on) {
-                Some(why) => seg
-                    .opacity(0.6)
-                    .child(self.spinner(muted).xsmall())
-                    .child(label)
-                    .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(why.clone()).build(w, cx)),
-                None => {
-                    let weak = self.session.downgrade();
-                    let input = self.input.clone();
-                    seg.when(!on, |d| d.cursor_pointer().hover(|d| d.text_color(fg)))
-                        .child(label)
-                        .on_click(move |_, window, cx| {
-                            let _ = weak.update(cx, |s, cx| s.set_view(view, cx));
-                            // Typing goes where the view is: the terminal, or the message box.
-                            let term = weak.upgrade().and_then(|s| s.read(cx).terminal_view());
-                            match (view, term) {
-                                (View::Terminal, Some(t)) => {
-                                    let f = t.read(cx).focus.clone();
-                                    window.focus(&f, cx)
-                                }
-                                _ => input.update(cx, |i, cx| i.focus(window, cx)),
-                            }
-                        })
+        let ground = theme.sidebar;
+        let content = theme.background;
+        let palette = Palette::new(ground, theme.foreground, content, theme.foreground, theme.border, theme.ring);
+        let shown = match session.view {
+            View::Chat => 0,
+            View::Terminal => 1,
+        };
+        let default_terminal = cx.global::<crate::AppSettings>().0.borrow().view_for(None) == "terminal";
+        let muted = theme.muted_foreground;
+        let locked = session.switch_blocked().map(|why| (SharedString::from(why), self.spinner(muted).xsmall()));
+        let weak = self.session.downgrade();
+        let input = self.input.clone();
+        let strip = sheet_tabs::simple_strip(
+            &self.views,
+            "session-view",
+            &["Chat".into(), "Terminal".into()],
+            shown,
+            Joined::Top,
+            palette,
+            24.,
+            locked,
+            Rc::new(move |ix, window, cx| {
+                let view = if ix == 0 { View::Chat } else { View::Terminal };
+                let _ = weak.update(cx, |s, cx| s.set_view(view, cx));
+                // Typing goes where the view is: the terminal, or the message box.
+                let term = weak.upgrade().and_then(|s| s.read(cx).terminal_view());
+                match (view, term) {
+                    (View::Terminal, Some(t)) => {
+                        let f = t.read(cx).focus.clone();
+                        window.focus(&f, cx)
+                    }
+                    _ => input.update(cx, |i, cx| i.focus(window, cx)),
                 }
-            });
-        }
-        Some(row.into_any_element())
+            }),
+        );
+        // Some room below the tabs, so they don't sit on the window's bottom edge.
+        Some(
+            div().flex_none().bg(ground).pb(px(VIEW_STRIP_GAP_BELOW)).child(
+            strip
+                .child(
+                    div()
+                        .id("default-view")
+                        .px_2()
+                        .text_size(px(10.5))
+                        .text_color(muted)
+                        .cursor_pointer()
+                        .hover(|d| d.text_color(theme.foreground))
+                        .child(if default_terminal { "New sessions open in Terminal" } else { "New sessions open in Chat" })
+                        .tooltip(|w, cx| {
+                            gpui_kit::component::tooltip::Tooltip::new("Click to change which view new sessions open in").build(w, cx)
+                        })
+                        .on_click(move |_, window, cx| {
+                            let settings = cx.global::<crate::AppSettings>().0.clone();
+                            let next = if default_terminal { "chat" } else { "terminal" };
+                            settings.borrow_mut().default_view = next.into();
+                            let _ = settings.borrow().save();
+                            window.refresh();
+                        }),
+                ),
+            )
+            .into_any_element(),
+        )
     }
 
     /// In the terminal view, the files the agent changed this session, as links to their diffs.
@@ -821,6 +814,7 @@ impl Render for ChatPanel {
                 self.sync_model_select(window, cx);
                 self.render_composer(slash, window, cx)
             }))
+            .children(self.render_views(cx))
             .children(self.render_fix(cx))
             .children(self.preview.clone().map(|path| {
                 div()
