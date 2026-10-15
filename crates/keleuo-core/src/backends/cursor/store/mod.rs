@@ -1,5 +1,6 @@
-//! Cursor's own record of a chat: `~/.cursor/chats/<md5 of the folder>/<chat id>/`, with a
-//! `meta.json` (its `schemaVersion`) and a `store.db` (SQLite). Cursor does not document it,
+//! Cursor's own record of a chat: `~/.cursor/chats/<md5 of the folder>/<chat id>/` (a session
+//! started over ACP: `~/.cursor/acp-sessions/<id>/`), with a `meta.json` (its
+//! `schemaVersion`) and a `store.db` (SQLite). Cursor does not document it,
 //! so each layout Keleuo can read has a reader of its own here (`v1`, ...), and a chat is
 //! read by the reader for its `schemaVersion`, else by each reader in turn, newest first. When
 //! none can read it, the caller falls back to showing no earlier messages.
@@ -37,7 +38,14 @@ const READERS: &[&dyn StoreReader] = &[&v1::V1];
 /// there, else wherever it is (Cursor names the folder after the path it saw, which may differ
 /// from Keleuo's by a symlink).
 pub fn chat_dir(host: &dyn Host, project: &Path, id: &str) -> Option<PathBuf> {
-    let chats = host.home_dir()?.join(".cursor").join("chats");
+    let cursor = host.home_dir()?.join(".cursor");
+    // A session started over ACP (`cursor-agent acp`) is kept apart, by its id alone, in the
+    // same layout.
+    let acp = cursor.join("acp-sessions").join(id);
+    if host.is_file(&acp.join("store.db")) {
+        return Some(acp);
+    }
+    let chats = cursor.join("chats");
     let hashed = chats.join(md5_hex(project.to_string_lossy().as_bytes())).join(id);
     if host.is_file(&hashed.join("store.db")) {
         return Some(hashed);
@@ -235,12 +243,25 @@ mod tests {
     #[ignore]
     fn every_cursor_chat_on_this_machine_reads() {
         let host = crate::host::LocalHost;
-        let chats = dirs::home_dir().unwrap().join(".cursor/chats");
+        let cursor = dirs::home_dir().unwrap().join(".cursor");
         let (mut read, mut empty, mut failed) = (0, 0, Vec::new());
-        for folder in std::fs::read_dir(&chats).unwrap().flatten() {
-            for chat in std::fs::read_dir(folder.path()).into_iter().flatten().flatten() {
-                let id = chat.file_name().to_string_lossy().to_string();
-                let cwd = std::fs::read_to_string(chat.path().join("meta.json"))
+        // Chats under a folder per project, and sessions started over ACP on their own.
+        let mut found: Vec<std::path::PathBuf> = std::fs::read_dir(cursor.join("chats"))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .flat_map(|folder| std::fs::read_dir(folder.path()).into_iter().flatten().flatten().map(|c| c.path()))
+            .collect();
+        found.extend(std::fs::read_dir(cursor.join("acp-sessions")).into_iter().flatten().flatten().map(|c| c.path()));
+        {
+            for chat in found {
+                let id = chat.file_name().unwrap_or_default().to_string_lossy().to_string();
+                // A session that never got a message has no database yet.
+                if !chat.join("store.db").exists() {
+                    empty += 1;
+                    continue;
+                }
+                let cwd = std::fs::read_to_string(chat.join("meta.json"))
                     .ok()
                     .and_then(|t| serde_json::from_str::<Value>(&t).ok())
                     .and_then(|m| m.get("cwd")?.as_str().map(str::to_string))
