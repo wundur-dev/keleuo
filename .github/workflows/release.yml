@@ -62,7 +62,7 @@ jobs:
         run: |
           APP="$RUNNER_TEMP/bundle/Keleuo.app"
           # Inside out: the helper, then the window, then the bundle. No --deep.
-          for item in "$APP/Contents/MacOS/keleuo-hook" "$APP/Contents/MacOS/keleuo" "$APP"; do
+          for item in "$APP/Contents/MacOS/keleuo-hook" "$APP/Contents/MacOS/keleuo-mcp" "$APP/Contents/MacOS/keleuo" "$APP"; do
             codesign --force --options runtime --timestamp --sign "$APPLE_SIGN_IDENTITY" "$item"
           done
           codesign --verify --strict --deep --verbose=2 "$APP"

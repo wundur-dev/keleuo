@@ -184,10 +184,14 @@ impl Sandbox for Seatbelt {
     }
 
     fn support(&self) -> Support {
-        if Path::new("/usr/bin/sandbox-exec").exists() {
-            Support::Available
-        } else {
+        if !Path::new("/usr/bin/sandbox-exec").exists() {
             Support::Unavailable("sandbox-exec is missing from this Mac.".into())
+        } else if already_sandboxed() {
+            // A sandbox cannot be applied inside another: Keleuo was started from a confined
+            // agent, and what it starts is confined by that already.
+            Support::Unavailable("Keleuo itself runs in a sandbox (it was started from a confined agent); agents it starts stay inside that one.".into())
+        } else {
+            Support::Available
         }
     }
 
@@ -196,6 +200,23 @@ impl Sandbox for Seatbelt {
         args.extend(command.args);
         CommandSpec { program: "/usr/bin/sandbox-exec".into(), args, cwd: command.cwd, env: command.env }
     }
+}
+
+/// Whether this process already runs in a macOS sandbox.
+#[cfg(target_os = "macos")]
+fn already_sandboxed() -> bool {
+    unsafe extern "C" {
+        // libsandbox (in libSystem): 1 when `pid` runs sandboxed. With no operation it asks
+        // only whether there is a sandbox at all.
+        fn sandbox_check(pid: i32, operation: *const std::ffi::c_char, kind: i32, ...) -> i32;
+    }
+    // SAFETY: a query with no operation; the process's own id.
+    unsafe { sandbox_check(std::process::id() as i32, std::ptr::null(), 0) == 1 }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn already_sandboxed() -> bool {
+    false
 }
 
 /// Linux: bubblewrap, the system read-only and the policy's folders writable.
@@ -321,6 +342,10 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn on_macos_writes_outside_the_folder_are_refused() {
+        // Run from inside a sandbox (a confined agent's shell), another cannot be applied.
+        if already_sandboxed() {
+            return;
+        }
         let base = std::env::temp_dir().join(format!("keleuo-sandbox-{}", std::process::id()));
         let (inside, outside) = (base.join("inside"), base.join("outside"));
         std::fs::create_dir_all(&inside).unwrap();

@@ -412,6 +412,77 @@ impl ChatPanel {
         card.into_any_element()
     }
 
+    /// A message this session's agent sent another session: to whom, what, and where it is
+    /// (asking the person, with Allow / Always for these two / Deny; sent; not sent).
+    pub(super) fn render_outgoing(&self, id: u64, to: &str, text: &str, state: &keleuo_core::conversation::SendState, cx: &mut Context<Self>) -> AnyElement {
+        use crate::messaging::{Decision, decide};
+        use keleuo_core::conversation::SendState;
+        let theme = cx.theme();
+        let (fg, muted, border, violet, danger) = (theme.foreground, theme.muted_foreground, theme.border, theme.magenta, theme.danger);
+        let status = match state {
+            SendState::Asking => None,
+            SendState::Sent => Some(("Sent".to_string(), muted)),
+            SendState::Denied => Some(("Not sent".to_string(), muted)),
+            SendState::Failed(why) => Some((format!("Not sent: {why}"), danger)),
+        };
+        let button = |label: &'static str, decision: Decision, primary: bool| {
+            Button::new(SharedString::from(format!("send-{id}-{label}")))
+                .xsmall()
+                .label(label)
+                .when(primary, |b| b.primary())
+                .on_click(move |_, _, cx| decide(id, decision, cx))
+        };
+        div()
+            .flex()
+            .flex_col()
+            .border_1()
+            .border_color(border)
+            .rounded_md()
+            .bg(violet.opacity(0.05))
+            .overflow_hidden()
+            .child(
+                div()
+                    .h(px(24.))
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .text_xs()
+                    .child(div().flex_none().font_weight(FontWeight::SEMIBOLD).text_color(violet).child("message"))
+                    .child(div().flex_none().text_color(muted).child("to"))
+                    .child(div().min_w_0().truncate().text_color(fg).child(to.to_string()))
+                    .child(div().flex_1())
+                    .children(status.map(|(s, c)| div().flex_none().text_color(c).child(s))),
+            )
+            .child(
+                div()
+                    .px_2()
+                    .py_1()
+                    .border_t_1()
+                    .border_color(border)
+                    .text_color(fg)
+                    .child(self.markdown(SharedString::from(format!("outgoing-{id}")), text, cx)),
+            )
+            .when(*state == SendState::Asking, |d| {
+                d.child(
+                    div()
+                        .px_2()
+                        .py_1p5()
+                        .border_t_1()
+                        .border_color(border)
+                        .flex()
+                        .flex_wrap()
+                        .items_center()
+                        .gap_2()
+                        .child(div().flex_1().min_w(px(160.)).text_xs().text_color(muted).child(format!("Send this to {to}?")))
+                        .child(button("Allow", Decision::Allow, true))
+                        .child(button("Always for these two", Decision::Always, false))
+                        .child(button("Deny", Decision::Deny, false)),
+                )
+            })
+            .into_any_element()
+    }
+
     /// Another agent's message (a subagent's report): one row with its first line, the whole
     /// report on request.
     pub(super) fn render_agent_message(&self, from: &str, title: &str, text: &str, cx: &mut Context<Self>) -> AnyElement {
@@ -419,7 +490,10 @@ impl ChatPanel {
         let (fg, muted, border, hover, violet) =
             (theme.foreground, theme.muted_foreground, theme.border, theme.secondary_hover, theme.magenta);
         let key = format!("report:{from}:{}", text.len());
-        let open = self.toggled.contains(&key);
+        // A message from another session starts open (it is what the agent was asked); a
+        // subagent's report starts folded.
+        let from_session = from.starts_with("From ");
+        let open = from_session != self.toggled.contains(&key);
         let first = text.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or_default();
         let k = key.clone();
         let header = div()
@@ -433,7 +507,7 @@ impl ChatPanel {
             .cursor_pointer()
             .hover(|d| d.bg(hover))
             .child(Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight }).xsmall().text_color(muted))
-            .child(div().flex_none().font_weight(FontWeight::SEMIBOLD).text_color(violet).child("report"))
+            .child(div().flex_none().font_weight(FontWeight::SEMIBOLD).text_color(violet).child(if from_session { "message" } else { "report" }))
             .child(div().flex_none().max_w(relative(0.4)).truncate().text_color(fg).child(title.to_string()))
             .when(!open, |d| {
                 d.child(div().flex_1().min_w_0().truncate().text_color(muted).child(one_line(&first.replace("**", ""), 200)))
@@ -734,6 +808,7 @@ impl ChatPanel {
                     .child(t.clone())
                     .into_any_element(),
                 Item::AgentMessage { from, title, text, .. } => self.render_agent_message(from, title, text, cx),
+                Item::Outgoing { id, to, text, state } => self.render_outgoing(*id, to, text, state, cx),
                 Item::TurnChanges(changes) => self.render_turn_changes(ix, changes, cx),
                 Item::Summary { state, .. } => self.render_summary(state, cx),
             };

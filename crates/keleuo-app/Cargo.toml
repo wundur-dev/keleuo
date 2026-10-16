@@ -16,6 +16,10 @@ path = "src/main.rs"
 name = "keleuo-hook"
 path = "src/bin/keleuo-hook.rs"
 
+[[bin]]
+name = "keleuo-mcp"
+path = "src/bin/keleuo-mcp.rs"
+
 [dependencies]
 keleuo-core = { workspace = true }
 anyhow = { workspace = true }

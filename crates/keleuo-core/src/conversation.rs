@@ -113,6 +113,20 @@ pub enum Item {
     /// A turn's summary (see [`crate::summary`]), at the end of its turn, above its card of
     /// changes. `key`: the turn's (see [`crate::summary::TurnText::key`]).
     Summary { key: String, state: crate::summary::State },
+    /// A message this session's agent sent to another session (`to`, by name): `id` the
+    /// window's for it, `state` whether it went.
+    Outgoing { id: u64, to: String, text: String, state: SendState },
+}
+
+/// Where a message to another session is.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SendState {
+    /// Waiting for the person to allow it.
+    Asking,
+    Sent,
+    Denied,
+    /// It could not go (the session closed), and why.
+    Failed(String),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -242,7 +256,14 @@ impl Conversation {
     /// Record a message the user sent.
     pub fn push_user(&mut self, text: &str) {
         self.items.push(Item::User(text.to_string()));
+        self.begin_turn();
         self.delivery = Some(Delivery::Sending);
+    }
+
+    /// A turn begins (the person's message, or one from another session shown as its own
+    /// card): what it costs and the agents it starts count from here.
+    pub fn begin_turn(&mut self) {
+        self.delivery = None;
         self.turn_agents_from = self.agents.len();
         self.turn_cost_from = self.total_cost_usd;
         self.busy = true;
@@ -1038,6 +1059,7 @@ pub fn to_markdown(items: &[Item], agent: &str) -> String {
                 format!("*[{} attached: {}]*", plural(paths.len(), "image"), names.join(", "))
             }
             Item::Earlier { messages, .. } => format!("*[{} earlier not loaded]*", plural(*messages, "message")),
+            Item::Outgoing { to, text, .. } => format!("**To {to}:** {}", text.trim()),
             Item::Compacted { trigger, tokens, .. } => {
                 let mut facts: Vec<String> = trigger.iter().cloned().collect();
                 if let Some(t) = tokens {

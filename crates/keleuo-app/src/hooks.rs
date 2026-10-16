@@ -49,6 +49,8 @@ pub struct State {
     pub socket: Option<PathBuf>,
     /// The helper program next to this one.
     pub helper: Option<PathBuf>,
+    /// The tool server (MCP) next to this one: the messaging tools (see `messaging`).
+    pub mcp: Option<PathBuf>,
     /// The folder for the sessions' settings files.
     pub dir: PathBuf,
     sessions: HashMap<String, WeakEntity<AgentSession>>,
@@ -67,7 +69,11 @@ pub fn init(cx: &mut App) {
         .ok()
         .map(|exe| exe.with_file_name(if cfg!(windows) { "keleuo-hook.exe" } else { "keleuo-hook" }))
         .filter(|p| p.is_file());
-    let mut state = State { dir: dir.clone(), helper, ..Default::default() };
+    let mcp = std::env::current_exe()
+        .ok()
+        .map(|exe| exe.with_file_name(if cfg!(windows) { "keleuo-mcp.exe" } else { "keleuo-mcp" }))
+        .filter(|p| p.is_file());
+    let mut state = State { dir: dir.clone(), helper, mcp, ..Default::default() };
     if state.helper.is_some() && std::fs::create_dir_all(&dir).is_ok() {
         let (tx, rx) = async_channel::unbounded::<Call>();
         let socket = local_socket::address(&dir.join("hooks.sock"), &format!("keleuo-{}-hooks", std::process::id()));
@@ -125,7 +131,8 @@ fn listen(socket: &Path, tx: async_channel::Sender<Call>) -> bool {
                 let Ok(v) = serde_json::from_str::<Value>(&line) else { return };
                 let s = |k: &str| v.get(k).and_then(Value::as_str).unwrap_or_default().to_string();
                 let event = s("event");
-                let waits = event == "PermissionRequest";
+                // A permission request and a tool call wait for their answer.
+                let waits = event == "PermissionRequest" || event == "mcp";
                 let call = Call {
                     token: s("token"),
                     payload: v.get("payload").cloned().unwrap_or(Value::Null),
@@ -143,7 +150,10 @@ fn route(call: Call, cx: &mut App) {
     let target = cx
         .try_global::<Hooks>()
         .and_then(|h| h.0.borrow().sessions.get(&call.token).cloned());
-    if let Some(session) = target.and_then(|w| w.upgrade()) {
+    let Some(session) = target.and_then(|w| w.upgrade()) else { return };
+    if call.event == "mcp" {
+        crate::messaging::tool_call(session, call, cx);
+    } else {
         session.update(cx, |s, cx| s.on_hook(call, cx));
     }
 }
@@ -152,6 +162,9 @@ fn route(call: Call, cx: &mut App) {
 /// the window has no hook socket or the backend no hooks.
 pub struct Registration {
     pub settings: PathBuf,
+    /// The tool servers file to start its agent with (the messaging tools), when the window
+    /// has its tool server.
+    pub mcp: Option<PathBuf>,
     token: String,
     /// The window's socket.
     socket: PathBuf,
@@ -195,6 +208,9 @@ pub struct RemoteHooks {
 impl Drop for Registration {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.settings);
+        if let Some(mcp) = &self.mcp {
+            let _ = std::fs::remove_file(mcp);
+        }
     }
 }
 
@@ -219,8 +235,18 @@ pub fn register(
     let text = backend.hook_settings(&command)?;
     let settings = state.dir.join(format!("{token}.json"));
     std::fs::write(&settings, text).ok()?;
+    // The tool server, named with the same socket and token.
+    let mcp = state.mcp.clone().and_then(|program| {
+        let config = serde_json::json!({ "mcpServers": { "keleuo": {
+            "type": "stdio",
+            "command": program.to_string_lossy(),
+            "args": [socket.to_string_lossy(), token],
+        } } });
+        let path = state.dir.join(format!("{token}-mcp.json"));
+        std::fs::write(&path, config.to_string()).ok().map(|_| path)
+    });
     state.sessions.insert(token.clone(), session);
-    Some(Registration { settings, token, socket })
+    Some(Registration { settings, mcp, token, socket })
 }
 
 #[cfg(test)]

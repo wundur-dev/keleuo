@@ -231,6 +231,8 @@ pub struct StartOptions {
     pub effort: Option<String>,
     /// Where it may write ([`crate::sandbox`]); `None`: anywhere.
     pub sandbox: Option<crate::sandbox::WritePolicy>,
+    /// A file naming tool servers (MCP) for it, beside its own (the window's messaging tools).
+    pub mcp_config: Option<PathBuf>,
 }
 
 /// A running conversation with an agent.

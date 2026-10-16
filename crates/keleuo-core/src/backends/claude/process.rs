@@ -26,6 +26,8 @@ pub struct Options {
     pub fork: bool,
     /// `--effort`, when not the default.
     pub effort: Option<String>,
+    /// `--mcp-config`: tool servers beside the person's own.
+    pub mcp_config: Option<PathBuf>,
 }
 
 impl Options {
@@ -70,6 +72,9 @@ impl Options {
         }
         if let Some(effort) = &self.effort {
             args.extend(["--effort".into(), effort.clone()]);
+        }
+        if let Some(config) = &self.mcp_config {
+            args.extend(["--mcp-config".into(), config.to_string_lossy().to_string()]);
         }
         if let Some(id) = &self.resume {
             args.extend(["--resume".into(), id.clone()]);

@@ -194,6 +194,9 @@ pub struct AgentSession {
     pub writable: Vec<PathBuf>,
     /// The agent last started with its writes kept to its folder.
     confined: bool,
+    /// Messages from other sessions on their way to the agent: they go as turns, but show as
+    /// the other session's card, not as the person's message.
+    quiet: Vec<String>,
     /// Waiting for an agent process elsewhere (this pid) to exit before resuming here.
     pub waiting_for: Option<u32>,
     _reader: Option<Task<()>>,
@@ -308,6 +311,7 @@ impl AgentSession {
             writes_anywhere: false,
             writable: Vec::new(),
             confined: false,
+            quiet: Vec::new(),
             waiting_for: None,
             _reader: None,
             view: View::Chat,
@@ -659,6 +663,47 @@ impl AgentSession {
         Some(keleuo_core::sandbox::policy_for(&self.cwd, &self.backend.state_paths(), &self.writable))
     }
 
+    /// The window's tool server for the agent (the messaging tools): on this machine only.
+    fn mcp_config(&self) -> Option<PathBuf> {
+        if self.host.is_remote() {
+            return None;
+        }
+        self.hooks.as_ref().and_then(|h| h.mcp.clone())
+    }
+
+    /// A message from the session `from`: shown as its card, and sent to the agent as a turn
+    /// (after the one it is in), marked as from that session, with how to answer.
+    pub fn receive_message(&mut self, from: &str, text: &str, cx: &mut Context<Self>) {
+        self.chat.apply(Event::AgentMessage { from: format!("From {from}"), text: text.to_string() });
+        let framed = format!(
+            "[A message from the Keleuo session \"{from}\", another agent (not the person):]\n\n{text}\n\n[To answer, use the keleuo send_message tool with to: \"{from}\".]"
+        );
+        self.quiet.push(framed.clone());
+        self.send(&framed, cx);
+        cx.notify();
+    }
+
+    /// A message the agent sent another session (`to`), as its card in this chat.
+    pub fn note_outgoing(&mut self, id: u64, to: &str, text: &str, state: keleuo_core::conversation::SendState, cx: &mut Context<Self>) {
+        self.chat.items.push(keleuo_core::conversation::Item::Outgoing { id, to: to.to_string(), text: text.to_string(), state });
+        self.chat.revision += 1;
+        cx.notify();
+    }
+
+    /// Where message `id` is now (allowed, denied, failed).
+    pub fn set_outgoing(&mut self, id: u64, state: keleuo_core::conversation::SendState, cx: &mut Context<Self>) {
+        for item in self.chat.items.iter_mut().rev() {
+            if let keleuo_core::conversation::Item::Outgoing { id: i, state: s, .. } = item
+                && *i == id
+            {
+                *s = state;
+                break;
+            }
+        }
+        self.chat.revision += 1;
+        cx.notify();
+    }
+
     /// Whether this session's agent can be kept to its folder at all (Settings has it on, this
     /// machine has a sandbox, the agent runs here).
     pub fn can_confine(&self, cx: &App) -> bool {
@@ -772,6 +817,7 @@ impl AgentSession {
             fork,
             settings,
             sandbox: self.write_policy(cx),
+            mcp_config: self.mcp_config(),
         };
         self.confined = options.sandbox.is_some();
         let Some(spec) = self.backend.terminal_program(&options, &id, new) else { return };
@@ -1248,6 +1294,11 @@ impl AgentSession {
     // ----- the structured agent (backends without a terminal interface) -----
 
     fn start(&mut self, cx: &mut Context<Self>) -> anyhow::Result<()> {
+        // Registered for its tool server (the messaging tools), as the terminal view is for
+        // its hooks too.
+        if self.hooks.is_none() && !self.host.is_remote() {
+            self.hooks = hooks::register(cx.entity().downgrade(), self.backend.as_ref(), cx);
+        }
         let options = StartOptions {
             cwd: self.cwd.clone(),
             model: self.model.clone(),
@@ -1257,6 +1308,7 @@ impl AgentSession {
             fork: std::mem::take(&mut self.fork_next),
             settings: None,
             sandbox: self.write_policy(cx),
+            mcp_config: self.mcp_config(),
         };
         self.confined = options.sandbox.is_some();
         let (tx, rx) = async_channel::unbounded::<Message>();
@@ -1552,6 +1604,15 @@ impl AgentSession {
         if text.is_empty() && images.is_empty() {
             return;
         }
+        // A message from another session shows as its card (already there), not as the
+        // person's message.
+        let quiet = match self.quiet.iter().position(|q| q.trim() == shown) {
+            Some(i) => {
+                self.quiet.remove(i);
+                true
+            }
+            None => false,
+        };
         if let Some(pid) = self.waiting_for {
             self.chat.push_error(format!(
                 "This conversation is still open in another terminal (process {pid}). Quit it there first; it resumes here by itself."
@@ -1565,7 +1626,9 @@ impl AgentSession {
         if self.interactive() {
             self.end_parked_agent();
             if !text.is_empty() {
-                self.chat.push_user(shown);
+                if !quiet {
+                    self.chat.push_user(shown);
+                }
                 self.push_echo(text.to_string());
             }
             if !images.is_empty() {
@@ -1604,7 +1667,11 @@ impl AgentSession {
             return;
         }
         if !text.is_empty() {
-            self.chat.push_user(shown);
+            if quiet {
+                self.chat.begin_turn();
+            } else {
+                self.chat.push_user(shown);
+            }
         } else if !images.is_empty() {
             // Images alone start a turn too: what waits goes after it.
             self.chat.busy = true;

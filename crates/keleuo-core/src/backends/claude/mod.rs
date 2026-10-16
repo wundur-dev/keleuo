@@ -189,6 +189,9 @@ impl Backend for ClaudeBackend {
         if let Some(settings) = &options.settings {
             args.extend(["--settings".into(), settings.to_string_lossy().to_string()]);
         }
+        if let Some(config) = &options.mcp_config {
+            args.extend(["--mcp-config".into(), config.to_string_lossy().to_string()]);
+        }
         if let Some(model) = &options.model {
             args.extend(["--model".into(), model.clone()]);
         }
@@ -414,6 +417,7 @@ impl Agent for ClaudeCode {
                 resume: options.resume.clone(),
                 fork: options.fork,
                 effort: options.effort.clone(),
+                mcp_config: options.mcp_config.clone(),
             }
             .program_spec(),
         );

@@ -509,6 +509,35 @@ impl Shell {
         self.saved = Some(now);
     }
 
+    /// The sessions in this window, for messages between them (see `messaging`): each one's
+    /// number, name, agent, folder and session. The name agents use is the one the person gave
+    /// it, else its folder's ("kk-beta"; "kk-beta #2" for a second session there): an
+    /// automatic name (the start of its first message) is neither short nor stable.
+    pub fn directory(&self, cx: &App) -> Vec<crate::messaging::Peer> {
+        let mut seen: HashMap<String, usize> = HashMap::new();
+        self.tabs
+            .iter()
+            .map(|t| {
+                let ws = t.ws.read(cx);
+                let session = ws.session.clone();
+                let given = cx.global::<panels::Names>().0.borrow().get(&panels::session_key(t.number)).map(str::to_string);
+                let name = given.unwrap_or_else(|| {
+                    let folder = folder_name(ws.root());
+                    let n = seen.entry(folder.clone()).or_insert(0);
+                    *n += 1;
+                    if *n == 1 { folder } else { format!("{folder} #{n}") }
+                });
+                crate::messaging::Peer {
+                    number: t.number,
+                    name,
+                    agent: session.read(cx).backend.name().to_string(),
+                    folder: ws.root().to_path_buf(),
+                    session,
+                }
+            })
+            .collect()
+    }
+
     pub fn active_workspace(&self) -> Option<Entity<Workspace>> {
         self.tabs.get(self.active).map(|t| t.ws.clone())
     }
@@ -1216,6 +1245,24 @@ impl Shell {
             "appearance" => {
                 crate::theme::set_appearance(arg, cx);
                 format!("dark={}", gpui_kit::component::ActiveTheme::theme(&**cx).is_dark())
+            }
+            "message-decide" => {
+                // Tests: answer a message's card (`<id> allow|always|deny`), as its buttons do.
+                let mut words = arg.split_whitespace();
+                let id = words.next().and_then(|w| w.parse::<u64>().ok());
+                let decision = match words.next() {
+                    Some("allow") => Some(crate::messaging::Decision::Allow),
+                    Some("always") => Some(crate::messaging::Decision::Always),
+                    Some("deny") => Some(crate::messaging::Decision::Deny),
+                    _ => None,
+                };
+                match (id, decision) {
+                    (Some(id), Some(d)) => {
+                        crate::messaging::decide(id, d, cx);
+                        "ok".into()
+                    }
+                    _ => "message-decide <id> allow|always|deny".into(),
+                }
             }
             "worktree-ask" => {
                 // Tests: show the worktree form for the selected folder.

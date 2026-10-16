@@ -753,6 +753,8 @@ impl ChatPanel {
         // Where its agent may write, for the menu: kept to the folder (and the folders allowed
         // too), or anywhere; nothing when it cannot be kept (Settings, this system, SSH).
         let writes = session.can_confine(cx).then(|| (session.writes_anywhere, session.writable.clone()));
+        // Sessions it may message (or be messaged by) without asking: a click asks again.
+        let allowed = crate::messaging::allowed_with(&self.session, cx);
         // As tall as a tool panel's title bar, a hairline under it.
         div()
             .h(px(crate::dock_skin::HEADER_HEIGHT))
@@ -867,6 +869,14 @@ impl ChatPanel {
                             ))
                         })
                         .when_some(writes.clone(), |menu, (anywhere, writable)| write_items(menu, session.clone(), anywhere, writable))
+                        .when(!allowed.is_empty(), |menu| {
+                            allowed.iter().fold(menu.separator(), |menu, (me, other, name)| {
+                                let (me, other) = (*me, *other);
+                                menu.item(gpui_kit::component::menu::PopupMenuItem::new(format!("Ask before messages with {name}")).on_click(
+                                    move |_, _, cx| crate::messaging::forget_always(me, other, cx),
+                                ))
+                            })
+                        })
                     }),
             )
             .into_any_element()

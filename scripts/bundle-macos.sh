@@ -2,7 +2,8 @@
 # bundle-macos.sh <version> <out-dir> [build-number]
 #
 # Build the release binaries and assemble Keleuo.app in <out-dir>. `keleuo` is the window;
-# `keleuo-hook` sits beside it because the window finds it next to its own executable.
+# `keleuo-hook` and `keleuo-mcp` sit beside it because the window finds them next to its own
+# executable.
 # The build number (CFBundleVersion) defaults to 1; the release workflow passes its run number.
 # Not signed here: the release workflow signs and notarizes the bundle it produces.
 
@@ -20,7 +21,7 @@ cargo build -p keleuo-app --release --bins
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 TARGET=${CARGO_TARGET_DIR:-target}
-cp "$TARGET/release/keleuo" "$TARGET/release/keleuo-hook" "$APP/Contents/MacOS/"
+cp "$TARGET/release/keleuo" "$TARGET/release/keleuo-hook" "$TARGET/release/keleuo-mcp" "$APP/Contents/MacOS/"
 cp crates/keleuo-app/assets/icon/Keleuo.icns "$APP/Contents/Resources/Keleuo.icns"
 
 cat > "$APP/Contents/Info.plist" <<EOF
