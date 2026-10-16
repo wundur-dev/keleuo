@@ -625,9 +625,9 @@ impl ChatPanel {
                 // and the message reads as the head of its turn).
                 Item::User(text) => {
                     let copy = paste::without_markers(text);
-                    let bubble = match key.strip_prefix("main").and_then(|n| n.parse().ok()) {
-                        Some(n) => self.delivery_tint(n, user_bg, cx),
-                        None => user_bg,
+                    let (edge, tip) = match key.strip_prefix("main").and_then(|n| n.parse().ok()) {
+                        Some(n) => self.delivery_edge(n, user_bg, cx),
+                        None => (user_bg, None),
                     };
                     let group = SharedString::from(format!("user-{key}-{ix}"));
                     div()
@@ -640,11 +640,17 @@ impl ChatPanel {
                         .child(hover_actions(group, format!("{key}-{ix}"), copy, muted))
                         .child(
                             div()
+                                .id(SharedString::from(format!("bubble-{key}-{ix}")))
                                 .max_w(relative(0.8))
                                 .px_3()
                                 .py_2()
                                 .rounded(px(18.))
-                                .bg(bubble)
+                                .bg(user_bg)
+                                .border_1()
+                                .border_color(edge)
+                                .when_some(tip, |d, tip| {
+                                    d.tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(tip).build(w, cx))
+                                })
                                 .text_sm()
                                 .line_height(rems(1.45))
                                 .text_color(fg)
@@ -716,22 +722,23 @@ impl ChatPanel {
         out
     }
 
-    /// The person's last message's colour, once the agent has it: its grey turned faintly
-    /// green (it echoed it, its prompt hook ran, or it began working), faintly red if it
-    /// failed first; plain grey while it is on its way, and for every earlier message.
-    pub(super) fn delivery_tint(&self, ix: usize, grey: Hsla, cx: &App) -> Hsla {
+    /// The edge of the person's last message: a faint line in the accent colour once the agent
+    /// has it (it echoed it, its prompt hook ran, or it began working), red if it failed
+    /// first, with what it means on hover. On its way, and for every earlier message, the edge
+    /// is the bubble's own colour (the fill stays neutral: received is not done).
+    pub(super) fn delivery_edge(&self, ix: usize, bubble: Hsla, cx: &App) -> (Hsla, Option<&'static str>) {
         if self.agent.is_some() {
-            return grey;
+            return (bubble, None);
         }
         let chat = &self.session.read(cx).chat;
         if chat.turn_start() != ix {
-            return grey;
+            return (bubble, None);
         }
         let theme = cx.theme();
         match chat.delivery {
-            Some(Delivery::Seen) => crate::sheet_tabs::mix(grey, theme.success, 0.12),
-            Some(Delivery::Failed) => crate::sheet_tabs::mix(grey, theme.danger, 0.12),
-            _ => grey,
+            Some(Delivery::Seen) => (theme.ring.opacity(0.45), Some("Received by the agent")),
+            Some(Delivery::Failed) => (theme.danger.opacity(0.8), Some("Not delivered: the agent stopped before it took this message")),
+            _ => (bubble, None),
         }
     }
 
