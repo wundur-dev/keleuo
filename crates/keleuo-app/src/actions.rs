@@ -64,6 +64,10 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-l", AskClaude, None),
         KeyBinding::new("cmd-t", NewTerminal, None),
         KeyBinding::new("cmd-n", NewSession, None),
+        // In a terminal Tab is the program's (completion, a TUI's fields), not the window's move
+        // to the next control: unbound there, it reaches the terminal, which sends it on.
+        KeyBinding::new("tab", gpui_kit::NoAction, Some("Terminal")),
+        KeyBinding::new("shift-tab", gpui_kit::NoAction, Some("Terminal")),
         KeyBinding::new("cmd-shift-w", CloseSession, None),
         KeyBinding::new("cmd-\\", SplitRight, None),
         KeyBinding::new("cmd-shift-\\", SplitDown, None),
