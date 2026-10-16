@@ -123,6 +123,8 @@ pub struct ChatPanel {
     working_slot: Rc<std::cell::Cell<Option<Bounds<Pixels>>>>,
     /// The working line's spinner, the system's own where there is one.
     native_spinner: crate::native_spinner::NativeSpinner,
+    /// The panel itself, for what the workspace draws for it (the working line's box).
+    me: WeakEntity<ChatPanel>,
     /// The Chat and Terminal view tabs.
     views: Rc<StripState>,
     _subs: Vec<Subscription>,
@@ -274,6 +276,7 @@ impl ChatPanel {
             pulse: cx.new(|_| Pulse(0)),
             working_slot: Default::default(),
             native_spinner: Default::default(),
+            me: cx.entity().downgrade(),
             ticker: None,
             on_screen: Default::default(),
             views: Rc::new(StripState::default()),
@@ -975,7 +978,6 @@ impl Render for ChatPanel {
                     )),
             )
             .children(self.render_working_line(cx))
-            .children(self.render_background_agents(cx))
             .children(self.render_asking(cx))
             .child({
                 let slash = self.render_slash(cx);

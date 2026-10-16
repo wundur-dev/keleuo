@@ -763,12 +763,56 @@ impl ChatPanel {
             .into_any_element()
     }
 
+    /// At the working line's end, while agents work in the background: a small box counting
+    /// them ("2 agents"), their names on hover; a click opens the first.
+    fn agents_box(&self, cx: &App) -> Option<AnyElement> {
+        let chat = &self.session.read(cx).chat;
+        let running: Vec<(String, String)> =
+            chat.running_agents().filter(|a| a.background).map(|a| (a.tool_use_id.clone(), a.title())).collect();
+        let (first, _) = running.first()?.clone();
+        let theme = cx.theme();
+        let (muted, border, hover) = (theme.muted_foreground, theme.border, theme.secondary_hover);
+        let words = match running.len() {
+            1 => "1 agent".to_string(),
+            n => format!("{n} agents"),
+        };
+        let names: SharedString = running.iter().map(|(_, t)| t.as_str()).collect::<Vec<_>>().join("\n").into();
+        let me = self.me.clone();
+        Some(
+            div()
+                .id("background-agents")
+                .flex_none()
+                .h(px(20.))
+                .px_2()
+                .flex()
+                .items_center()
+                .rounded(px(6.))
+                .border_1()
+                .border_color(border)
+                .text_size(px(12.))
+                .text_color(muted)
+                .cursor_pointer()
+                .hover(|d| d.bg(hover))
+                .child(words)
+                .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(names.clone()).build(w, cx))
+                .on_click(move |_, _, cx| {
+                    let _ = me.update(cx, |_, cx| cx.emit(ChatPanelEvent::OpenAgent(first.clone())));
+                })
+                .into_any_element(),
+        )
+    }
+
     /// What the working line says ("Thinking · 12s", or the tool running), or `None` when it
     /// does not show (idle, a question waiting, the Terminal view).
     pub(super) fn working_label(&self, cx: &App) -> Option<String> {
         let session = self.session.read(cx);
-        if !session.chat.busy || session.chat.needs_input() || session.view == View::Terminal {
+        if session.chat.needs_input() || session.view == View::Terminal {
             return None;
+        }
+        // The turn is over, its agents in the background still at it (the box at the line's
+        // end counts them).
+        if !session.chat.busy {
+            return session.chat.running_agents().any(|a| a.background).then(|| "Waiting on background agents".into());
         }
         let answering = matches!(session.chat.items.last(), Some(Item::Assistant { streaming: true, .. }));
         let tool = session.chat.running_tools().last().map(|t| {
@@ -803,7 +847,7 @@ impl ChatPanel {
         let label = self.working_label(cx)?;
         if self.agent.is_some() {
             let muted = cx.theme().muted_foreground;
-            return Some(working_line(label, spinner_at(self.pulse.read(cx).0, muted).small().into_any_element(), muted).into_any_element());
+            return Some(working_line(label, spinner_at(self.pulse.read(cx).0, muted).small().into_any_element(), None, muted).into_any_element());
         }
         let slot = self.working_slot.clone();
         Some(
@@ -840,99 +884,10 @@ impl ChatPanel {
         Some(
             deferred(
                 anchored().position_mode(AnchoredPositionMode::Window).position(bounds.origin).child(
-                    div().w(bounds.size.width).h(bounds.size.height).child(working_line(label, spinner, muted)),
+                    div().w(bounds.size.width).h(bounds.size.height).child(working_line(label, spinner, self.agents_box(cx), muted)),
                 ),
             )
             .into_any_element(),
-        )
-    }
-
-    /// Agents sent to the background go on after the turn ends, and the turn looks finished:
-    /// a tinted bar above the message box says they are still working, with each one (a click
-    /// opens it), until the last reports back.
-    pub(super) fn render_background_agents(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let session = self.session.read(cx);
-        if session.view == View::Terminal {
-            return None;
-        }
-        let running: Vec<(String, String, Option<std::time::Duration>)> = session
-            .chat
-            .running_agents()
-            .filter(|a| a.background)
-            .map(|a| (a.tool_use_id.clone(), a.title(), a.elapsed()))
-            .collect();
-        if running.is_empty() {
-            return None;
-        }
-        let name = session.backend.name();
-        let theme = cx.theme();
-        let (fg, muted, violet, hover) = (theme.foreground, theme.muted_foreground, theme.magenta, theme.secondary_hover);
-        let head = match running.len() {
-            1 => "1 agent is still working".to_string(),
-            n => format!("{n} agents are still working"),
-        };
-        let longest = running.iter().filter_map(|r| r.2).max().map(|d| format!(" · {}", format_elapsed(d))).unwrap_or_default();
-        let after = if session.chat.busy {
-            "in the background".to_string()
-        } else {
-            format!("in the background; {name} picks up when they report back")
-        };
-        let mut chips = div().flex().flex_wrap().gap_1();
-        for (ix, (id, title, elapsed)) in running.into_iter().enumerate() {
-            let elapsed = elapsed.map(|d| format!(" · {}", format_elapsed(d))).unwrap_or_default();
-            chips = chips.child(
-                div()
-                    .id(("background-agent", ix))
-                    .max_w(px(320.))
-                    .px_2()
-                    .py(px(1.))
-                    .rounded(px(6.))
-                    .border_1()
-                    .border_color(violet.opacity(0.35))
-                    .bg(theme.background)
-                    .text_size(px(12.))
-                    .text_color(fg)
-                    .truncate()
-                    .cursor_pointer()
-                    .hover(|d| d.bg(hover))
-                    .child(format!("{title}{elapsed}"))
-                    .on_click(cx.listener(move |_, _, _, cx| cx.emit(ChatPanelEvent::OpenAgent(id.clone())))),
-            );
-        }
-        Some(
-            div()
-                .flex_none()
-                .w_full()
-                .flex()
-                .justify_center()
-                .px_4()
-                .pb_2()
-                .child(
-                    div()
-                        .w_full()
-                        .max_w(px(COLUMN))
-                        .flex()
-                        .flex_col()
-                        .gap(px(6.))
-                        .px_3()
-                        .py_2()
-                        .rounded_lg()
-                        .border_1()
-                        .border_color(violet.opacity(0.5))
-                        .bg(violet.opacity(0.07))
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .text_size(px(13.))
-                                .child(self.spinner(violet).small())
-                                .child(div().flex_none().font_weight(FontWeight::SEMIBOLD).text_color(fg).child(format!("{head}{longest}")))
-                                .child(div().min_w_0().truncate().text_color(muted).child(after)),
-                        )
-                        .child(chips),
-                )
-                .into_any_element(),
         )
     }
 
@@ -1127,8 +1082,8 @@ mod run_pill_tests {
 /// The working line's height: its place in the chat is kept to it.
 const WORKING_LINE_HEIGHT: f32 = 28.;
 
-/// A spinner and grey words, in the conversation's column.
-fn working_line(label: String, spinner: AnyElement, muted: Hsla) -> Div {
+/// A spinner and grey words, in the conversation's column, and at the end what else is at work.
+fn working_line(label: String, spinner: AnyElement, agents: Option<AnyElement>, muted: Hsla) -> Div {
     div().flex_none().w_full().h(px(WORKING_LINE_HEIGHT)).flex().justify_center().px_4().pb_2().child(
         div()
             .w_full()
@@ -1140,6 +1095,7 @@ fn working_line(label: String, spinner: AnyElement, muted: Hsla) -> Div {
             .text_size(px(13.))
             .text_color(muted)
             .child(spinner)
-            .child(div().min_w_0().truncate().child(label)),
+            .child(div().flex_1().min_w_0().truncate().child(label))
+            .children(agents),
     )
 }

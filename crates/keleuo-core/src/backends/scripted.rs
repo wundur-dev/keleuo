@@ -173,6 +173,16 @@ impl Turn {
         if let Some(secs) = self.text.strip_prefix("think ").and_then(|r| r.split_whitespace().next()?.parse::<u64>().ok()) {
             std::thread::sleep(Duration::from_secs(secs));
         }
+        // "background N": N agents sent to the background, left running (to see the chat while
+        // agents work after the turn).
+        if let Some(n) = self.text.strip_prefix("background ").and_then(|r| r.split_whitespace().next()?.parse::<usize>().ok()) {
+            for i in 0..n {
+                let id = format!("bg-{}-{i}", self.n);
+                send(Event::ToolCall { id: id.clone(), name: "Agent".into(), summary: format!("background job {}", i + 1), input: json!({}), diff: None, parent: None });
+                send(Event::SubagentStarted { id: id.clone(), description: format!("Background job {}", i + 1), kind: "helper".into() });
+                send(Event::SubagentBackground { id, agent_id: None });
+            }
+        }
         send(Event::TextStart);
         // "stream N [MS]": a long reply in N pieces, as an agent writes one (paragraphs, file
         // paths, lists, code), a piece every MS milliseconds (else at the usual pace), to
