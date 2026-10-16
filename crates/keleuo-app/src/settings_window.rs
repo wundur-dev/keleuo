@@ -177,6 +177,11 @@ fn chat() -> SettingPage {
                 |s, v| s.cost_display = v.to_string(),
             ),
             pref(
+                "Keep the latest messages in view",
+                "Scrolled up in a chat, the current turn stays in a pane under it, following it as it grows. Drag the line above it to change its height.",
+                |p| &mut p.latest_pane,
+            ),
+            pref(
                 "Card of changed files after a turn",
                 "A turn that changed files ends with a card listing them, each opening as a diff.",
                 |p| &mut p.turn_card,

@@ -34,6 +34,7 @@ mod items;
 mod tools;
 mod rows;
 mod find;
+mod latest;
 
 use crate::actions::CopyConversation;
 use crate::agent_session::AgentSession;
@@ -133,6 +134,8 @@ pub struct ChatPanel {
     /// While a row draws with the find bar open: the marks for its text (see `find_marks`).
     marking: Option<gpui_kit::base::text::FindMarks>,
     pending_find: Option<(u64, usize, usize)>,
+    /// The latest messages, kept in view under the conversation while it is scrolled up.
+    latest: latest::Latest,
     /// The Chat and Terminal view tabs.
     views: Rc<StripState>,
     _subs: Vec<Subscription>,
@@ -247,7 +250,7 @@ impl ChatPanel {
             // The view (Chat or Terminal) may have changed too.
             cx.notify();
         });
-        Self {
+        let panel = Self {
             session,
             number: 0,
             agent: None,
@@ -289,11 +292,16 @@ impl ChatPanel {
             found: None,
             marking: None,
             pending_find: None,
+            latest: latest::Latest::new(
+                cx.try_global::<crate::AppSettings>().map_or(latest::DEFAULT_HEIGHT, |s| s.0.borrow().layout.latest_height),
+            ),
             ticker: None,
             on_screen: Default::default(),
             views: Rc::new(StripState::default()),
             _subs: vec![s1, s2],
-        }
+        };
+        Self::watch_scrolling(&panel.list, panel.latest.shown.clone(), panel.me.clone());
+        panel
     }
 
     /// A panel that watches one subagent of the session.
@@ -364,6 +372,8 @@ impl ChatPanel {
             self.list_len = new.len();
             self.rows = new;
             self.synced_items = items;
+            self.latest.from = usize::MAX;
+            self.sync_latest(0, cx);
             return;
         }
         let old_len = self.rows.len();
@@ -381,6 +391,7 @@ impl ChatPanel {
         self.list_len = new_len;
         self.rows = new;
         self.synced_items = items;
+        self.sync_latest(from, cx);
     }
 
     /// An earlier part came into view: read it off the UI thread, then put its items in its
@@ -422,6 +433,7 @@ impl ChatPanel {
                 p.list_len = rows.len();
                 p.rows = rows;
                 p.synced_items = items;
+                p.sync_latest(0, cx);
                 // Reached by scrolling up: carry on from its newest item. Jumped to the very top:
                 // stay at its start.
                 if top.item_ix == at && at > 0 && added > 0 {
@@ -1029,6 +1041,7 @@ impl Render for ChatPanel {
                             .size_full(),
                     )),
             )
+            .children(self.render_latest(cx))
             .children(self.render_working_line(cx))
             .children(self.render_asking(cx))
             .child({
