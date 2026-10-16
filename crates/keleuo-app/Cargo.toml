@@ -20,6 +20,8 @@ path = "src/bin/keleuo-hook.rs"
 keleuo-core = { workspace = true }
 anyhow = { workspace = true }
 dirs = { workspace = true }
+# Times in local time ("Today, 16:11") in the session browser.
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 serde_json = { workspace = true }
 # gpui-kit pins the matching gpui snapshot (published as gpui-pre 0.3.8) and re-exports gpui,
 # gpui-component and the Lucide icon assets.

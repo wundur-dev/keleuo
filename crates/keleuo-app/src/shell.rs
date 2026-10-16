@@ -513,8 +513,7 @@ impl Shell {
         self.tabs
             .iter()
             .map(|t| {
-                let w = t.ws.read(cx);
-                OpenSession { root: w.root().to_path_buf(), id: w.session.read(cx).chat.session_id.clone() }
+                OpenSession { id: t.ws.read(cx).session.read(cx).chat.session_id.clone() }
             })
             .collect()
     }
@@ -579,7 +578,11 @@ impl Shell {
                 }
                 if let Some(folder) = worktree {
                     if let Err(e) = self.new_session_in_worktree(root.clone(), Some(folder), backend.clone(), window, cx) {
-                        window.push_notification(format!("Could not make a worktree: {e}"), cx);
+                        // Said beside Create, what was entered kept; the browser may be used again.
+                        self.opening.browser_shown();
+                        if let Some(b) = &self.browser {
+                            b.update(cx, |b, cx| b.creation_failed(format!("Could not make the worktree: {e}"), cx));
+                        }
                         return;
                     }
                 } else {
@@ -587,11 +590,11 @@ impl Shell {
                 }
                 self.name_shown(name.as_deref().unwrap_or(""), window, cx);
             }
-            BrowserEvent::Resume { host, root, backend, id, fork, wait_for } => {
+            BrowserEvent::Resume { host, root, backend, id, fork, wait_for, name } => {
                 if !self.opening.choose() {
                     return;
                 }
-                self.resume(host.clone(), root.clone(), backend.clone(), id.clone(), *fork, *wait_for, false, window, cx)
+                self.resume(host.clone(), root.clone(), backend.clone(), id.clone(), *fork, *wait_for, false, name.clone(), window, cx)
             }
         }
     }
@@ -613,6 +616,7 @@ impl Shell {
         fork: bool,
         wait_for: Option<u32>,
         closed_here: bool,
+        name: Option<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -645,7 +649,7 @@ impl Shell {
                 s.opening.finish(&key);
                 match (live, chat) {
                     (Some(live), _) => s.refused(live, window, cx),
-                    (None, Some(chat)) => s.opened(chat, host, root, backend, fork, wait_for, window, cx),
+                    (None, Some(chat)) => s.opened(chat, host, root, backend, fork, wait_for, name, window, cx),
                     (None, None) => {}
                 }
             });
@@ -680,6 +684,7 @@ impl Shell {
         backend: Arc<dyn Backend>,
         fork: bool,
         wait_for: Option<u32>,
+        name: Option<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -694,6 +699,10 @@ impl Shell {
                         ));
                     }
                     s.add_session(host, root, session, None, wait_for, window, cx);
+                    // A fork named as it was made.
+                    if let Some(name) = name {
+                        s.name_shown(&name, window, cx);
+                    }
                 }
                 Err(e) => {
                     // Nothing opened: the browser may be used again.
@@ -811,7 +820,7 @@ impl Shell {
                     let root = if renamed { moved } else { old.join(moved.strip_prefix(&new).unwrap_or(Path::new(""))) };
                     match id {
                         // Closed by this window a moment ago: its file is fresh, not open elsewhere.
-                        Some(id) => s.resume(host, root, backend, id, false, None, true, window, cx),
+                        Some(id) => s.resume(host, root, backend, id, false, None, true, None, window, cx),
                         None => s.new_session_in(host, root, backend, window, cx),
                     }
                 }
@@ -1276,7 +1285,7 @@ impl Shell {
                     "takeover" => (false, pid.filter(|p| *p != 0)),
                     _ => (false, None),
                 };
-                self.resume(host, root, backend, s.id, fork, wait, false, window, cx);
+                self.resume(host, root, backend, s.id, fork, wait, false, None, window, cx);
                 "ok".into()
             }
             "peek" => {
@@ -1972,7 +1981,7 @@ impl Render for Shell {
             })
         };
         let title = if self.browser.is_some() || self.tabs.is_empty() {
-            "Open a session".to_string()
+            "New session".to_string()
         } else {
             self.name(self.active, cx)
         };

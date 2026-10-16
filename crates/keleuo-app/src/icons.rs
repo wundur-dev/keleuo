@@ -46,6 +46,9 @@ icon_assets!(
         Pencil,
         Trash,
         RefreshCw,
+        GitBranch,
+        GitFork,
+        CornerDownLeft,
     ]
 );
 
