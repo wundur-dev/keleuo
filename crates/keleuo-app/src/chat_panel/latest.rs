@@ -171,13 +171,50 @@ impl ChatPanel {
                     div()
                         .flex_none()
                         .px_3()
+                        .flex()
+                        .items_center()
+                        .justify_between()
                         .text_xs()
                         .text_color(muted)
-                        .child("Latest"),
+                        .child("Latest")
+                        // Down to the end of the conversation (which puts the pane away), and
+                        // following it again.
+                        .child(
+                            Button::new("latest-go")
+                                .icon(IconName::ArrowDown)
+                                .label("Go to latest")
+                                .xsmall()
+                                .ghost()
+                                .tab_stop(false)
+                                .on_click(cx.listener(|p, _, _, cx| {
+                                    p.list.set_follow_mode(FollowMode::Tail);
+                                    cx.notify();
+                                })),
+                        ),
                 )
                 // Its own place among the window's elements: its messages keep their own state
                 // (selection, layout), apart from the same messages in the conversation above.
-                .child(div().id("latest").flex_1().min_h_0().child(list))
+                // It does not scroll: it always shows the end, so the wheel over it is taken
+                // before its list sees it.
+                .child(
+                    div()
+                        .id("latest")
+                        .flex_1()
+                        .min_h_0()
+                        .relative()
+                        .child(list)
+                        .child(
+                            canvas(|_, _, _| (), |bounds, _, window, _| {
+                                window.on_mouse_event(move |e: &ScrollWheelEvent, phase, _, cx| {
+                                    if phase == DispatchPhase::Capture && bounds.contains(&e.position) {
+                                        cx.stop_propagation();
+                                    }
+                                });
+                            })
+                            .absolute()
+                            .size_full(),
+                        ),
+                )
                 .into_any_element(),
         )
     }
