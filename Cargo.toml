@@ -1,6 +1,9 @@
 [workspace]
 resolver = "3"
 members = ["crates/keleuo-core", "crates/keleuo-app"]
+# The vendored component library is patched in, not a member; excluded so its own tests run
+# (`cargo test --manifest-path vendor/gpui-base/Cargo.toml`).
+exclude = ["vendor/gpui-base"]
 
 [workspace.package]
 version = "0.1.0"

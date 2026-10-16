@@ -2147,7 +2147,9 @@ impl<M: InputModeKind> InputBaseState<M> {
 
         if let Some(handler) = self.context_menu_handler.clone() {
             let capabilities = self.context_menu_capabilities();
-            cx.defer_in(window, move |_, window, cx| {
+            // Deferred to outside this input's update: the handler may read the input (its
+            // text, its selection), which panics while the input is being updated.
+            window.defer(cx, move |window, cx| {
                 handler(NativeMenu::new(), capabilities, position, window, cx);
             });
         }
@@ -5900,6 +5902,30 @@ mod tests {
             })
         });
         assert_eq!(calls.get(), 1);
+    }
+
+    #[gpui::test]
+    fn context_menu_handler_may_read_the_input(cx: &mut TestAppContext) {
+        use std::{cell::RefCell, rc::Rc};
+        cx.update(crate::init);
+        let input_view = InputView::new(cx);
+        let mut cx = VisualTestContext::from_window(input_view.window_handle.into(), cx);
+        let input = input_view.input;
+        let seen = Rc::new(RefCell::new(None::<String>));
+
+        cx.update(|window, cx| {
+            input.update(cx, |state, cx| {
+                state.set_value("teh word", window, cx);
+                let (seen2, input2) = (seen.clone(), input.clone());
+                // As an application's menu does: read the text the menu is about.
+                state.on_context_menu(Rc::new(move |_, _, _, _, cx| {
+                    *seen2.borrow_mut() = Some(input2.read(cx).value().to_string());
+                }));
+                state.handle_right_click_menu(point(px(0.), px(0.)), 0, window, cx);
+            })
+        });
+        cx.run_until_parked();
+        assert_eq!(seen.borrow().as_deref(), Some("teh word"));
     }
 
     #[gpui::test]
