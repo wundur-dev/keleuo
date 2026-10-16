@@ -100,7 +100,7 @@ pub struct Prefs {
 }
 
 /// The terminals' font size when none is set, and the range allowed.
-pub const TERMINAL_FONT_SIZE: f32 = 12.5;
+pub const TERMINAL_FONT_SIZE: f32 = 11.0;
 pub const TERMINAL_FONT_SIZES: std::ops::RangeInclusive<f32> = 9.0..=24.0;
 
 impl Default for Prefs {

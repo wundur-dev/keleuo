@@ -38,6 +38,10 @@ actions!(
         ToggleCodeFont,
         CopyConversation,
         FindInChat,
+        // In a terminal: its text larger, smaller, or back to the size in Settings.
+        TerminalZoomIn,
+        TerminalZoomOut,
+        TerminalZoomReset,
         OpenWebPage,
         // In a web page (see web_panel.rs).
         FocusAddress,
@@ -79,6 +83,13 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-f", FindInChat, Some("Chat")),
         // In a terminal Ctrl+F is the program's (the shell's cursor), not Find.
         KeyBinding::new("ctrl-f", gpui_kit::NoAction, Some("Terminal")),
+        // Zoom a terminal, as other terminals do: Cmd (Ctrl elsewhere) with =, -, 0. Only that
+        // terminal changes; Settings keeps the size the others use.
+        KeyBinding::new("secondary-=", TerminalZoomIn, Some("Terminal")),
+        KeyBinding::new("secondary-+", TerminalZoomIn, Some("Terminal")),
+        KeyBinding::new("secondary-shift-=", TerminalZoomIn, Some("Terminal")),
+        KeyBinding::new("secondary--", TerminalZoomOut, Some("Terminal")),
+        KeyBinding::new("secondary-0", TerminalZoomReset, Some("Terminal")),
         KeyBinding::new("ctrl-tab", NextSession, None),
         KeyBinding::new("ctrl-shift-tab", PrevSession, None),
         KeyBinding::new("ctrl--", GoBack, None),

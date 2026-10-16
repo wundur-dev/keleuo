@@ -36,6 +36,13 @@ pub fn font_size(cx: &App) -> f32 {
     crate::prefs(cx).terminal_font_size()
 }
 
+/// One step of a terminal's zoom, in points.
+const ZOOM_STEP: f32 = 1.;
+/// Zoom steps closer together than this are one change for the program inside: it is told its
+/// new size once they stop (each resize redraws an interface's whole screen and reflows the
+/// scrollback).
+const ZOOM_SETTLE: std::time::Duration = std::time::Duration::from_millis(150);
+
 fn hsla(rgb: u32) -> Hsla {
     gpui_kit::rgb(rgb).into()
 }
@@ -110,6 +117,11 @@ pub struct TerminalView {
     /// Wheel movement smaller than a line, kept for the next event (trackpads send many
     /// small deltas).
     wheel_rest: f32,
+    /// This terminal's zoom: points over (or under) the size in Settings, for as long as it is
+    /// open; and when it last changed (the program's size waits until zooming stops).
+    zoom: f32,
+    zoomed_at: Rc<Cell<Option<std::time::Instant>>>,
+    zoom_settle: Option<Task<()>>,
     /// 1, 2, ... in opening order: the key of its saved name.
     pub number: usize,
     /// Drawn in a frame on screen now: output redraws the window only then (or when the tab's
@@ -320,6 +332,9 @@ impl TerminalView {
             cell: Rc::new(Cell::new(size(px(8.), px(16.)))),
             selecting: false,
             wheel_rest: 0.,
+            zoom: 0.,
+            zoomed_at: Rc::default(),
+            zoom_settle: None,
             number: 0,
             on_screen: Default::default(),
             started: std::time::Instant::now(),
@@ -925,6 +940,9 @@ impl Render for TerminalView {
             .bg(hsla(palette::background()))
             .track_focus(&self.focus)
             .key_context("Terminal")
+            .on_action(cx.listener(|v, _: &crate::actions::TerminalZoomIn, _, cx| v.zoom_by(Some(1.), cx)))
+            .on_action(cx.listener(|v, _: &crate::actions::TerminalZoomOut, _, cx| v.zoom_by(Some(-1.), cx)))
+            .on_action(cx.listener(|v, _: &crate::actions::TerminalZoomReset, _, cx| v.zoom_by(None, cx)))
             .on_key_down(cx.listener(Self::on_key))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::mouse_down))
             // Files dropped in: as if pasted.
@@ -936,7 +954,8 @@ impl Render for TerminalView {
         if let Some(err) = &self.error {
             return base.p_2().text_color(hsla(if palette::is_dark() { 0xcc6666 } else { 0xc0392b })).child(err.clone());
         }
-        let text_size = font_size(cx);
+        let text_size = self.text_size(cx);
+        let zoomed_at = self.zoomed_at.clone();
         // Fading out once settled, then gone.
         let fading = self.revealed.is_some_and(|t| t.elapsed() < PLACEHOLDER_FADE);
         let placeholder = self
@@ -1005,9 +1024,9 @@ impl Render for TerminalView {
             });
         base.px_1().relative().child(
             canvas(
-                move |bounds, window, cx| {
+                move |bounds, window, _| {
                     bounds_cell.set(bounds);
-                    let font_size = px(font_size(cx));
+                    let font_size = px(text_size);
                     let font = font(FONT_FAMILY);
                     let ts = window.text_system();
                     let font_id = ts.resolve_font(&font);
@@ -1017,7 +1036,10 @@ impl Render for TerminalView {
                         .unwrap_or(px(7.5));
                     let ch = (font_size * 1.35).round();
                     cell_cell.set(size(cw, ch));
-                    if let Some(pty) = &pty {
+                    // While zoom steps follow each other, the program keeps its size (the grid is
+                    // drawn at the new font meanwhile); it is told once they stop.
+                    let zooming = zoomed_at.get().is_some_and(|t| t.elapsed() < ZOOM_SETTLE);
+                    if let Some(pty) = pty.as_ref().filter(|_| !zooming) {
                         let cols = ((bounds.size.width / cw).floor() as u16).max(2);
                         let rows = ((bounds.size.height / ch).floor() as u16).max(1);
                         pty.resize(GridSize {
@@ -1035,7 +1057,7 @@ impl Render for TerminalView {
                         return;
                     }
                     let start = std::time::Instant::now();
-                    paint_grid(pty, bounds, cell_paint.get(), focused, window, cx);
+                    paint_grid(text_size, pty, bounds, cell_paint.get(), focused, window, cx);
                     crate::perf::record("terminal paint", start.elapsed());
                     crate::perf::terminal_painted();
                 },
@@ -1061,7 +1083,38 @@ impl Render for TerminalView {
     }
 }
 
+impl TerminalView {
+    /// The size its text is drawn at: Settings' size, zoomed.
+    pub fn text_size(&self, cx: &App) -> f32 {
+        let (min, max) = (*keleuo_core::settings::TERMINAL_FONT_SIZES.start(), *keleuo_core::settings::TERMINAL_FONT_SIZES.end());
+        (font_size(cx) + self.zoom).clamp(min, max)
+    }
+
+    /// Zoom by `steps` (in or out), or back to Settings' size with `None`.
+    fn zoom_by(&mut self, steps: Option<f32>, cx: &mut Context<Self>) {
+        let (min, max) = (*keleuo_core::settings::TERMINAL_FONT_SIZES.start(), *keleuo_core::settings::TERMINAL_FONT_SIZES.end());
+        let base = font_size(cx);
+        let zoom = match steps {
+            // Kept within the sizes allowed, so zooming back starts from what shows.
+            Some(n) => ((base + self.zoom + n * ZOOM_STEP).clamp(min, max)) - base,
+            None => 0.,
+        };
+        if zoom == self.zoom {
+            return;
+        }
+        self.zoom = zoom;
+        self.zoomed_at.set(Some(std::time::Instant::now()));
+        // Drawn again once the steps stop, when the program is told its size.
+        self.zoom_settle = Some(cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            cx.background_executor().timer(ZOOM_SETTLE).await;
+            let _ = this.update(cx, |_, cx| cx.notify());
+        }));
+        cx.notify();
+    }
+}
+
 fn paint_grid(
+    text_size: f32,
     pty: &Pty,
     bounds: Bounds<Pixels>,
     cell: Size<Pixels>,
@@ -1077,7 +1130,7 @@ fn paint_grid(
     let selection = content.selection;
     let cols = term.columns();
     let rows = term.screen_lines();
-    let font_size = px(font_size(cx));
+    let font_size = px(text_size);
     let base_font = font(FONT_FAMILY);
     let default_bg = palette::background();
     let grid = term.grid();
