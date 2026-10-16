@@ -60,6 +60,12 @@ impl Backend for ClaudeBackend {
         ID
     }
 
+    /// `~/.claude` (sessions, settings, todos) and `~/.claude.json` (its state, written beside
+    /// and renamed into place).
+    fn state_paths(&self) -> Vec<PathBuf> {
+        dirs::home_dir().map(|h| vec![h.join(".claude"), h.join(".claude.json")]).unwrap_or_default()
+    }
+
     fn name(&self) -> &'static str {
         "Claude Code"
     }
@@ -411,6 +417,7 @@ impl Agent for ClaudeCode {
             }
             .program_spec(),
         );
+        let spec = crate::sandbox::apply(spec, options.sandbox.as_ref());
         let mapper = Mutex::new(Mapper::new(options.cwd.to_string_lossy()));
         let sink: Sink = sink;
         let forward = Arc::new(move |line: Line| match line {

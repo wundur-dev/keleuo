@@ -78,6 +78,7 @@ impl Agent for CursorAcpAgent {
             cwd: options.cwd.clone(),
             ..Default::default()
         });
+        let spec = crate::sandbox::apply(spec, options.sandbox.as_ref());
         let state = self.state.clone();
         let (s, k) = (state.clone(), sink.clone());
         let conn = Arc::new(Connection::spawn(&spec, move |m| incoming(&s, &k, m))?);

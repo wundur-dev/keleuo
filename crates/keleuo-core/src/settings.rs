@@ -99,6 +99,9 @@ pub struct Prefs {
     pub hybrid_views: bool,
     /// Scrolled up in a chat, the latest messages stay in view in a pane under it.
     pub latest_pane: bool,
+    /// Agents write only inside their session's folder (and their own state, caches and
+    /// temporary folders); they read anywhere. See [`crate::sandbox`].
+    pub sandbox_writes: bool,
 }
 
 /// The terminals' font size when none is set, and the range allowed.
@@ -118,6 +121,7 @@ impl Default for Prefs {
             terminal_font_size: TERMINAL_FONT_SIZE,
             hybrid_views: false,
             latest_pane: true,
+            sandbox_writes: true,
         }
     }
 }

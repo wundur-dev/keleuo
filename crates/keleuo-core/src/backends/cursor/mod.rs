@@ -47,6 +47,11 @@ impl Backend for CursorBackend {
         ID
     }
 
+    /// `~/.cursor` (chats, settings) and its install folder (it updates itself).
+    fn state_paths(&self) -> Vec<PathBuf> {
+        dirs::home_dir().map(|h| vec![h.join(".cursor"), h.join(".local/share/cursor-agent")]).unwrap_or_default()
+    }
+
     fn name(&self) -> &'static str {
         "Cursor"
     }
@@ -417,6 +422,7 @@ impl CursorAgent {
                 Err(e) => return end(format!("could not copy the images: {e}")),
             };
             let spec = host.program_command(&ProgramSpec { args: run_args(&options, &id, &images), ..base });
+            let spec = crate::sandbox::apply(spec, options.sandbox.as_ref());
             // A group of its own: the run starts a worker that writes the reply, and stopping
             // the run must end that too.
             let mut cmd = spec.to_command();

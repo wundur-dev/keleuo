@@ -68,6 +68,19 @@ fn pref(title: &'static str, description: &'static str, field: fn(&mut Prefs) ->
     switch_pref(title, description, field, true)
 }
 
+/// An on-by-default pref whose description is worked out (it says what this system can do).
+fn pref_described(title: &'static str, description: String, field: fn(&mut Prefs) -> &mut bool) -> SettingItem {
+    SettingItem::new(
+        title,
+        SettingField::switch(
+            move |cx: &App| get(cx, |s| *field(&mut s.prefs.clone())),
+            move |on: bool, cx: &mut App| change(cx, |s| *field(&mut s.prefs) = on),
+        )
+        .default_value(true),
+    )
+    .description(description)
+}
+
 fn pref_off_by_default(title: &'static str, description: &'static str, field: fn(&mut Prefs) -> &mut bool) -> SettingItem {
     switch_pref(title, description, field, false)
 }
@@ -181,6 +194,18 @@ fn chat() -> SettingPage {
                 "Scrolled up in a chat, the current turn stays in a pane under it, following it as it grows. Drag the line above it to change its height.",
                 |p| &mut p.latest_pane,
             ),
+            {
+                use keleuo_core::sandbox::{self, Support};
+                let sandbox = sandbox::system();
+                let description = match sandbox.support() {
+                    Support::Available => format!(
+                        "Agents read anywhere but write only inside their session's folder (and their own settings, caches and temporary folders), with the {}. Applies to agents as they start.",
+                        sandbox.name()
+                    ),
+                    Support::Unavailable(why) => why,
+                };
+                pref_described("Keep agents' writes inside the session folder", description, |p| &mut p.sandbox_writes)
+            },
             pref(
                 "Card of changed files after a turn",
                 "A turn that changed files ends with a card listing them, each opening as a diff.",

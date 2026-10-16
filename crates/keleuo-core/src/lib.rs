@@ -39,6 +39,7 @@ pub mod outbox;
 pub mod paste;
 pub mod platform;
 pub mod questions;
+pub mod sandbox;
 pub mod settings;
 pub mod skill_install;
 pub mod skills;

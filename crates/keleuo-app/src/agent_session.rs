@@ -625,6 +625,16 @@ impl AgentSession {
     }
 
     /// Start the interface on this conversation (a new one, a resumed one, or a fork of one).
+    /// Where the agent may write: its folder (and its own state, caches, temporary folders),
+    /// when Settings keeps agents' writes there and this machine can; else `None` (anywhere).
+    /// An agent on another machine runs unconfined.
+    fn write_policy(&self, cx: &App) -> Option<keleuo_core::sandbox::WritePolicy> {
+        if !crate::prefs(cx).sandbox_writes || self.host.is_remote() {
+            return None;
+        }
+        Some(keleuo_core::sandbox::policy_for(&self.cwd, &self.backend.state_paths(), &[]))
+    }
+
     fn start_terminal(&mut self, cx: &mut Context<Self>) {
         self.dormant = false;
         let started = std::time::Instant::now();
@@ -669,6 +679,7 @@ impl AgentSession {
             resume: None,
             fork,
             settings,
+            sandbox: self.write_policy(cx),
         };
         let Some(spec) = self.backend.terminal_program(&options, &id, new) else { return };
         if crate::perf::enabled() || keleuo_core::env_var("LOG_LAUNCH").is_ok() {
@@ -678,6 +689,7 @@ impl AgentSession {
             Some((r, socket)) => self.host.terminal_program_command(&spec, &r.files, Some((socket, &r.here))),
             None => self.host.terminal_program_command(&spec, &[], None),
         };
+        let command = keleuo_core::sandbox::apply(command, options.sandbox.as_ref());
         let placeholder = Placeholder {
             lines: last_lines(&self.chat, 12),
             label: format!("Starting {}...", self.backend.name()),
@@ -1151,6 +1163,7 @@ impl AgentSession {
             resume: self.chat.session_id.clone(),
             fork: std::mem::take(&mut self.fork_next),
             settings: None,
+            sandbox: self.write_policy(cx),
         };
         let (tx, rx) = async_channel::unbounded::<Message>();
         self.agent.start(

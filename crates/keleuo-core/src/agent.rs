@@ -229,6 +229,8 @@ pub struct StartOptions {
     /// The effort level, for an agent that takes one apart from the model
     /// ([`Backend::efforts`]).
     pub effort: Option<String>,
+    /// Where it may write ([`crate::sandbox`]); `None`: anywhere.
+    pub sandbox: Option<crate::sandbox::WritePolicy>,
 }
 
 /// A running conversation with an agent.
@@ -355,6 +357,12 @@ pub trait Backend: Send + Sync {
     fn name(&self) -> &'static str;
     fn capabilities(&self) -> Capabilities;
     fn new_agent(&self) -> Box<dyn Agent>;
+    /// Where the agent keeps its own state on this machine (its settings, its conversations):
+    /// written even when its writes are kept to the session's folder ([`crate::sandbox`]). A
+    /// folder, or a file (with its siblings sharing the name, for writes renamed into place).
+    fn state_paths(&self) -> Vec<std::path::PathBuf> {
+        Vec::new()
+    }
 
     /// Skills and similar files relevant to `project`.
     fn skills(&self, _host: &dyn Host, _project: &Path) -> Catalog {
