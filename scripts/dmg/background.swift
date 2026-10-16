@@ -3,7 +3,10 @@
 //
 //   swift scripts/dmg/background.swift <out.png> <scale>
 //
-// Drawn at the window's size (WIDTH x HEIGHT points) times <scale> (1, or 2 for Retina). The
+// The window is WIDTH x HEIGHT points, but the scene is painted much larger (CANVAS_W x
+// CANVAS_H): Finder pins the picture to the window's top left and never scales it, so a window
+// made larger shows more sky and meadow rather than a blank edge. Times <scale> (1, or 2 for
+// Retina). The
 // same seed every time, so the stars stay where they are from one build to the next.
 
 import AppKit
@@ -11,6 +14,8 @@ import CoreGraphics
 
 let WIDTH = 660.0
 let HEIGHT = 420.0
+let CANVAS_W = 1600.0
+let CANVAS_H = 1000.0
 /// Where the two icons' centres are, in points from the top left; make-dmg places them there.
 let APP_AT = CGPoint(x: 170, y: 190)
 let APPLICATIONS_AT = CGPoint(x: 490, y: 190)
@@ -26,11 +31,11 @@ let out = URL(fileURLWithPath: args[1])
 
 let space = CGColorSpace(name: CGColorSpace.sRGB)!
 let ctx = CGContext(
-    data: nil, width: Int(WIDTH * scale), height: Int(HEIGHT * scale), bitsPerComponent: 8,
+    data: nil, width: Int(CANVAS_W * scale), height: Int(CANVAS_H * scale), bitsPerComponent: 8,
     bytesPerRow: 0, space: space, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
 // Points, from the top left, as the layout above is given.
 ctx.scaleBy(x: scale, y: scale)
-ctx.translateBy(x: 0, y: HEIGHT)
+ctx.translateBy(x: 0, y: CANVAS_H)
 ctx.scaleBy(x: 1, y: -1)
 
 func rgb(_ hex: UInt32, _ alpha: Double = 1) -> CGColor {
@@ -89,6 +94,15 @@ for _ in 0..<260 {
     ctx.fillEllipse(in: CGRect(x: x - r, y: y - r, width: r * 2, height: r * 2))
 }
 
+// More sky beyond the window, for a window made larger.
+for _ in 0..<380 {
+    let x = WIDTH + random() * (CANVAS_W - WIDTH)
+    let y = pow(random(), 1.35) * HEIGHT * 0.72
+    let r = 0.35 + pow(random(), 2) * 1.1
+    ctx.setFillColor(rgb(0xffffff, 0.35 + random() * 0.55))
+    ctx.fillEllipse(in: CGRect(x: x - r, y: y - r, width: r * 2, height: r * 2))
+}
+
 // The moon: a crescent at the top right, with a soft glow.
 let moon = CGPoint(x: WIDTH - 86, y: 66)
 let moonGlow = CGGradient(
@@ -107,23 +121,27 @@ ctx.restoreGState()
 /// width), filled down to the bottom with a gradient from `top` to `bottom`.
 func hill(_ heights: [Double], top: CGColor, bottom: CGColor) {
     let path = CGMutablePath()
+    // The same rolls again beyond the window, as far as the canvas goes.
     let step = WIDTH / Double(heights.count - 1)
-    let points = heights.enumerated().map { CGPoint(x: Double($0.offset) * step, y: HEIGHT * $0.element) }
-    path.move(to: CGPoint(x: 0, y: HEIGHT))
+    let rolls = Int((CANVAS_W / step).rounded(.up)) + 1
+    let points = (0...rolls).map { i in
+        CGPoint(x: Double(i) * step, y: HEIGHT * heights[i % (heights.count - 1)])
+    }
+    path.move(to: CGPoint(x: 0, y: CANVAS_H))
     path.addLine(to: points[0])
     for i in 1..<points.count {
         let a = points[i - 1], b = points[i]
         let mid = (a.x + b.x) / 2
         path.addCurve(to: b, control1: CGPoint(x: mid, y: a.y), control2: CGPoint(x: mid, y: b.y))
     }
-    path.addLine(to: CGPoint(x: WIDTH, y: HEIGHT))
+    path.addLine(to: CGPoint(x: points.last!.x, y: CANVAS_H))
     path.closeSubpath()
     let crest = heights.min()! * HEIGHT
     ctx.saveGState()
     ctx.addPath(path)
     ctx.clip()
     let fill = CGGradient(colorsSpace: space, colors: [top, bottom] as CFArray, locations: [0, 1])!
-    ctx.drawLinearGradient(fill, start: CGPoint(x: 0, y: crest), end: CGPoint(x: 0, y: HEIGHT), options: [])
+    ctx.drawLinearGradient(fill, start: CGPoint(x: 0, y: crest), end: CGPoint(x: 0, y: HEIGHT), options: [.drawsAfterEndLocation])
     ctx.restoreGState()
     // Moonlight along the crest.
     ctx.saveGState()
@@ -147,6 +165,18 @@ for _ in 0..<14 {
         colorsSpace: space, colors: [rgb(0xf6f08a, 0.55), rgb(0xf6f08a, 0)] as CFArray, locations: [0, 1])!
     ctx.drawRadialGradient(glow, startCenter: CGPoint(x: x, y: y), startRadius: 0, endCenter: CGPoint(x: x, y: y), endRadius: 4.5, options: [])
     ctx.setFillColor(rgb(0xfffbd0, 0.9))
+    ctx.fillEllipse(in: CGRect(x: x - 0.7, y: y - 0.7, width: 1.4, height: 1.4))
+}
+
+// More fireflies beyond the window: to the right, and in the meadow below.
+for _ in 0..<70 {
+    let below = random() < 0.4
+    let x = below ? random() * WIDTH : WIDTH + random() * (CANVAS_W - WIDTH)
+    let y = below ? HEIGHT + random() * (CANVAS_H - HEIGHT) : HEIGHT * 0.78 + random() * (CANVAS_H - HEIGHT * 0.78)
+    let glow = CGGradient(
+        colorsSpace: space, colors: [rgb(0xf6f08a, 0.5), rgb(0xf6f08a, 0)] as CFArray, locations: [0, 1])!
+    ctx.drawRadialGradient(glow, startCenter: CGPoint(x: x, y: y), startRadius: 0, endCenter: CGPoint(x: x, y: y), endRadius: 4.5, options: [])
+    ctx.setFillColor(rgb(0xfffbd0, 0.85))
     ctx.fillEllipse(in: CGRect(x: x - 0.7, y: y - 0.7, width: 1.4, height: 1.4))
 }
 
@@ -216,4 +246,4 @@ let image = ctx.makeImage()!
 let dest = CGImageDestinationCreateWithURL(out as CFURL, "public.png" as CFString, 1, nil)!
 CGImageDestinationAddImage(dest, image, [kCGImagePropertyDPIWidth: 72 * scale, kCGImagePropertyDPIHeight: 72 * scale] as CFDictionary)
 CGImageDestinationFinalize(dest)
-print("wrote \(out.path) (\(Int(WIDTH * scale))x\(Int(HEIGHT * scale)))")
+print("wrote \(out.path) (\(Int(CANVAS_W * scale))x\(Int(CANVAS_H * scale)))")
