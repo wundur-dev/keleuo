@@ -14,6 +14,8 @@ const MIN_HEIGHT: f32 = 72.;
 const MIN_ABOVE: f32 = 120.;
 /// The separator's grip, taller than the line it draws.
 const GRIP: f32 = 7.;
+/// The height of the Go to latest pill on the separator.
+const PILL: f32 = 30.;
 
 /// The pane's own list and its state, apart from the conversation's list.
 pub(super) struct Latest {
@@ -99,6 +101,7 @@ impl ChatPanel {
         }
         let theme = cx.theme();
         let (border, ground, muted) = (theme.border, theme.background, theme.muted_foreground);
+        let (fg, raised, hover) = (theme.foreground, theme.background, theme.secondary_hover);
         let height = self.latest.height.get();
         let dragging = self.latest.drag.get().is_some();
         let from = self.latest.from;
@@ -176,21 +179,7 @@ impl ChatPanel {
                         .justify_between()
                         .text_xs()
                         .text_color(muted)
-                        .child("Latest")
-                        // Down to the end of the conversation (which puts the pane away), and
-                        // following it again.
-                        .child(
-                            Button::new("latest-go")
-                                .icon(IconName::ArrowDown)
-                                .label("Go to latest")
-                                .xsmall()
-                                .ghost()
-                                .tab_stop(false)
-                                .on_click(cx.listener(|p, _, _, cx| {
-                                    p.list.set_follow_mode(FollowMode::Tail);
-                                    cx.notify();
-                                })),
-                        ),
+                        .child("Latest"),
                 )
                 // Its own place among the window's elements: its messages keep their own state
                 // (selection, layout), apart from the same messages in the conversation above.
@@ -215,6 +204,44 @@ impl ChatPanel {
                             .size_full(),
                         ),
                 )
+                // Down to the end of the conversation (which puts the pane away) and following
+                // it again: a pill on the separator's line, over both sides of it. Apart from
+                // the separator, so pressing it does not start a drag.
+                .child(
+                    div()
+                        .absolute()
+                        .top(px(GRIP / 2. - PILL / 2.))
+                        .left_0()
+                        .right_0()
+                        .flex()
+                        .justify_center()
+                        .child(
+                            div()
+                                .id("latest-go")
+                                .h(px(PILL))
+                                .px_3()
+                                .flex()
+                                .items_center()
+                                .gap_1p5()
+                                .rounded_full()
+                                .border_1()
+                                .border_color(border)
+                                .bg(raised)
+                                .shadow_md()
+                                .text_sm()
+                                .text_color(fg)
+                                .cursor_pointer()
+                                .hover(move |d| d.bg(hover))
+                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                .on_click(cx.listener(|p, _, _, cx| {
+                                    p.list.set_follow_mode(FollowMode::Tail);
+                                    cx.notify();
+                                }))
+                                .child(Icon::new(IconName::ArrowDown).small())
+                                .child("Go to latest"),
+                        ),
+                )
+                .relative()
                 .into_any_element(),
         )
     }
