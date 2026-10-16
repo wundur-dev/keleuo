@@ -245,6 +245,13 @@ struct Usage {
 }
 
 impl Usage {
+    /// Elsewhere than macOS: frames are counted, the rest reads zero (not measured yet).
+    #[cfg(not(target_os = "macos"))]
+    fn now() -> Self {
+        Self { at: Instant::now(), cpu: Duration::ZERO, footprint: 0, wakeups: 0 }
+    }
+
+    #[cfg(target_os = "macos")]
     fn now() -> Self {
         let at = Instant::now();
         // SAFETY: both calls only write into the zeroed structs passed to them.
