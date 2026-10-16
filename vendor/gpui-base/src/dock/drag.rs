@@ -264,6 +264,128 @@ impl DropPlaceholderBounds {
     }
 }
 
+/// A target of the docking compass: the five squares drawn around a group's centre while a
+/// panel is dragged over it (as Visual Studio's), each a place the panel can go: split off
+/// to a side, or join the group as a tab.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CompassTarget {
+    Up,
+    Left,
+    Right,
+    Down,
+    Tab,
+}
+
+impl CompassTarget {
+    pub const ALL: [CompassTarget; 5] =
+        [CompassTarget::Up, CompassTarget::Left, CompassTarget::Right, CompassTarget::Down, CompassTarget::Tab];
+
+    /// Where the panel goes: a split, or `None` to join the group as a tab.
+    pub fn placement(self) -> Option<Placement> {
+        match self {
+            CompassTarget::Up => Some(Placement::Top),
+            CompassTarget::Left => Some(Placement::Left),
+            CompassTarget::Right => Some(Placement::Right),
+            CompassTarget::Down => Some(Placement::Bottom),
+            CompassTarget::Tab => None,
+        }
+    }
+}
+
+/// A compass target's size and the space between targets.
+pub const COMPASS_BUTTON: f32 = 32.;
+const COMPASS_GAP: f32 = 6.;
+
+/// Whether the compass fits in `bounds` (with room around it); a smaller group keeps the
+/// zones of [`split_placement_at`].
+pub fn compass_fits(bounds: Bounds<Pixels>) -> bool {
+    let need = px(COMPASS_BUTTON * 3. + COMPASS_GAP * 2. + 24.);
+    bounds.size.width >= need && bounds.size.height >= need
+}
+
+/// Where target `target` is drawn for a group at `bounds` (same coordinates as `bounds`).
+pub fn compass_target_bounds(bounds: Bounds<Pixels>, target: CompassTarget) -> Bounds<Pixels> {
+    let step = px(COMPASS_BUTTON + COMPASS_GAP);
+    let (dx, dy) = match target {
+        CompassTarget::Up => (px(0.), -step),
+        CompassTarget::Left => (-step, px(0.)),
+        CompassTarget::Right => (step, px(0.)),
+        CompassTarget::Down => (px(0.), step),
+        CompassTarget::Tab => (px(0.), px(0.)),
+    };
+    let size = gpui::size(px(COMPASS_BUTTON), px(COMPASS_BUTTON));
+    let centre = bounds.center();
+    Bounds::new(gpui::point(centre.x + dx - size.width / 2., centre.y + dy - size.height / 2.), size)
+}
+
+/// The compass target `position` is over, if any.
+pub fn compass_target_at(bounds: Bounds<Pixels>, position: Point<Pixels>) -> Option<CompassTarget> {
+    CompassTarget::ALL.into_iter().find(|t| compass_target_bounds(bounds, *t).contains(&position))
+}
+
+/// The compass over a group while a panel is dragged over it: the group's content bounds and
+/// the target the pointer is on, if any.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Compass {
+    pub bounds: Bounds<Pixels>,
+    pub hovered: Option<CompassTarget>,
+}
+
+impl Compass {
+    /// Each target and where it is drawn, relative to the group's content (its top left 0, 0).
+    pub fn targets(&self) -> impl Iterator<Item = (CompassTarget, Bounds<Pixels>)> + '_ {
+        CompassTarget::ALL.into_iter().map(|t| {
+            let b = compass_target_bounds(self.bounds, t);
+            (t, Bounds::new(b.origin - self.bounds.origin, b.size))
+        })
+    }
+
+    /// The compass drawn in the given colours: each target a small window outline (`edge`)
+    /// with the side it docks to filled in (`mark`); the target under the pointer in `hot`.
+    pub fn element(&self, ground: gpui::Hsla, edge: gpui::Hsla, mark: gpui::Hsla, hot: gpui::Hsla) -> gpui::AnyElement {
+        use gpui::{IntoElement as _, ParentElement as _, Styled as _, div, relative};
+        let mut layer = div().absolute().top_0().left_0().size_full();
+        for (target, at) in self.targets() {
+            let on = self.hovered == Some(target);
+            let ink = if on { hot } else { mark };
+            let fill = div().absolute().bg(ink.opacity(if on { 0.9 } else { 0.55 }));
+            let fill = match target {
+                CompassTarget::Up => fill.top_0().left_0().w_full().h(relative(0.45)),
+                CompassTarget::Down => fill.bottom_0().left_0().w_full().h(relative(0.45)),
+                CompassTarget::Left => fill.top_0().left_0().h_full().w(relative(0.45)),
+                CompassTarget::Right => fill.top_0().right_0().h_full().w(relative(0.45)),
+                CompassTarget::Tab => fill.top_0().left_0().size_full().opacity(0.6),
+            };
+            layer = layer.child(
+                div()
+                    .absolute()
+                    .left(at.origin.x)
+                    .top(at.origin.y)
+                    .size(at.size.width)
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(6.))
+                    .bg(if on { hot.opacity(0.12) } else { ground })
+                    .border_1()
+                    .border_color(if on { hot } else { edge })
+                    .shadow_sm()
+                    .child(
+                        div()
+                            .relative()
+                            .size(px(18.))
+                            .rounded(px(2.))
+                            .border_1()
+                            .border_color(ink)
+                            .overflow_hidden()
+                            .child(fill),
+                    ),
+            );
+        }
+        layer.into_any_element()
+    }
+}
+
 /// Which split zone `position` falls into within `bounds`, or `None` for the
 /// centre zone (merge into the tab group rather than split).
 pub fn split_placement_at(bounds: Bounds<Pixels>, position: Point<Pixels>) -> Option<Placement> {
@@ -285,6 +407,25 @@ mod tests {
     use gpui::point;
 
     use super::*;
+
+    #[test]
+    fn the_compass_has_five_targets_around_the_centre() {
+        let bounds = Bounds::new(point(px(100.), px(50.)), gpui::size(px(400.), px(300.)));
+        assert!(compass_fits(bounds));
+        let c = bounds.center();
+        assert_eq!(compass_target_at(bounds, c), Some(CompassTarget::Tab));
+        assert_eq!(compass_target_at(bounds, point(c.x, c.y - px(38.))), Some(CompassTarget::Up));
+        assert_eq!(compass_target_at(bounds, point(c.x - px(38.), c.y)), Some(CompassTarget::Left));
+        assert_eq!(compass_target_at(bounds, point(c.x + px(38.), c.y)), Some(CompassTarget::Right));
+        assert_eq!(compass_target_at(bounds, point(c.x, c.y + px(38.))), Some(CompassTarget::Down));
+        // Between targets, and near the edges: none.
+        assert_eq!(compass_target_at(bounds, point(c.x + px(38.), c.y + px(38.))), None);
+        assert_eq!(compass_target_at(bounds, point(px(105.), px(55.))), None);
+        assert_eq!(CompassTarget::Tab.placement(), None);
+        assert_eq!(CompassTarget::Left.placement(), Some(Placement::Left));
+        // Too small a group: no compass.
+        assert!(!compass_fits(Bounds::new(point(px(0.), px(0.)), gpui::size(px(120.), px(300.)))));
+    }
 
     #[test]
     fn drop_placeholder_bounds_cover_each_target_placement() {

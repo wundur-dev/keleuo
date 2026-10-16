@@ -6,7 +6,7 @@ use std::{rc::Rc, sync::Arc};
 use gpui::{
     AnyElement, AnyView, App, Bounds, Context, Div, DragMoveEvent, Empty, EventEmitter,
     FocusHandle, Focusable, InteractiveElement as _, IntoElement, ParentElement as _, Pixels,
-    Render, Stateful, Styled as _, WeakEntity, Window, div, prelude::FluentBuilder as _, px,
+    Point, Render, Stateful, Styled as _, WeakEntity, Window, div, prelude::FluentBuilder as _, px,
 };
 
 use crate::Placement;
@@ -14,8 +14,8 @@ use crate::Placement;
 use super::{
     active::ActiveTracker,
     drag::{
-        AnyDrag, DragPanel, DropIndicator, DropPlaceholderBounds, DropTarget, ITEM_DRAG_SESSION_ID,
-        split_placement_at,
+        AnyDrag, Compass, DragPanel, DropIndicator, DropPlaceholderBounds, DropTarget, ITEM_DRAG_SESSION_ID,
+        compass_fits, compass_target_at, split_placement_at,
     },
     layout::{InsertTarget, NodeId, PanelId},
     panel::PanelView,
@@ -166,6 +166,8 @@ pub struct TabGroup {
     focus_handle: FocusHandle,
     active: ActiveTracker,
     drop_indicator: Option<DropIndicator>,
+    /// The docking compass, while a panel is dragged over a group large enough for it.
+    compass: Option<Compass>,
     renderer: Rc<dyn TabGroupRenderer>,
 }
 
@@ -185,6 +187,7 @@ impl TabGroup {
             focus_handle: cx.focus_handle(),
             active: ActiveTracker::default(),
             drop_indicator: None,
+            compass: None,
             renderer: Rc::new(BareTabGroup),
         }
     }
@@ -542,10 +545,11 @@ impl TabGroup {
         let bounds = drag.bounds;
         if !bounds.contains(&drag.event.position) {
             self.clear_drop_indicator(cx);
+            self.set_compass(None, cx);
             return;
         }
 
-        let placement = split_placement_at(bounds, drag.event.position);
+        let Some(placement) = self.placement_at(bounds, drag.event.position, cx) else { return };
         let dragged = drag.drag(cx);
         // The placeholder flies in from wherever the preview currently is.
         let source = DropPlaceholderBounds::new(
@@ -569,13 +573,45 @@ impl TabGroup {
         let bounds = drag.bounds;
         if !bounds.contains(&drag.event.position) {
             self.clear_drop_indicator(cx);
+            self.set_compass(None, cx);
             return;
         }
 
-        let placement = split_placement_at(bounds, drag.event.position);
+        let Some(placement) = self.placement_at(bounds, drag.event.position, cx) else { return };
         let source = DropPlaceholderBounds::for_placement(bounds, placement);
 
         self.sync_drop_placeholder(bounds, placement, ITEM_DRAG_SESSION_ID, source, cx);
+    }
+
+    /// Where a drag at `position` would land: on a group large enough for the compass, the
+    /// target under the pointer (`None` when it is on none: then nothing would happen, and
+    /// the preview goes); on a smaller one, the zone it is in (`split_placement_at`).
+    fn placement_at(
+        &mut self,
+        bounds: Bounds<Pixels>,
+        position: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) -> Option<Option<Placement>> {
+        if !compass_fits(bounds) {
+            self.set_compass(None, cx);
+            return Some(split_placement_at(bounds, position));
+        }
+        let hovered = compass_target_at(bounds, position);
+        self.set_compass(Some(Compass { bounds, hovered }), cx);
+        match hovered {
+            Some(target) => Some(target.placement()),
+            None => {
+                self.clear_drop_indicator(cx);
+                None
+            }
+        }
+    }
+
+    fn set_compass(&mut self, compass: Option<Compass>, cx: &mut Context<Self>) {
+        if self.compass != compass {
+            self.compass = compass;
+            cx.notify();
+        }
     }
 
     fn sync_drop_placeholder(
@@ -651,6 +687,12 @@ impl TabGroup {
         cx: &mut Context<Self>,
     ) {
         let indicator = self.drop_indicator.take();
+        // Over the compass but on none of its targets: nothing happens.
+        if ix.is_none() && indicator.is_none() && self.compass.take().is_some() {
+            cx.notify();
+            return;
+        }
+        self.compass = None;
         let placement = match ix {
             Some(_) => None,
             None => indicator.and_then(|indicator| indicator.placement()),
@@ -707,6 +749,7 @@ impl Render for TabGroup {
         let focus_handle = self.focus_handle(cx);
         let droppable = context.droppable;
         let indicator = context.drop_indicator;
+        let compass = self.compass.filter(|_| cx.has_active_drag());
 
         renderer
             .frame(&context, window, cx)
@@ -754,6 +797,12 @@ impl Render for TabGroup {
                             }))
                             .on_drag_move(cx.listener(Self::on_item_drag_move))
                             .on_drop(cx.listener(|this, item: &AnyDrag, _, cx| {
+                                // Over the compass but on none of its targets: nothing happens.
+                                if this.drop_indicator.is_none() && this.compass.take().is_some() {
+                                    cx.notify();
+                                    return;
+                                }
+                                this.compass = None;
                                 let placement = this
                                     .drop_indicator
                                     .and_then(|indicator| indicator.placement());
@@ -771,6 +820,11 @@ impl Render for TabGroup {
                     })
                     .when_some(indicator, |this, indicator| {
                         this.children(renderer.render_drop_indicator(indicator, window, cx))
+                    })
+                    // The compass over all, while a drag is on (one cancelled over the group
+                    // leaves none behind).
+                    .when_some(compass, |this, compass| {
+                        this.child(renderer.render_compass(compass, window, cx))
                     }),
             )
     }
@@ -979,6 +1033,17 @@ pub trait TabGroupRenderer: 'static {
         cx: &mut App,
     ) -> Option<AnyElement> {
         None
+    }
+
+    /// The docking compass, in neutral greys unless a skin draws it in its own colours.
+    fn render_compass(&self, compass: Compass, window: &mut Window, cx: &mut App) -> AnyElement {
+        let _ = (window, cx);
+        compass.element(
+            gpui::hsla(0., 0., 0.98, 1.),
+            gpui::hsla(0., 0., 0.75, 1.),
+            gpui::hsla(0., 0., 0.45, 1.),
+            gpui::hsla(0.62, 0.6, 0.55, 1.),
+        )
     }
 }
 

@@ -181,7 +181,7 @@ pub(crate) mod test_support;
 
 pub use dock_area::{DockArea, DockAreaRenderer, DockContext, DockEvent};
 pub use dock_placement::{Dock, DockSizing};
-pub use drag::{AnyDrag, DragPanel, DropIndicator, DropPlaceholderBounds, DropTarget};
+pub use drag::{AnyDrag, Compass, CompassTarget, DragPanel, DropIndicator, DropPlaceholderBounds, DropTarget};
 // `split_placement_at` stays internal for the same reason: where a drop lands
 // is base's decision, and a renderer is told the result through
 // `TabGroupContext::drop_indicator`.

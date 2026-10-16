@@ -585,6 +585,12 @@ impl TabGroupRenderer for SheetGroup {
     fn render_empty(&self, group: &TabGroupContext, window: &mut Window, cx: &mut App) -> Option<AnyElement> {
         self.inner.render_empty(group, window, cx)
     }
+
+    /// The docking compass in the window's colours, the target under the pointer in the accent.
+    fn render_compass(&self, compass: gpui_kit::base::dock::Compass, _: &mut Window, cx: &mut App) -> AnyElement {
+        let theme = cx.theme();
+        compass.element(theme.background, theme.border, theme.muted_foreground, theme.ring)
+    }
 }
 
 #[cfg(test)]
@@ -637,6 +643,70 @@ mod tests {
 
     fn tab(e: &Entity<Probe>) -> (&'static str, usize) {
         ("sheet-tab", e.entity_id().as_u64() as usize)
+    }
+
+    /// The compass: a drop between its targets does nothing; on its left target the dragged
+    /// panel splits off to the left of the group it was dropped on.
+    #[gpui_kit::test]
+    async fn the_compass_decides_where_a_panel_docks(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let mut probes = Vec::new();
+        let handle = cx.update(|cx| {
+            let options = WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(gpui_kit::Bounds { origin: Default::default(), size: size(px(1000.), px(600.)) })),
+                ..Default::default()
+            };
+            gpui_kit::open_window(options, cx, |window, cx| {
+                let (area, _) = KeleuoSkin::dock_area("test", None, window, cx);
+                let make = |kind, id, cx: &mut App| cx.new(|cx| Probe { kind, id, focus: cx.focus_handle() });
+                let files = make("Files", "files", cx);
+                let skills = make("Skills", "skills", cx);
+                let doc_a = make("Doc", "doc-a", cx);
+                let doc_b = make("Doc", "doc-b", cx);
+                probes = vec![files.clone(), skills.clone(), doc_a.clone(), doc_b.clone()];
+                let layout = DockLayout::h_split()
+                    .child(DockLayout::tabs().panel_view(panel_handle(files), cx).panel_view(panel_handle(skills), cx), Some(px(300.)))
+                    .child(DockLayout::tabs().panel_view(panel_handle(doc_a), cx).panel_view(panel_handle(doc_b), cx), None);
+                area.update(cx, |a, cx| a.set_center(layout, window, cx));
+                cx.new(|_| Root(area))
+            })
+            .unwrap()
+            .0
+        });
+        let skills = probes[1].clone();
+        let mut docs = None;
+        let mut from = None;
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            docs = Some(window.find("doc-a").bounds());
+            from = Some(window.find(tab(&skills)).bounds().center());
+        })
+        .unwrap();
+        let (docs, from) = (docs.unwrap(), from.unwrap());
+        let c = docs.center();
+        // Between two targets: nothing moves.
+        cx.update_window(handle, |_, window, cx| window.drag(from, gpui_kit::point(c.x + px(38.), c.y + px(38.)), cx)).unwrap();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find("doc-a").bounds() == docs, "the documents' group is as it was");
+        })
+        .unwrap();
+        // On the left target: Skills splits off to the left of the documents.
+        cx.update_window(handle, |_, window, cx| {
+            window.click(tab(&skills), cx);
+            window.render_frame(cx);
+        })
+        .unwrap();
+        cx.wait_for(handle, Duration::from_secs(1), |w, _| w.try_find("skills").is_some()).await;
+        cx.update_window(handle, |_, window, cx| window.drag(from, gpui_kit::point(c.x - px(38.), c.y), cx)).unwrap();
+        cx.wait_for(handle, Duration::from_secs(1), |w, cx| {
+            w.render_frame(cx);
+            match (w.try_find("skills"), w.try_find("doc-a")) {
+                (Some(s), Some(d)) => s.bounds().left() >= docs.left() - px(1.) && s.bounds().right() <= d.bounds().left() + px(1.),
+                _ => false,
+            }
+        })
+        .await;
     }
 
     #[gpui_kit::test]
