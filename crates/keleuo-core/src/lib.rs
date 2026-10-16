@@ -29,6 +29,7 @@ pub mod compose;
 pub mod conversation;
 pub mod diff;
 pub mod files;
+pub mod find;
 pub mod frontmatter;
 pub mod images;
 pub mod host;

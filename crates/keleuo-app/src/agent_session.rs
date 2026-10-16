@@ -31,6 +31,9 @@ use crate::hooks::{self, Registration, Reply};
 use crate::terminal_view::{ImageSupport, PasteImage, Placeholder, TerminalEvent, TerminalView};
 use std::rc::Rc;
 
+/// Parts of a session read for a search: each part's items, by where the part starts.
+pub type EarlierParts = HashMap<u64, Vec<keleuo_core::conversation::Item>>;
+
 /// What a session has used, as the window shows it.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Spend {
@@ -336,6 +339,19 @@ impl AgentSession {
         let (host, backend, cwd) = (self.host.clone(), self.backend.clone(), self.cwd.clone());
         let id = self.chat.session_id.clone()?;
         Some(move |from, to| backend.load_segment(host.as_ref(), &cwd, &id, from, to))
+    }
+
+    /// Read several parts of the session not in the list (for a search): each part's items by
+    /// where it starts; a part that cannot be read is left out.
+    pub fn earlier_loader_many(&self) -> Option<impl FnOnce(Vec<(u64, u64)>) -> EarlierParts + Send + 'static> {
+        let (host, backend, cwd) = (self.host.clone(), self.backend.clone(), self.cwd.clone());
+        let id = self.chat.session_id.clone()?;
+        Some(move |parts: Vec<(u64, u64)>| {
+            parts
+                .into_iter()
+                .filter_map(|(from, to)| Some((from, backend.load_segment(host.as_ref(), &cwd, &id, from, to).ok()?)))
+                .collect()
+        })
     }
 
     /// Messages waiting for the agent to be up.

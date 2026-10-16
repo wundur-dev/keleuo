@@ -33,6 +33,7 @@ mod composer;
 mod items;
 mod tools;
 mod rows;
+mod find;
 
 use crate::actions::CopyConversation;
 use crate::agent_session::AgentSession;
@@ -125,6 +126,11 @@ pub struct ChatPanel {
     native_spinner: crate::native_spinner::NativeSpinner,
     /// The panel itself, for what the workspace draws for it (the working line's box).
     me: WeakEntity<ChatPanel>,
+    /// Find in the conversation, while its bar shows; the item of the match gone to (marked);
+    /// a match waiting for its part to be read in (where the part starts, its item, the offset).
+    find: Option<find::FindBar>,
+    found: Option<usize>,
+    pending_find: Option<(u64, usize, usize)>,
     /// The Chat and Terminal view tabs.
     views: Rc<StripState>,
     _subs: Vec<Subscription>,
@@ -277,6 +283,9 @@ impl ChatPanel {
             working_slot: Default::default(),
             native_spinner: Default::default(),
             me: cx.entity().downgrade(),
+            find: None,
+            found: None,
+            pending_find: None,
             ticker: None,
             on_screen: Default::default(),
             views: Rc::new(StripState::default()),
@@ -416,6 +425,7 @@ impl ChatPanel {
                     p.list.scroll_to(ListOffset { item_ix: at + added - 1, offset_in_item: px(0.) });
                 }
                 p.last_revision = rev;
+                p.earlier_read_in(from, ix, cx);
                 cx.notify();
             });
         })
@@ -475,7 +485,8 @@ impl ChatPanel {
         {
             let top = if r.part == 0 { self.space_above(ix, cx) } else { px(PIECE_GAP) };
             let piece = self.render_reply_piece(ix, &r, text, *streaming, cx);
-            return self.column(piece, last, top);
+            let el = self.column(piece, last, top);
+            return self.mark_found(ix, el, cx);
         }
         let top = self.space_above(ix, cx);
         // The end-of-turn card, turned off in Settings: nothing, taking no room (but the last
@@ -517,10 +528,19 @@ impl ChatPanel {
             .gap_2()
             .when(member, |d| d.pl_4())
             .children(parts);
-        match group {
+        let el = match group {
             Some(header) => self.column(div().w_full().flex().flex_col().gap_2().child(header).child(body).into_any_element(), last, top),
             None => self.column(body.into_any_element(), last, top),
+        };
+        self.mark_found(ix, el, cx)
+    }
+
+    /// The match gone to, marked: its message on a faint accent ground.
+    fn mark_found(&self, ix: usize, el: AnyElement, cx: &App) -> AnyElement {
+        if self.find.is_none() || self.found != Some(ix) {
+            return el;
         }
+        div().w_full().bg(cx.theme().ring.opacity(0.10)).child(el).into_any_element()
     }
 
     /// The space above entry `ix`. A new turn (the person's message, or the images that lead
@@ -746,6 +766,21 @@ impl ChatPanel {
                 )
             })
             .child(
+                Button::new("chat-find")
+                    .icon(IconName::Search)
+                    .xsmall()
+                    .ghost()
+                    .tab_stop(false)
+                    .tooltip("Find in conversation (Cmd+F)")
+                    .on_click(cx.listener(|p, _, window, cx| {
+                        if p.find.is_some() {
+                            p.close_find(window, cx)
+                        } else {
+                            p.open_find(window, cx)
+                        }
+                    })),
+            )
+            .child(
                 Button::new("chat-options")
                     .icon(IconName::Ellipsis)
                     .xsmall()
@@ -947,9 +982,15 @@ impl Render for ChatPanel {
             .flex()
             .flex_col()
             .bg(cx.theme().background)
+            .key_context("Chat")
             .track_focus(&self.focus)
             .on_action(cx.listener(|p, _: &CopyConversation, window, cx| p.copy_conversation(window, cx)))
+            // Find: its own key, and the message box's (Cmd+F there asks the box to search, and a
+            // box that does not passes it on).
+            .on_action(cx.listener(|p, _: &crate::actions::FindInChat, window, cx| p.open_find(window, cx)))
+            .on_action(cx.listener(|p, _: &gpui_kit::component::input::Search, window, cx| p.open_find(window, cx)))
             .child(self.render_header(cx))
+            .children(self.render_find(cx))
             // The agent's terminal as a view of its own, cached: drawing the chat (its header,
             // a clock) does not paint the whole grid again; the terminal does when it changes.
             .when_some(terminal.clone(), |d, term| {

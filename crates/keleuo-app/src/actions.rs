@@ -37,6 +37,7 @@ actions!(
         ToggleNotifyFinished,
         ToggleCodeFont,
         CopyConversation,
+        FindInChat,
         OpenWebPage,
         // In a web page (see web_panel.rs).
         FocusAddress,
@@ -73,6 +74,11 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-shift-\\", SplitDown, None),
         KeyBinding::new("cmd-shift-b", ToggleSessions, None),
         KeyBinding::new("cmd-alt-c", CopyConversation, None),
+        // Find in the conversation: Cmd+F on macOS (and Ctrl+F, as elsewhere), Ctrl+F elsewhere.
+        KeyBinding::new("secondary-f", FindInChat, Some("Chat")),
+        KeyBinding::new("ctrl-f", FindInChat, Some("Chat")),
+        // In a terminal Ctrl+F is the program's (the shell's cursor), not Find.
+        KeyBinding::new("ctrl-f", gpui_kit::NoAction, Some("Terminal")),
         KeyBinding::new("ctrl-tab", NextSession, None),
         KeyBinding::new("ctrl-shift-tab", PrevSession, None),
         KeyBinding::new("ctrl--", GoBack, None),
