@@ -1109,10 +1109,10 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<keleuo_core::host::Watch> {
-        let (tx, rx) = std::sync::mpsc::channel();
-        let watch = host.watch(root, tx)?;
-        let (atx, arx) = async_channel::unbounded::<Vec<PathBuf>>();
-        std::thread::spawn(move || {
+        // Changes are handed from the watcher's thread to a task here: no thread of our own.
+        let (atx, arx) = async_channel::unbounded::<keleuo_core::host::Change>();
+        let watch = host.watch(root, std::sync::Arc::new(move |c| drop(atx.try_send(c))))?;
+        cx.spawn_in(window, async move |this, cx| {
             let noise = |p: &PathBuf| {
                 p.components().any(|c| {
                     matches!(
@@ -1121,10 +1121,11 @@ impl Workspace {
                     )
                 })
             };
-            while let Ok(change) = rx.recv() {
-                let mut paths = change.paths;
-                // Debounce: gather what arrives in the next 150 ms.
-                while let Ok(more) = rx.recv_timeout(std::time::Duration::from_millis(150)) {
+            while let Ok(first) = arx.recv().await {
+                // Debounce: what arrives in the next 150 ms joins it.
+                cx.background_executor().timer(std::time::Duration::from_millis(150)).await;
+                let mut paths = first.paths;
+                while let Ok(more) = arx.try_recv() {
                     paths.extend(more.paths);
                 }
                 paths.retain(|p| !noise(p));
@@ -1133,13 +1134,6 @@ impl Workspace {
                 if paths.is_empty() {
                     continue;
                 }
-                if atx.send_blocking(paths).is_err() {
-                    break;
-                }
-            }
-        });
-        cx.spawn_in(window, async move |this, cx| {
-            while let Ok(paths) = arx.recv().await {
                 let ok = this.update_in(cx, |ws, window, cx| {
                     for p in &paths {
                         ws.file_changed(p, window, cx);

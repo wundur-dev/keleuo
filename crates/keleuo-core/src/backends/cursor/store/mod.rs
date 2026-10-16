@@ -422,7 +422,7 @@ mod tests {
         fn list_files(&self, root: &Path, max: usize) -> Vec<(std::path::PathBuf, bool)> {
             crate::host::LocalHost.list_files(root, max)
         }
-        fn watch(&self, root: &Path, changes: std::sync::mpsc::Sender<crate::host::Change>) -> Option<crate::host::Watch> {
+        fn watch(&self, root: &Path, changes: crate::host::ChangeSink) -> Option<crate::host::Watch> {
             crate::host::LocalHost.watch(root, changes)
         }
         fn shell_command(&self, cwd: &Path) -> crate::host::CommandSpec {

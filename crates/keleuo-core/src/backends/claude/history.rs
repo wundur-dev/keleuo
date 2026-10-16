@@ -510,8 +510,10 @@ fn subagent_line_events(v: &Value, tool_use_id: &str, mapper: &mut Mapper) -> Ve
 /// Follow a session file being written by Claude Code in a terminal: every complete line added
 /// after now (and to its subagents' transcripts) is mapped and sent to `sink`, until `stop`.
 /// An assistant message that ends its turn also ends the turn here, with its token counts, and
-/// each new message's cost is estimated from its usage. The file is checked every 100 ms and
-/// only what was added is read.
+/// each new message's cost is estimated from its usage. Only what was added is read, when it
+/// was added: on this machine the folder's change notices wake the follower; on another (over
+/// ssh, where nothing tells) it looks every 300 ms while the file grows and less often, up to
+/// every 2 s, while it does not.
 pub fn follow(host: &dyn Host, path: &Path, cwd: &str, sink: &crate::agent::Sink, stop: &std::sync::atomic::AtomicBool) {
     use crate::agent::Message;
     use std::collections::HashMap;
@@ -561,9 +563,18 @@ pub fn follow(host: &dyn Host, path: &Path, cwd: &str, sink: &crate::agent::Sink
         }
     }
     let mut live = super::live::LiveOutputs::new(host, path);
+    // Woken by the folder's change notices where the host can watch (the session file and its
+    // subagents' transcripts are in it).
+    let (woken, wake) = std::sync::mpsc::channel::<()>();
+    let watch = path
+        .parent()
+        .and_then(|dir| host.watch(dir, std::sync::Arc::new(move |_| { let _ = woken.send(()); })));
     let mut round = 0u64;
+    let mut quiet = 0u32;
     while !stop.load(Ordering::Relaxed) {
+        let mut grew = false;
         for v in main.lines(host, path) {
+            grew = true;
             for e in line_events(&v, &mut main.mapper) {
                 if let Some(l) = live.as_mut() {
                     l.observe(&e);
@@ -580,8 +591,8 @@ pub fn follow(host: &dyn Host, path: &Path, cwd: &str, sink: &crate::agent::Sink
                 sink(Message::Event(end));
             }
         }
-        // Subagents less often: a directory listing per check.
-        if round.is_multiple_of(3)
+        // Subagents: a directory listing per look (one look in three when polling).
+        if (watch.is_some() || round.is_multiple_of(3))
             && let Ok(entries) = host.read_dir(&agents_dir)
         {
             for e in entries.iter().filter(|e| e.name.ends_with(".jsonl")) {
@@ -596,6 +607,7 @@ pub fn follow(host: &dyn Host, path: &Path, cwd: &str, sink: &crate::agent::Sink
                 }
                 let Some(parent) = entry.1.clone() else { continue };
                 for v in entry.0.lines(host, &agents_dir.join(&e.name)) {
+                    grew = true;
                     for ev in subagent_line_events(&v, &parent, &mut entry.0.mapper) {
                         if let Some(l) = live.as_mut() {
                             l.observe(&ev);
@@ -609,17 +621,28 @@ pub fn follow(host: &dyn Host, path: &Path, cwd: &str, sink: &crate::agent::Sink
                 }
             }
         }
-        // Running commands' output, a few times a second.
-        if round.is_multiple_of(2)
-            && let Some(l) = live.as_mut()
-        {
+        // Running commands' output (written elsewhere, not watched).
+        let running = live.as_ref().is_some_and(|l| l.active());
+        if let Some(l) = live.as_mut() {
             for e in l.poll(host) {
                 sink(Message::Event(e));
             }
         }
         round += 1;
-        // Over ssh each look is a round trip: less often.
-        std::thread::sleep(std::time::Duration::from_millis(if host.is_remote() { 300 } else { 100 }));
+        if watch.is_some() {
+            // Until the folder changes: soon while a command runs (its output is elsewhere),
+            // else a slow look in case a notice was missed.
+            let wait = std::time::Duration::from_millis(if running { 200 } else { 2000 });
+            if wake.recv_timeout(wait).is_ok() {
+                while wake.try_recv().is_ok() {}
+            }
+        } else {
+            // Over ssh each look is a round trip: every 300 ms while the file grows, backing off
+            // to every 2 s while it does not.
+            quiet = if grew { 0 } else { quiet.saturating_add(1) };
+            let ms = (300u64 << quiet.min(3)).min(2000);
+            std::thread::sleep(std::time::Duration::from_millis(ms));
+        }
     }
 }
 

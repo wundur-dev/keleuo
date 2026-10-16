@@ -13,7 +13,7 @@
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::mpsc::Sender;
+use std::sync::Arc;
 
 
 /// A program to start: locally, or `ssh` for a remote host.
@@ -66,6 +66,10 @@ pub struct Change {
 
 /// Keeps a watch alive; dropping it stops watching.
 pub struct Watch(#[allow(dead_code)] Box<dyn Send>);
+
+/// Where a watch reports its changes: called on the watcher's own thread, so it should only
+/// hand the change on (to a channel), not do the work.
+pub type ChangeSink = Arc<dyn Fn(Change) + Send + Sync>;
 
 pub trait Host: Send + Sync {
     /// A short label for the window title: `local` or the ssh destination.
@@ -140,7 +144,7 @@ pub trait Host: Send + Sync {
     fn list_files(&self, root: &Path, max: usize) -> Vec<(PathBuf, bool)>;
     /// Report changes under `root` until the returned [`Watch`] is dropped. `None` when the
     /// host cannot watch (the window then refreshes on Claude's edits only).
-    fn watch(&self, root: &Path, changes: Sender<Change>) -> Option<Watch>;
+    fn watch(&self, root: &Path, changes: ChangeSink) -> Option<Watch>;
     /// The shell for the terminal, started in `cwd`.
     fn shell_command(&self, cwd: &Path) -> CommandSpec;
     /// An agent program (any backend's), started in `spec.cwd`.
@@ -176,6 +180,98 @@ pub fn branch_from_head(head: &str) -> Option<String> {
         return Some(r.strip_prefix("refs/heads/").unwrap_or(r).to_string());
     }
     (head.len() >= 7).then(|| head[..7].to_string())
+}
+
+/// One file watcher for the whole process. Each watched folder is added to it, and each change
+/// goes to every watch whose folder holds it. A watcher per folder cost a thread per folder:
+/// FSEvents delivers through a run loop, and the watcher keeps a thread asleep in it. .NET's
+/// FileSystemWatcher shares one in the same way.
+mod shared_watch {
+    use super::{Change, ChangeSink, Watch};
+    use notify::Watcher;
+    use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    struct Subscriber {
+        id: u64,
+        root: PathBuf,
+        sink: ChangeSink,
+    }
+
+    struct Shared {
+        watcher: notify::RecommendedWatcher,
+        /// Folders being watched, with how many watches want each.
+        roots: HashMap<PathBuf, usize>,
+    }
+
+    static SUBSCRIBERS: Mutex<Vec<Subscriber>> = Mutex::new(Vec::new());
+    static SHARED: Mutex<Option<Shared>> = Mutex::new(None);
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+
+    /// A change seen by the watcher: to each watch holding one of its paths (inside `.git`
+    /// left out: git's own bookkeeping).
+    fn deliver(res: notify::Result<notify::Event>) {
+        let Ok(event) = res else { return };
+        if event.kind.is_access() {
+            return;
+        }
+        let paths: Vec<PathBuf> =
+            event.paths.into_iter().filter(|p| !p.components().any(|c| c.as_os_str() == ".git")).collect();
+        if paths.is_empty() {
+            return;
+        }
+        let subscribers = SUBSCRIBERS.lock().unwrap();
+        for s in subscribers.iter() {
+            let mine: Vec<PathBuf> = paths.iter().filter(|p| p.starts_with(&s.root)).cloned().collect();
+            if !mine.is_empty() {
+                (s.sink)(Change { paths: mine });
+            }
+        }
+    }
+
+    pub fn add(root: &Path, sink: ChangeSink) -> Option<Watch> {
+        // Changes come with real paths (no symlinks, no `..`): compare with the same.
+        let root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+        let mut shared = SHARED.lock().unwrap();
+        if shared.is_none() {
+            let watcher = notify::recommended_watcher(deliver).ok()?;
+            *shared = Some(Shared { watcher, roots: HashMap::new() });
+        }
+        let s = shared.as_mut()?;
+        let count = s.roots.entry(root.clone()).or_insert(0);
+        if *count == 0 && s.watcher.watch(&root, notify::RecursiveMode::Recursive).is_err() {
+            s.roots.remove(&root);
+            return None;
+        }
+        *count += 1;
+        let id = NEXT.fetch_add(1, Ordering::Relaxed);
+        SUBSCRIBERS.lock().unwrap().push(Subscriber { id, root: root.clone(), sink });
+        Some(Watch(Box::new(Unsubscribe { id, root })))
+    }
+
+    /// Ends one watch; the folder stops being watched when no watch wants it.
+    struct Unsubscribe {
+        id: u64,
+        root: PathBuf,
+    }
+
+    impl Drop for Unsubscribe {
+        fn drop(&mut self) {
+            SUBSCRIBERS.lock().unwrap().retain(|s| s.id != self.id);
+            let mut shared = SHARED.lock().unwrap();
+            if let Some(s) = shared.as_mut()
+                && let Some(count) = s.roots.get_mut(&self.root)
+            {
+                *count -= 1;
+                if *count == 0 {
+                    s.roots.remove(&self.root);
+                    let _ = s.watcher.unwatch(&self.root);
+                }
+            }
+        }
+    }
 }
 
 /// This machine.
@@ -328,25 +424,8 @@ impl Host for LocalHost {
         out
     }
 
-    fn watch(&self, root: &Path, changes: Sender<Change>) -> Option<Watch> {
-        use notify::Watcher;
-        let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
-            if let Ok(event) = res
-                && !event.kind.is_access()
-            {
-                let paths: Vec<PathBuf> = event
-                    .paths
-                    .into_iter()
-                    .filter(|p| !p.components().any(|c| c.as_os_str() == ".git"))
-                    .collect();
-                if !paths.is_empty() {
-                    let _ = changes.send(Change { paths });
-                }
-            }
-        })
-        .ok()?;
-        watcher.watch(root, notify::RecursiveMode::Recursive).ok()?;
-        Some(Watch(Box::new(watcher)))
+    fn watch(&self, root: &Path, changes: ChangeSink) -> Option<Watch> {
+        shared_watch::add(root, changes)
     }
 
     fn shell_command(&self, cwd: &Path) -> CommandSpec {
@@ -599,7 +678,7 @@ impl Host for SshHost {
         files_with_folders(String::from_utf8_lossy(&out).lines())
     }
 
-    fn watch(&self, _root: &Path, _changes: Sender<Change>) -> Option<Watch> {
+    fn watch(&self, _root: &Path, _changes: ChangeSink) -> Option<Watch> {
         None
     }
 
@@ -809,13 +888,49 @@ mod tests {
         );
     }
 
+    /// One watcher serves every watch: two on one folder both hear a change, and ending one
+    /// leaves the other watching.
+    #[test]
+    fn watches_share_one_watcher() {
+        let dir = std::env::temp_dir().join(format!("wb-shared-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        let dir = dir.canonicalize().unwrap();
+        let (tx1, rx1) = std::sync::mpsc::channel();
+        let (tx2, rx2) = std::sync::mpsc::channel();
+        let first = LocalHost.watch(&dir, Arc::new(move |c| drop(tx1.send(c)))).unwrap();
+        let _second = LocalHost.watch(&dir.join("sub"), Arc::new(move |c| drop(tx2.send(c)))).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        std::fs::write(dir.join("sub/a.txt"), "1").unwrap();
+        // A write can bring several notices (created, modified): wait for one naming `name`.
+        let heard = |rx: &std::sync::mpsc::Receiver<Change>, name: &str| {
+            let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while let Some(left) = until.checked_duration_since(std::time::Instant::now()) {
+                match rx.recv_timeout(left) {
+                    Ok(c) if c.paths.iter().any(|p| p.ends_with(name)) => return true,
+                    Ok(_) => {}
+                    Err(_) => return false,
+                }
+            }
+            false
+        };
+        assert!(heard(&rx1, "a.txt"));
+        assert!(heard(&rx2, "a.txt"));
+        // A change outside the inner folder reaches the outer watch.
+        std::fs::write(dir.join("b.txt"), "1").unwrap();
+        assert!(heard(&rx1, "b.txt"));
+        drop(first);
+        std::fs::write(dir.join("sub/c.txt"), "1").unwrap();
+        assert!(heard(&rx2, "c.txt"), "the other watch still hears");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn local_watch_reports_a_write() {
         let dir = std::env::temp_dir().join(format!("wb-watch-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let dir = dir.canonicalize().unwrap();
         let (tx, rx) = std::sync::mpsc::channel();
-        let _watch = LocalHost.watch(&dir, tx).unwrap();
+        let _watch = LocalHost.watch(&dir, Arc::new(move |c| drop(tx.send(c)))).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(100));
         std::fs::write(dir.join("x.txt"), "1").unwrap();
         let change = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
