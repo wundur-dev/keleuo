@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# make-dmg <Keleuo.app> [out-dir]
+#
+# Wrap Keleuo.app (from scripts/bundle-macos.sh, signed or not) in the installer: a disk image
+# whose window shows the app and Applications over a night sky, with an arrow between them.
+# Writes <out-dir>/Keleuo-<version>.dmg (out-dir defaults to the app's folder).
+#
+# Signing and notarizing the image, when set up:
+#   KELEUO_SIGN_IDENTITY   a Developer ID Application identity: the image is signed with it
+#   KELEUO_NOTARY_PROFILE  a notarytool keychain profile: the image is notarized and stapled
+#
+# The layout is written without Finder (dmgbuild writes the window's settings itself), so
+# nothing opens on screen while it runs. dmgbuild is installed once, in its own environment
+# under ~/Library/Caches.
+set -euo pipefail
+
+APP=${1:?usage: make-dmg <Keleuo.app> [out-dir]}
+APP=$(cd "$(dirname "$APP")" && pwd)/$(basename "$APP")
+OUT=${2:-$(dirname "$APP")}
+HERE=$(cd "$(dirname "$0")" && pwd)
+VERSION=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist")
+DMG="$OUT/Keleuo-$VERSION.dmg"
+
+VENV="$HOME/Library/Caches/keleuo-dmgbuild"
+if [ ! -x "$VENV/bin/dmgbuild" ]; then
+  python3 -m venv "$VENV"
+  "$VENV/bin/pip" install --quiet dmgbuild
+fi
+
+WORK=$(mktemp -d /tmp/keleuo-dmg.XXXXXX)
+trap 'rm -rf "$WORK"' EXIT
+
+# The background at both sizes, joined in one image so Retina screens get the sharp one.
+swift "$HERE/dmg/background.swift" "$WORK/background.png" 1 >/dev/null
+swift "$HERE/dmg/background.swift" "$WORK/background@2x.png" 2 >/dev/null
+tiffutil -cathidpicheck "$WORK/background.png" "$WORK/background@2x.png" -out "$WORK/background.tiff" 2>/dev/null
+
+mkdir -p "$OUT"
+rm -f "$DMG"
+"$VENV/bin/dmgbuild" -s "$HERE/dmg/settings.py" \
+  -D app="$APP" -D background="$WORK/background.tiff" \
+  "Keleuo" "$DMG"
+
+if [ -n "${KELEUO_SIGN_IDENTITY:-}" ]; then
+  codesign --sign "$KELEUO_SIGN_IDENTITY" --timestamp "$DMG"
+fi
+if [ -n "${KELEUO_NOTARY_PROFILE:-}" ]; then
+  xcrun notarytool submit "$DMG" --keychain-profile "$KELEUO_NOTARY_PROFILE" --wait
+  xcrun stapler staple "$DMG"
+fi
+
+echo "Built $DMG"
