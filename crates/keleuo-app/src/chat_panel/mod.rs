@@ -750,6 +750,9 @@ impl ChatPanel {
         );
         let weak = cx.entity().downgrade();
         let weak_session = self.session.downgrade();
+        // Where its agent may write, for the menu: kept to the folder (and the folders allowed
+        // too), or anywhere; nothing when it cannot be kept (Settings, this system, SSH).
+        let writes = session.can_confine(cx).then(|| (session.writes_anywhere, session.writable.clone()));
         // As tall as a tool panel's title bar, a hairline under it.
         div()
             .h(px(crate::dock_skin::HEADER_HEIGHT))
@@ -856,12 +859,14 @@ impl ChatPanel {
                             ),
                         )
                         .when(compact, |menu| {
+                            let session = session.clone();
                             menu.item(gpui_kit::component::menu::PopupMenuItem::new("Compact the context").on_click(
                                 move |_, _, cx| {
                                     let _ = session.update(cx, |s, cx| s.compact(cx));
                                 },
                             ))
                         })
+                        .when_some(writes.clone(), |menu, (anywhere, writable)| write_items(menu, session.clone(), anywhere, writable))
                     }),
             )
             .into_any_element()
@@ -1172,4 +1177,39 @@ mod context_label_tests {
 fn spinner_at(phase: u32, color: Hsla) -> Icon {
     let turn = (phase % SPINNER_STEPS) as f32 / SPINNER_STEPS as f32;
     Icon::new(IconName::LoaderCircle).text_color(color).transform(Transformation::rotate(percentage(turn)))
+}
+
+/// The ⋯ menu's write items: writes anywhere or kept to the folder, the folders allowed too
+/// (each a click to stop), and one more to allow (picked).
+fn write_items(
+    menu: gpui_kit::component::menu::PopupMenu,
+    session: WeakEntity<AgentSession>,
+    anywhere: bool,
+    writable: Vec<PathBuf>,
+) -> gpui_kit::component::menu::PopupMenu {
+    use gpui_kit::component::menu::PopupMenuItem;
+    let toggle = session.clone();
+    let mut menu = menu.separator().item(PopupMenuItem::new("Allow writes outside this folder").checked(anywhere).on_click(move |_, _, cx| {
+        let _ = toggle.update(cx, |s, cx| s.set_writes_anywhere(!anywhere, cx));
+    }));
+    if anywhere {
+        return menu;
+    }
+    for folder in writable {
+        let (s2, f2) = (session.clone(), folder.clone());
+        let name = folder.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| folder.display().to_string());
+        menu = menu.item(PopupMenuItem::new(format!("Writes allowed in {name}")).checked(true).on_click(move |_, _, cx| {
+            let _ = s2.update(cx, |s, cx| s.set_writable(f2.clone(), false, cx));
+        }));
+    }
+    menu.item(PopupMenuItem::new("Allow writes in a folder…").on_click(move |_, _, cx| {
+        let picked = cx.prompt_for_paths(PathPromptOptions { files: false, directories: true, multiple: false, prompt: Some("Allow".into()) });
+        let session = session.clone();
+        cx.spawn(async move |cx: &mut AsyncApp| {
+            let Ok(Ok(Some(paths))) = picked.await else { return };
+            let Some(folder) = paths.into_iter().next() else { return };
+            let _ = session.update(cx, |s, cx| s.set_writable(folder, true, cx));
+        })
+        .detach();
+    }))
 }

@@ -11,6 +11,9 @@ impl ChatPanel {
         let (fg, muted, border, warning, green) = (theme.foreground, theme.muted_foreground, theme.border, theme.warning, theme.green);
         let fixed = self.fixed.contains(&issue.kind);
         let open = issue.clone();
+        // A write the sandbox refused is allowed, not fixed.
+        let refused = issue.kind == crate::agent_session::SANDBOX_ISSUE;
+        let (ask, done) = if refused { ("Allow…", "Allowed") } else { ("Fix so it doesn't happen again", "Fixed") };
         div()
             .px_2()
             .py_1()
@@ -32,11 +35,11 @@ impl ChatPanel {
                     .child(div().min_w_0().truncate().text_color(muted).child(issue.detail.replace('`', ""))),
             )
             .child(if fixed {
-                div().flex_none().text_color(green).child("Fixed").into_any_element()
+                div().flex_none().text_color(green).child(done).into_any_element()
             } else {
                 Button::new(SharedString::from(format!("fix-{tool_id}")))
                     .xsmall()
-                    .label("Fix so it doesn't happen again")
+                    .label(ask)
                     .on_click(cx.listener(move |p, _, _, cx| {
                         cx.stop_propagation();
                         p.fixing = Some(open.clone());
@@ -80,7 +83,7 @@ impl ChatPanel {
                                 .primary()
                                 .label("Apply")
                                 .on_click(cx.listener(move |p, _, window, cx| {
-                                    let result = p.session.read(cx).apply_fix(&kind, &id);
+                                    let result = p.session.update(cx, |s, cx| s.apply_fix(&kind, &id, cx));
                                     match result {
                                         Ok(done) => {
                                             p.fixed.insert(kind.clone());

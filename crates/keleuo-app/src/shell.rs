@@ -319,6 +319,8 @@ impl Shell {
                         None => AgentSession::new(host.clone(), backend, s.folder.clone()),
                     };
                     session.dormant = true;
+                    session.writes_anywhere = s.writes_anywhere;
+                    session.writable = s.writable.clone();
                     shell.next = s.number.max(1);
                     shell.add_session(host.clone(), s.folder, session, None, None, window, cx);
                     last = last.max(s.number + 1);
@@ -487,6 +489,8 @@ impl Shell {
                     folder: w.root().to_path_buf(),
                     backend: s.backend.id().to_string(),
                     id: s.chat.session_id.clone(),
+                    writes_anywhere: s.writes_anywhere,
+                    writable: s.writable.clone(),
                 })
             })
             .collect();

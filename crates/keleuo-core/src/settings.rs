@@ -149,6 +149,10 @@ pub struct SavedSession {
     pub backend: String,
     /// Its conversation, once it has one.
     pub id: Option<String>,
+    /// Its agent may write anywhere (else only in its folder; see [`crate::sandbox`]).
+    pub writes_anywhere: bool,
+    /// Folders outside its own that its agent may write in too.
+    pub writable: Vec<PathBuf>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -396,8 +400,8 @@ mod tests {
         s.layout.claude_width = 700.0;
         s.layout.sidebar_folded = true;
         s.open_sessions = vec![
-            SavedSession { number: 2, folder: "/p/a".into(), backend: "claude".into(), id: Some("abc".into()) },
-            SavedSession { number: 5, folder: "/p/b".into(), backend: "claude".into(), id: None },
+            SavedSession { number: 2, folder: "/p/a".into(), backend: "claude".into(), id: Some("abc".into()), ..Default::default() },
+            SavedSession { number: 5, folder: "/p/b".into(), backend: "claude".into(), id: None, ..Default::default() },
         ];
         s.shown_session = Some(5);
         s.save().unwrap();

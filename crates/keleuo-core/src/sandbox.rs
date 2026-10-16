@@ -102,6 +102,23 @@ pub fn policy_for(folder: &Path, state: &[PathBuf], extra: &[PathBuf]) -> WriteP
     WritePolicy { folders, file_prefixes }
 }
 
+/// A refused write in a command's output: `Some(path)` when the output says where, `Some(None)`
+/// when it does not; `None` when nothing was refused. The forms differ by what refused it: zsh
+/// (`operation not permitted: /p`), Node (`EPERM: operation not permitted, open '/p'`), and
+/// `touch`, `cp` and the like (`/p: Operation not permitted`).
+pub fn refused(output: &str) -> Option<Option<PathBuf>> {
+    let line = output.lines().find(|l| l.to_lowercase().contains("operation not permitted"))?;
+    let lower = line.to_lowercase();
+    let at = lower.find("operation not permitted")?;
+    let after = &line[at + "operation not permitted".len()..];
+    // After it: `: /p` or `, open '/p'`.
+    let quoted = after.split('\'').nth(1).filter(|p| p.starts_with('/'));
+    let colon = after.strip_prefix(':').map(str::trim).filter(|p| p.starts_with('/'));
+    // Before it: `touch: /p: Operation not permitted`.
+    let before = line[..at].trim_end().trim_end_matches(':').rsplit(": ").next().map(str::trim).filter(|p| p.starts_with('/'));
+    Some(quoted.or(colon).or(before).map(PathBuf::from))
+}
+
 /// The repository's shared git folder, when `folder` is in one and it lies outside `folder`.
 fn git_common_dir(folder: &Path) -> Option<PathBuf> {
     let out = crate::platform::command("git").arg("-C").arg(folder).args(["rev-parse", "--path-format=absolute", "--git-common-dir"]).output().ok()?;
@@ -254,6 +271,16 @@ impl Sandbox for Unsupported {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn refused_writes_are_found_with_their_path_in_each_form() {
+        let p = |s: &str| refused(s);
+        assert_eq!(p("(eval):1: operation not permitted: /Users/me/x.txt"), Some(Some("/Users/me/x.txt".into())));
+        assert_eq!(p("Error: EPERM: operation not permitted, open '/Users/me/site/a.md'"), Some(Some("/Users/me/site/a.md".into())));
+        assert_eq!(p("touch: /Users/me/y: Operation not permitted"), Some(Some("/Users/me/y".into())));
+        assert_eq!(p("Operation not permitted"), Some(None));
+        assert_eq!(p("all good"), None);
+    }
 
     fn policy() -> WritePolicy {
         WritePolicy { folders: vec!["/work/app".into()], file_prefixes: vec!["/home/me/.agent.json".into()] }

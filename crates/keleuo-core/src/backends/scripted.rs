@@ -183,6 +183,13 @@ impl Turn {
                 send(Event::SubagentBackground { id, agent_id: None });
             }
         }
+        // "refuse PATH": a command whose write to PATH a sandbox refused (to see how the chat
+        // shows it).
+        if let Some(target) = self.text.strip_prefix("refuse ").map(str::trim) {
+            let id = format!("refused-{n}");
+            send(Event::ToolCall { id: id.clone(), name: "Bash".into(), summary: format!("echo hi > {target}"), input: json!({ "command": format!("echo hi > {target}") }), diff: None, parent: None });
+            send(Event::ToolResult { id, output: format!("(eval):1: operation not permitted: {target}"), is_error: true, diff: None, file_changed: None, parent: None });
+        }
         send(Event::TextStart);
         // "stream N [MS]": a long reply in N pieces, as an agent writes one (paragraphs, file
         // paths, lists, code), a piece every MS milliseconds (else at the usual pace), to

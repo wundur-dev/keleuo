@@ -154,6 +154,9 @@ struct Following {
     _reader: Task<()>,
 }
 
+/// The issue a write refused by the sandbox raises (Keleuo's own, not the agent's).
+pub(crate) const SANDBOX_ISSUE: &str = "keleuo-sandbox";
+
 pub struct AgentSession {
     host: Arc<dyn Host>,
     /// Opened again at start: its conversation shows, but its agent starts only when it is
@@ -185,6 +188,12 @@ pub struct AgentSession {
     pub unseen: bool,
     /// The next start forks the resumed session.
     fork_next: bool,
+    /// Its agent may write anywhere; else only in its folder and `writable` (see
+    /// [`keleuo_core::sandbox`]). Kept with the session.
+    pub writes_anywhere: bool,
+    pub writable: Vec<PathBuf>,
+    /// The agent last started with its writes kept to its folder.
+    confined: bool,
     /// Waiting for an agent process elsewhere (this pid) to exit before resuming here.
     pub waiting_for: Option<u32>,
     _reader: Option<Task<()>>,
@@ -262,7 +271,19 @@ impl EventEmitter<SessionEvent> for AgentSession {}
 
 impl AgentSession {
     /// Apply a fix for a known tool failure (see `Issue`) in this session's folder.
-    pub fn apply_fix(&self, kind: &str, fix: &str) -> std::io::Result<String> {
+    pub fn apply_fix(&mut self, kind: &str, fix: &str, cx: &mut Context<Self>) -> std::io::Result<String> {
+        if kind == SANDBOX_ISSUE {
+            return Ok(match fix.strip_prefix("allow:") {
+                Some(folder) => {
+                    self.set_writable(PathBuf::from(folder), true, cx);
+                    format!("Writes allowed in {folder} for this session.")
+                }
+                None => {
+                    self.set_writes_anywhere(true, cx);
+                    "Writes allowed anywhere for this session.".to_string()
+                }
+            });
+        }
         self.backend.apply_fix(self.host.as_ref(), &self.cwd, kind, fix)
     }
 
@@ -284,6 +305,9 @@ impl AgentSession {
             effort: None,
             unseen: false,
             fork_next: false,
+            writes_anywhere: false,
+            writable: Vec::new(),
+            confined: false,
             waiting_for: None,
             _reader: None,
             view: View::Chat,
@@ -629,10 +653,78 @@ impl AgentSession {
     /// when Settings keeps agents' writes there and this machine can; else `None` (anywhere).
     /// An agent on another machine runs unconfined.
     fn write_policy(&self, cx: &App) -> Option<keleuo_core::sandbox::WritePolicy> {
-        if !crate::prefs(cx).sandbox_writes || self.host.is_remote() {
+        if !crate::prefs(cx).sandbox_writes || self.writes_anywhere || self.host.is_remote() {
             return None;
         }
-        Some(keleuo_core::sandbox::policy_for(&self.cwd, &self.backend.state_paths(), &[]))
+        Some(keleuo_core::sandbox::policy_for(&self.cwd, &self.backend.state_paths(), &self.writable))
+    }
+
+    /// Whether this session's agent can be kept to its folder at all (Settings has it on, this
+    /// machine has a sandbox, the agent runs here).
+    pub fn can_confine(&self, cx: &App) -> bool {
+        crate::prefs(cx).sandbox_writes
+            && !self.host.is_remote()
+            && keleuo_core::sandbox::system().support() == keleuo_core::sandbox::Support::Available
+    }
+
+    /// Let the agent write anywhere, or keep it to its folder again; it restarts to apply.
+    pub fn set_writes_anywhere(&mut self, anywhere: bool, cx: &mut Context<Self>) {
+        if self.writes_anywhere == anywhere {
+            return;
+        }
+        self.writes_anywhere = anywhere;
+        let said = if anywhere { "Writes allowed anywhere" } else { "Writes kept to this folder" };
+        self.restart_with(said.into(), "with its writes changed".into(), cx);
+    }
+
+    /// Let the agent write in `folder` too (or, `allow` false, no longer); it restarts to apply.
+    pub fn set_writable(&mut self, folder: PathBuf, allow: bool, cx: &mut Context<Self>) {
+        let has = self.writable.contains(&folder);
+        if has == allow {
+            return;
+        }
+        if allow {
+            self.writable.push(folder.clone());
+        } else {
+            self.writable.retain(|f| *f != folder);
+        }
+        let name = folder.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| folder.display().to_string());
+        let said = if allow { format!("Writes allowed in {name}") } else { format!("Writes no longer allowed in {name}") };
+        self.restart_with(said, "with its writes changed".into(), cx);
+    }
+
+    /// A write the sandbox refused: the card that says so, with ways to allow it.
+    fn sandbox_issue(&self, path: Option<PathBuf>) -> keleuo_core::agent::Issue {
+        use keleuo_core::agent::{Issue, IssueFix};
+        let here = self.cwd.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        let mut fixes = Vec::new();
+        // The project the refused path is in (its repository, else its folder).
+        let project = path.as_deref().and_then(|p| {
+            let dir = p.ancestors().skip(1).find(|d| d.is_dir())?;
+            Some(crate::shell::repo_of(dir).map(|(top, _)| top).unwrap_or_else(|| dir.to_path_buf()))
+        });
+        if let Some(project) = project {
+            let name = project.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| project.display().to_string());
+            fixes.push(IssueFix {
+                id: format!("allow:{}", project.display()),
+                label: format!("Allow writes in {name}"),
+                preview: format!("The agent restarts and may also write inside {}, for this session.", project.display()),
+            });
+        }
+        fixes.push(IssueFix {
+            id: "anywhere".into(),
+            label: "Allow writes anywhere".into(),
+            preview: "The agent restarts with no limit on where it writes, for this session. The ⋯ menu over the chat keeps it to its folder again.".into(),
+        });
+        let what = path.map(|p| format!(" to {}", p.display())).unwrap_or_default();
+        Issue {
+            kind: SANDBOX_ISSUE.into(),
+            title: "Kept out of a folder".into(),
+            detail: format!(
+                "This session's agent writes only inside {here} (and its own settings, caches and temporary folders). A write{what} was refused."
+            ),
+            fixes,
+        }
     }
 
     fn start_terminal(&mut self, cx: &mut Context<Self>) {
@@ -681,6 +773,7 @@ impl AgentSession {
             settings,
             sandbox: self.write_policy(cx),
         };
+        self.confined = options.sandbox.is_some();
         let Some(spec) = self.backend.terminal_program(&options, &id, new) else { return };
         if crate::perf::enabled() || keleuo_core::env_var("LOG_LAUNCH").is_ok() {
             eprintln!("keleuo: launch {} {}", spec.program, spec.args.iter().filter(|a| !a.ends_with(".json")).cloned().collect::<Vec<_>>().join(" "));
@@ -1165,6 +1258,7 @@ impl AgentSession {
             settings: None,
             sandbox: self.write_policy(cx),
         };
+        self.confined = options.sandbox.is_some();
         let (tx, rx) = async_channel::unbounded::<Message>();
         self.agent.start(
             self.host.clone(),
@@ -1287,7 +1381,16 @@ impl AgentSession {
                 {
                     eprintln!("keleuo: reply shows {:.0} ms after Send", at.elapsed().as_secs_f64() * 1000.0);
                 }
+                // A write the sandbox refused: said on the tool's card, with ways to allow it.
+                let refused = match &event {
+                    Event::ToolResult { id, output, .. } if self.confined => keleuo_core::sandbox::refused(output).map(|p| (id.clone(), p)),
+                    _ => None,
+                };
                 let applied = self.chat.apply(event);
+                if let Some((id, path)) = refused {
+                    let issue = self.sandbox_issue(path);
+                    self.chat.apply(Event::ToolIssue { id, issue });
+                }
                 if let Some(path) = applied.file_changed {
                     cx.emit(SessionEvent::FileChanged(path));
                 }
