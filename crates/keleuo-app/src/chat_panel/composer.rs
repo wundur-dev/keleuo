@@ -156,17 +156,16 @@ impl ChatPanel {
         match &self.md_marks {
             Some(marks) => marks.set(decorations, cx),
             None => {
-                self.spell_marks(cx);
                 self.md_marks = Some(self.input.update(cx, |s, cx| s.create_decorations_collection(decorations, cx)));
             }
         }
     }
 
-    /// The marks under misspelled words. Made before the Markdown's, so that on a link's text
-    /// the red line shows rather than the link's.
-    fn spell_marks(&mut self, cx: &mut Context<Self>) -> TextDecorationCollection<TextareaMode> {
+    /// The marks under misspelled words: red dots, drawn apart from the text's styles (the
+    /// Markdown's marks stay as they are on a misspelled word).
+    fn spell_marks(&mut self, cx: &mut Context<Self>) -> gpui_kit::base::input::RangeDecorationCollection<TextareaMode> {
         if self.spell_marks.is_none() {
-            self.spell_marks = Some(self.input.update(cx, |s, cx| s.create_decorations_collection(Vec::new(), cx)));
+            self.spell_marks = Some(self.input.update(cx, |s, cx| s.create_range_decorations_collection(Vec::new(), cx)));
         }
         self.spell_marks.clone().expect("made above")
     }
@@ -212,17 +211,16 @@ impl ChatPanel {
         let started = std::time::Instant::now();
         let checked = self.spelling.get_or_insert_with(crate::spelling::Spelling::new).check(&text, &words);
         crate::perf::record("spelling check", started.elapsed());
+        // A row of red dots under the word, as macOS marks one.
+        use gpui_kit::base::input::{RangeDecoration, RangeDecorationStyle};
         let red = cx.theme().red;
-        let style = HighlightStyle {
-            underline: Some(UnderlineStyle { thickness: px(1.), color: Some(red), wavy: true }),
-            ..Default::default()
-        };
+        let dots = |r| RangeDecoration::new(r).with_style(RangeDecorationStyle::Dots).with_color(red);
         // A lot of new text is checked a piece at a time; its marks are set once it all is
         // (each set draws the box again, slow with that much text). Unchanged marks are left.
         if !checked.done {
             self.check_spelling_soon(std::time::Duration::from_millis(30), window, cx);
         } else if marks.get_ranges(cx) != checked.misspelled {
-            marks.set(checked.misspelled.into_iter().map(|r| TextDecoration::new(r, style)).collect(), cx);
+            marks.set(checked.misspelled.into_iter().map(dots).collect(), cx);
         }
     }
 

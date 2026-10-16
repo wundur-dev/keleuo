@@ -66,6 +66,53 @@ fn displayed_line_number(number: usize) -> usize {
 const FOLD_CHEVRON_RIGHT_SVG: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>"#;
 const FOLD_CHEVRON_DOWN_SVG: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>"#;
 
+/// The dots of a [`RangeDecorationStyle::Dots`] mark: their size and the gap between them.
+const DOT: f32 = 2.5;
+const DOT_GAP: f32 = 1.5;
+
+/// Where the dots under `left..right` go (their centres): as many as fit, at least two,
+/// the row centred under the text.
+fn dot_centers(left: Pixels, right: Pixels) -> Vec<Pixels> {
+    let pitch = DOT + DOT_GAP;
+    let width = f32::from(right - left).max(0.);
+    let count = (((width + DOT_GAP) / pitch).floor() as usize).max(2);
+    let row = count as f32 * pitch - DOT_GAP;
+    let start = f32::from(left) + (width - row) / 2. + DOT / 2.;
+    (0..count).map(|i| px(start + i as f32 * pitch)).collect()
+}
+
+/// One dot, a small octagon (round at its size), centred on `center`.
+fn dot_path(center: Point<Pixels>) -> Option<Path<Pixels>> {
+    let r = DOT / 2.;
+    let mut builder = gpui::PathBuilder::fill();
+    for i in 0..8 {
+        let angle = std::f32::consts::TAU * (i as f32 + 0.5) / 8.;
+        let p = center + point(px(r * angle.cos()), px(r * angle.sin()));
+        if i == 0 {
+            builder.move_to(p);
+        } else {
+            builder.line_to(p);
+        }
+    }
+    builder.close();
+    builder.build().ok()
+}
+
+#[cfg(test)]
+mod dot_tests {
+    use super::*;
+
+    #[test]
+    fn dots_fill_the_range_centred_and_never_fewer_than_two() {
+        let dots = dot_centers(px(10.), px(50.));
+        assert_eq!(dots.len(), 10);
+        let (first, last) = (f32::from(dots[0]), f32::from(*dots.last().unwrap()));
+        // Centred: as much room before the first dot as after the last.
+        assert!(((first - DOT / 2. - 10.) - (50. - last - DOT / 2.)).abs() < 0.01);
+        assert_eq!(dot_centers(px(0.), px(1.)).len(), 2, "a one-letter word still gets dots");
+    }
+}
+
 fn compose_decorations(
     mut styles: Vec<(Range<usize>, HighlightStyle)>,
     decorations: impl IntoIterator<Item = (Range<usize>, HighlightStyle)>,
@@ -833,6 +880,24 @@ impl<M: InputModeKind> TextElement<M> {
                         Self::layout_match_range(decoration.range().clone(), last_layout, bounds)
                     {
                         fills.push((path, color));
+                    }
+                }
+                RangeDecorationStyle::Dots => {
+                    let color = decoration.color().unwrap_or(state.editor_style.foreground);
+                    let Some(corners) = Self::layout_range_corners(decoration.range(), last_layout)
+                    else {
+                        continue;
+                    };
+                    let origin = bounds.origin + point(last_layout.line_number_width, px(0.));
+                    for row in &corners {
+                        let (left, right) = (row.bottom_left.x, row.bottom_right.x);
+                        // Just under the baseline, in the line's leading.
+                        let y = row.bottom_left.y - (last_layout.line_height * 0.11).max(px(2.));
+                        for center in dot_centers(left, right) {
+                            if let Some(path) = dot_path(origin + point(center, y)) {
+                                fills.push((path, color));
+                            }
+                        }
                     }
                 }
                 RangeDecorationStyle::Frame => {

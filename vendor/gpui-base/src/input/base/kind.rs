@@ -347,6 +347,7 @@ impl InputModeKind for TextareaMode {
 
     fn reset_annotations(state: &mut InputBaseState<Self>) {
         state.extras.decorations.clear();
+        state.extras.range_decorations.clear();
     }
 
     fn adjust_annotations(
@@ -355,6 +356,10 @@ impl InputModeKind for TextareaMode {
         new_len: usize,
     ) {
         state.extras.decorations.adjust_for_edit(range, new_len);
+        state
+            .extras
+            .range_decorations
+            .adjust_for_edit(range, new_len);
     }
 }
 
@@ -363,11 +368,16 @@ impl InputModeKind for TextareaMode {
 #[derive(Default)]
 pub struct TextareaExtras {
     pub(crate) decorations: DecorationCollections,
+    pub(crate) range_decorations: DecorationCollections<RangeDecoration>,
 }
 
 impl InputExtras for TextareaExtras {
     fn decoration_layers(&self) -> Vec<&[TextDecoration]> {
         self.decorations.iter().collect()
+    }
+
+    fn range_decorations(&self, ranges: &[std::ops::Range<usize>]) -> Vec<&RangeDecoration> {
+        self.range_decorations.intersecting(ranges)
     }
 }
 // `EditorMode`'s implementation lives with the editor code, next to the

@@ -105,7 +105,7 @@ pub struct ChatPanel {
     /// The message box's spelling checker (made the first time there is something to check).
     spelling: Option<crate::spelling::Spelling>,
     /// Its marks under misspelled words.
-    spell_marks: Option<TextDecorationCollection<TextareaMode>>,
+    spell_marks: Option<gpui_kit::base::input::RangeDecorationCollection<TextareaMode>>,
     /// The next check, a moment after the last change.
     spell_check: Option<Task<()>>,
     /// The word left unchecked by the last check as being typed, and the length of the text

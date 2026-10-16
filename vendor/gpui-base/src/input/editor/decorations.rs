@@ -16,6 +16,8 @@ pub enum RangeDecorationStyle {
     /// Draw a continuous one-pixel frame around the visual range.
     #[default]
     Frame,
+    /// A row of small round dots under the text, as macOS marks a misspelled word.
+    Dots,
 }
 
 /// A geometric decoration over a UTF-8 byte range.
@@ -118,13 +120,36 @@ impl<M: InputModeKind> std::fmt::Debug for TextDecorationCollection<M> {
 /// Clones address the same collection. Dropping a handle does not clear it; use
 /// [`Self::clear`] to empty it or [`Self::dispose`] to release it permanently.
 /// Operations on a disposed collection or a dropped editor are harmless no-ops.
-#[derive(Clone, Debug)]
-pub struct RangeDecorationCollection {
-    state: WeakEntity<InputBaseState<EditorMode>>,
+/// A code editor and ordinary multi-line text can both hold collections; `M` is the mode
+/// of the input that owns this one.
+pub struct RangeDecorationCollection<M: InputModeKind = EditorMode> {
+    state: WeakEntity<InputBaseState<M>>,
     id: DecorationCollectionId,
 }
 
-impl RangeDecorationCollection {
+impl<M: InputModeKind> Clone for RangeDecorationCollection<M> {
+    fn clone(&self) -> Self {
+        Self {
+            state: self.state.clone(),
+            id: self.id,
+        }
+    }
+}
+
+impl<M: InputModeKind> std::fmt::Debug for RangeDecorationCollection<M> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RangeDecorationCollection")
+            .field("state", &self.state)
+            .field("id", &self.id)
+            .finish()
+    }
+}
+
+/// Range decorations for a mode whose extras hold them: a code editor and ordinary
+/// multi-line text.
+macro_rules! range_decoration_api {
+    ($mode:ty) => {
+impl RangeDecorationCollection<$mode> {
     /// Replace only this owner's decorations, clipping ranges to UTF-8 boundaries.
     pub fn set(&self, decorations: Vec<RangeDecoration>, cx: &mut App) {
         let _ = self.state.update(cx, |state, cx| {
@@ -181,6 +206,41 @@ impl RangeDecorationCollection {
             .unwrap_or_default()
     }
 }
+
+impl InputBaseState<$mode> {
+    /// Create an independently owned collection of geometric range decorations.
+    ///
+    /// Ranges use UTF-8 byte offsets and the same tracking as text decorations:
+    /// insertion at either edge does not expand the range, insertion inside does,
+    /// replacement clips overlapping anchors, and deletion removes empty ranges.
+    /// Undo, redo, whole-document replacement and formatting apply these same edit
+    /// transforms; decorations themselves are not undo history, so deleted ranges
+    /// are not resurrected by undo. Folding changes projection, not stored ranges.
+    ///
+    /// Fills and dots paint behind frames; within each style, later collections/items
+    /// paint over earlier ones. Neither affects text layout, hit testing or focus. The
+    /// default color is the editor foreground (12% opacity for fills).
+    /// Collections live until explicitly disposed or the editor is dropped.
+    pub fn create_range_decorations_collection(
+        &mut self,
+        decorations: Vec<RangeDecoration>,
+        cx: &mut Context<Self>,
+    ) -> RangeDecorationCollection<$mode> {
+        let id = self
+            .extras
+            .range_decorations
+            .create(normalize(&self.text, decorations));
+        cx.notify();
+        RangeDecorationCollection {
+            state: cx.entity().downgrade(),
+            id,
+        }
+    }
+}
+    };
+}
+range_decoration_api!(EditorMode);
+range_decoration_api!(TextareaMode);
 
 /// Both text styles and geometric decorations share normalization and edit affinity.
 pub(crate) trait TrackedDecoration {
@@ -455,37 +515,6 @@ fn normalize<T: TrackedDecoration>(text: &Rope, decorations: Vec<T>) -> Vec<T> {
             Some(decoration)
         })
         .collect()
-}
-
-impl InputBaseState<EditorMode> {
-    /// Create an independently owned collection of geometric range decorations.
-    ///
-    /// Ranges use UTF-8 byte offsets and the same tracking as text decorations:
-    /// insertion at either edge does not expand the range, insertion inside does,
-    /// replacement clips overlapping anchors, and deletion removes empty ranges.
-    /// Undo, redo, whole-document replacement and formatting apply these same edit
-    /// transforms; decorations themselves are not undo history, so deleted ranges
-    /// are not resurrected by undo. Folding changes projection, not stored ranges.
-    ///
-    /// Fills paint behind frames; within each style, later collections/items paint
-    /// over earlier ones. Neither affects text layout, hit testing or focus. The
-    /// default color is the editor foreground (12% opacity for fills).
-    /// Collections live until explicitly disposed or the editor is dropped.
-    pub fn create_range_decorations_collection(
-        &mut self,
-        decorations: Vec<RangeDecoration>,
-        cx: &mut Context<Self>,
-    ) -> RangeDecorationCollection {
-        let id = self
-            .extras
-            .range_decorations
-            .create(normalize(&self.text, decorations));
-        cx.notify();
-        RangeDecorationCollection {
-            state: cx.entity().downgrade(),
-            id,
-        }
-    }
 }
 
 /// Text decorations for a mode whose extras hold them: a code editor and ordinary
