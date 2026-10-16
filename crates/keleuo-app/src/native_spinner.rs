@@ -21,8 +21,11 @@ struct Inner {
     present: Cell<u32>,
     #[cfg(target_os = "macos")]
     view: std::cell::RefCell<Option<mac::Spinner>>,
+    #[cfg(target_os = "macos")]
     placed: Cell<Option<Bounds<Pixels>>>,
+    #[cfg(target_os = "macos")]
     shown: Cell<bool>,
+    #[cfg(target_os = "macos")]
     color: Cell<Option<Hsla>>,
 }
 
@@ -32,8 +35,11 @@ impl NativeSpinner {
             present: Cell::new(0),
             #[cfg(target_os = "macos")]
             view: Default::default(),
+            #[cfg(target_os = "macos")]
             placed: Cell::new(None),
+            #[cfg(target_os = "macos")]
             shown: Cell::new(false),
+            #[cfg(target_os = "macos")]
             color: Cell::new(None),
         }))
     }
