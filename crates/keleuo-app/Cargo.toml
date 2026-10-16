@@ -30,6 +30,9 @@ libc = "0.2"
 lsp-types = { version = "0.97", features = ["proposed"] }
 # The system web view (WKWebView on macOS) for the Web panel.
 wry = { version = "0.57", default-features = false, features = ["devtools"] }
+# Local sockets on every OS (Unix domain sockets; named pipes on Windows): the hook
+# listener, the hook helper and the single-instance hand-off (see src/local_socket.rs).
+interprocess = "2.4"
 
 [dev-dependencies]
 # The same gpui-kit with its headless UI test harness (drags, clicks, element queries).

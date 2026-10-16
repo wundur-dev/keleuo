@@ -43,6 +43,7 @@ mod panels;
 mod perf;
 mod procstats;
 mod instance;
+mod local_socket;
 mod pty;
 mod image_view;
 mod on_screen;

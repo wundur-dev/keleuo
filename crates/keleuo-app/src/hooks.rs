@@ -9,15 +9,16 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
-#[cfg(unix)]
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use gpui_kit::*;
+use interprocess::local_socket::traits::ListenerExt as _;
 use serde_json::Value;
 
 use crate::agent_session::AgentSession;
+use crate::local_socket;
 
 /// One hook call.
 pub struct Call {
@@ -30,15 +31,11 @@ pub struct Call {
 
 /// Where a waiting hook's answer goes; dropping it without answering lets the agent ask in
 /// its own interface.
-pub struct Reply(#[cfg(unix)] std::os::unix::net::UnixStream);
+pub struct Reply(interprocess::local_socket::Stream);
 
 impl Reply {
     pub fn send(mut self, answer: &str) {
-        #[cfg(unix)]
-        {
-            let _ = self.0.write_all(format!("{answer}\n").as_bytes());
-        }
-        let _ = (&mut self, answer);
+        let _ = self.0.write_all(format!("{answer}\n").as_bytes());
     }
 }
 
@@ -73,7 +70,7 @@ pub fn init(cx: &mut App) {
     let mut state = State { dir: dir.clone(), helper, ..Default::default() };
     if state.helper.is_some() && std::fs::create_dir_all(&dir).is_ok() {
         let (tx, rx) = async_channel::unbounded::<Call>();
-        let socket = dir.join("hooks.sock");
+        let socket = local_socket::address(&dir.join("hooks.sock"), &format!("keleuo-{}-hooks", std::process::id()));
         if listen(&socket, tx) {
             state.socket = Some(socket);
             cx.spawn(async move |cx: &mut AsyncApp| {
@@ -90,14 +87,15 @@ pub fn init(cx: &mut App) {
     cx.set_global(Hooks(Rc::new(RefCell::new(state))));
 }
 
-/// Remove `keleuo-<pid>` folders (or ones of the app's earlier names) whose window process is gone.
+/// Remove `keleuo-<pid>` folders (or ones of the app's earlier names) whose window process is
+/// gone. On Windows the socket is a named pipe, not a file in the folder: any such folder.
 fn remove_stale() {
     let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else { return };
     for e in entries.flatten() {
         let name = e.file_name().to_string_lossy().to_string();
         if let Some(pid) = ["keleuo-", "keleion-", "workbench-"].iter().find_map(|p| name.strip_prefix(p)).and_then(|p| p.parse::<u32>().ok())
             && pid != std::process::id()
-            && e.path().join("hooks.sock").exists()
+            && (e.path().join("hooks.sock").exists() || cfg!(windows) && e.path().is_dir())
             && !keleuo_core::host::process_alive(pid)
         {
             let _ = std::fs::remove_dir_all(e.path());
@@ -112,18 +110,16 @@ pub fn cleanup(cx: &App) {
     }
 }
 
-#[cfg(unix)]
 fn listen(socket: &Path, tx: async_channel::Sender<Call>) -> bool {
-    use std::os::unix::net::UnixListener;
-    let _ = std::fs::remove_file(socket);
-    let Ok(listener) = UnixListener::bind(socket) else { return false };
+    // The folder is this process's own: a socket file already there is from an earlier
+    // process with the same id, and goes.
+    let Ok(listener) = local_socket::listen(socket, true) else { return false };
     std::thread::spawn(move || {
         for stream in listener.incoming().flatten() {
             let tx = tx.clone();
             std::thread::spawn(move || {
                 let mut line = String::new();
-                let mut reader = BufReader::new(&stream);
-                if reader.read_line(&mut line).is_err() {
+                if BufReader::new(&stream).read_line(&mut line).is_err() {
                     return;
                 }
                 let Ok(v) = serde_json::from_str::<Value>(&line) else { return };
@@ -133,7 +129,7 @@ fn listen(socket: &Path, tx: async_channel::Sender<Call>) -> bool {
                 let call = Call {
                     token: s("token"),
                     payload: v.get("payload").cloned().unwrap_or(Value::Null),
-                    reply: if waits { stream.try_clone().ok().map(Reply) } else { None },
+                    reply: waits.then_some(Reply(stream)),
                     event,
                 };
                 let _ = tx.send_blocking(call);
@@ -141,11 +137,6 @@ fn listen(socket: &Path, tx: async_channel::Sender<Call>) -> bool {
         }
     });
     true
-}
-
-#[cfg(not(unix))]
-fn listen(_: &Path, _: async_channel::Sender<Call>) -> bool {
-    false
 }
 
 fn route(call: Call, cx: &mut App) {
@@ -232,11 +223,10 @@ pub fn register(
     Some(Registration { settings, token, socket })
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::io::Read;
-    use std::os::unix::net::UnixStream;
 
     /// What `keleuo-hook` does, by hand: a permission call keeps its connection, and the
     /// answer comes back on it; other calls do not wait.
@@ -244,17 +234,17 @@ mod tests {
     fn calls_arrive_and_permission_answers_go_back() {
         let dir = std::env::temp_dir().join(format!("wb-hooks-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let socket = dir.join("t.sock");
+        let socket = local_socket::address(&dir.join("t.sock"), &format!("wb-hooks-test-{}", std::process::id()));
         let (tx, rx) = async_channel::unbounded::<Call>();
         assert!(listen(&socket, tx));
 
-        let mut c = UnixStream::connect(&socket).unwrap();
+        let mut c = local_socket::connect(&socket).unwrap();
         c.write_all(b"{\"token\":\"s1-1\",\"event\":\"Stop\",\"payload\":{}}\n").unwrap();
         let call = rx.recv_blocking().unwrap();
         assert_eq!((call.token.as_str(), call.event.as_str()), ("s1-1", "Stop"));
         assert!(call.reply.is_none());
 
-        let mut c = UnixStream::connect(&socket).unwrap();
+        let mut c = local_socket::connect(&socket).unwrap();
         c.write_all(b"{\"token\":\"s1-1\",\"event\":\"PermissionRequest\",\"payload\":{\"tool_name\":\"Bash\"}}\n").unwrap();
         let call = rx.recv_blocking().unwrap();
         assert_eq!(call.payload["tool_name"], "Bash");

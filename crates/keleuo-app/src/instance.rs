@@ -3,16 +3,16 @@
 //! session lands in the open window instead of a second app.
 //!
 //! The socket is named after the config folder, so test runs (`KELEUO_CONFIG_DIR`) never
-//! reach a person's own window. Not on Windows yet (no Unix sockets in Rust's standard library
-//! there): each command opens its own window.
+//! reach a person's own window. A Unix domain socket on macOS and Linux, a named pipe on
+//! Windows (see `local_socket`).
 
-#[cfg(unix)]
 use std::hash::{DefaultHasher, Hash, Hasher};
-#[cfg(unix)]
 use std::io::{BufRead, BufReader, Write};
-#[cfg(unix)]
-use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+use interprocess::local_socket::traits::{ListenerExt as _, Stream as _};
+
+use crate::local_socket;
 
 /// What a command asks of the window.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -26,7 +26,6 @@ pub struct Request {
     pub quit: bool,
 }
 
-#[cfg_attr(not(unix), allow(dead_code))]
 impl Request {
     fn line(&self) -> String {
         if self.quit {
@@ -48,35 +47,38 @@ impl Request {
     }
 }
 
-/// The socket path: short (sockets allow about 100 bytes), per user and config folder.
-#[cfg(unix)]
+/// The socket's address: short (Unix sockets allow about 100 bytes), per user and config
+/// folder.
 pub fn socket_path() -> PathBuf {
     let mut h = DefaultHasher::new();
     keleuo_core::settings::config_dir().hash(&mut h);
-    let uid = unsafe { libc::getuid() };
-    std::env::temp_dir().join(format!("keleuo-{uid}-{:08x}.sock", h.finish() as u32))
+    let name = format!("keleuo-{}-{:08x}", user(), h.finish() as u32);
+    local_socket::address(&std::env::temp_dir().join(format!("{name}.sock")), &name)
 }
 
-/// Hand `request` to a window that is already open. True when one took it.
-#[cfg(not(unix))]
-pub fn hand_over(_request: &Request) -> bool {
-    false
-}
-
-/// Listen for later commands (not on Windows yet).
-#[cfg(not(unix))]
-pub fn listen(_on_request: impl Fn(Request) + Send + 'static) {}
-
-#[cfg(not(unix))]
-pub fn stop_listening() {}
-
-/// Hand `request` to a window that is already open. True when one took it.
+/// Who this user is, for the socket's name. On Unix the temporary folder may be shared
+/// (`/tmp`); on Windows named pipes are shared by everyone on the machine.
 #[cfg(unix)]
+fn user() -> String {
+    unsafe { libc::getuid() }.to_string()
+}
+
+#[cfg(not(unix))]
+fn user() -> String {
+    let name = std::env::var("USERNAME").unwrap_or_default();
+    name.chars().filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')).collect()
+}
+
+/// Hand `request` to a window that is already open. True when one took it.
 pub fn hand_over(request: &Request) -> bool {
-    let Ok(mut stream) = UnixStream::connect(socket_path()) else {
+    hand_over_to(&socket_path(), request)
+}
+
+fn hand_over_to(socket: &Path, request: &Request) -> bool {
+    let Ok(mut stream) = local_socket::connect(socket) else {
         return false;
     };
-    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(3)));
+    let _ = stream.set_recv_timeout(Some(std::time::Duration::from_secs(3)));
     if stream.write_all(request.line().as_bytes()).is_err() {
         return false;
     }
@@ -85,21 +87,22 @@ pub fn hand_over(request: &Request) -> bool {
 }
 
 /// Listen for later commands; each request goes to `on_request` (on a background thread).
-#[cfg(unix)]
 pub fn listen(on_request: impl Fn(Request) + Send + 'static) {
-    let path = socket_path();
-    // A socket left by a window that crashed: nobody answers it, so it can go.
-    if UnixStream::connect(&path).is_err() {
-        let _ = std::fs::remove_file(&path);
-    }
-    let Ok(listener) = UnixListener::bind(&path) else {
-        return;
+    listen_on(&socket_path(), on_request);
+}
+
+/// [`listen`] at `socket`; false when it could not.
+fn listen_on(socket: &Path, on_request: impl Fn(Request) + Send + 'static) -> bool {
+    // A socket left by a window that crashed: nobody answers it, so it can go. One that
+    // answers is another window's, and stays.
+    let stale = local_socket::connect(socket).is_err();
+    let Ok(listener) = local_socket::listen(socket, stale) else {
+        return false;
     };
     std::thread::spawn(move || {
         for stream in listener.incoming().flatten() {
             let mut line = String::new();
-            let mut reader = BufReader::new(&stream);
-            if reader.read_line(&mut line).is_ok()
+            if BufReader::new(&stream).read_line(&mut line).is_ok()
                 && let Some(request) = Request::parse(&line)
             {
                 on_request(request);
@@ -107,12 +110,12 @@ pub fn listen(on_request: impl Fn(Request) + Send + 'static) {
             }
         }
     });
+    true
 }
 
 /// Remove the socket when the window closes.
-#[cfg(unix)]
 pub fn stop_listening() {
-    let _ = std::fs::remove_file(socket_path());
+    local_socket::remove(&socket_path());
 }
 
 #[cfg(test)]
@@ -126,5 +129,33 @@ mod tests {
         let r = Request { ssh: "dev".into(), path: "/srv/my app".into(), new: true, quit: false };
         assert_eq!(Request::parse(&r.line()), Some(r));
         assert_eq!(Request::parse("other\tx"), None);
+    }
+
+    /// A second command's request reaches the listening window, which says `ok`; a socket
+    /// left by a window that crashed does not stop the next one listening, and a live
+    /// window's socket is not taken over.
+    #[::core::prelude::v1::test]
+    fn requests_are_handed_over() {
+        let name = format!("kl-inst-test-{}", std::process::id());
+        let socket = local_socket::address(&std::env::temp_dir().join(format!("{name}.sock")), &name);
+        assert!(!hand_over_to(&socket, &Request { ssh: String::new(), path: "/x".into(), new: false, quit: false }));
+
+        // What a crashed window leaves: a socket file nobody listens on (on Unix; a named
+        // pipe goes with its process).
+        let mut crashed = local_socket::listen(&socket, true).unwrap();
+        interprocess::local_socket::traits::Listener::do_not_reclaim_name_on_drop(&mut crashed);
+        drop(crashed);
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        assert!(listen_on(&socket, move |r| tx.send(r).unwrap()));
+        let r = Request { ssh: "dev".into(), path: "/srv/my app".into(), new: true, quit: false };
+        assert!(hand_over_to(&socket, &r));
+        assert_eq!(rx.recv().unwrap(), r);
+
+        // A second window does not take the first one's socket.
+        assert!(!listen_on(&socket, |_| {}));
+        assert!(hand_over_to(&socket, &r));
+        assert_eq!(rx.recv().unwrap(), r);
+        local_socket::remove(&socket);
     }
 }

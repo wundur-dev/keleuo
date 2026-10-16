@@ -6,11 +6,13 @@
 //! not there, or closes the connection without answering, it prints nothing, so the agent
 //! carries on as without the hook (its own interface asks).
 //!
-//! Standard library only, so it starts in a few milliseconds.
+//! `<socket>` is a Unix socket's path, or `\\.\pipe\<name>` on Windows. The standard library
+//! and `interprocess`'s local sockets only, so it starts in a few milliseconds.
 
-#[cfg(unix)]
-use std::io::{BufRead, BufReader};
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
+
+use interprocess::local_socket::traits::Stream as _;
+use interprocess::local_socket::{GenericFilePath, Stream, ToFsName};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -28,9 +30,8 @@ fn main() {
     }
 }
 
-#[cfg(unix)]
 fn ask(socket: &str, token: &str, event: &str, payload: &str, wait: bool) -> Option<String> {
-    let mut stream = std::os::unix::net::UnixStream::connect(socket).ok()?;
+    let mut stream = Stream::connect(socket.to_fs_name::<GenericFilePath>().ok()?).ok()?;
     let line = format!("{{\"token\":{},\"event\":{},\"payload\":{payload}}}\n", quote(token), quote(event));
     stream.write_all(line.as_bytes()).ok()?;
     if !wait {
@@ -42,13 +43,7 @@ fn ask(socket: &str, token: &str, event: &str, payload: &str, wait: bool) -> Opt
     (!answer.is_empty()).then(|| answer.to_string())
 }
 
-#[cfg(not(unix))]
-fn ask(_: &str, _: &str, _: &str, _: &str, _: bool) -> Option<String> {
-    None
-}
-
 /// A JSON string of plain text (tokens and event names are letters, digits and dashes).
-#[cfg(unix)]
 fn quote(s: &str) -> String {
     let clean: String = s.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_').collect();
     format!("\"{clean}\"")
