@@ -29,6 +29,11 @@ pub(super) struct FindBar {
     /// The parts not read into the list, read for searching, by where they start.
     pub earlier: HashMap<u64, Vec<Item>>,
     pub reading: bool,
+    /// What going to matches opened that was folded (a group, card, report or paste), and what
+    /// it unset to open (a diff open by default is folded by its key): put back as they were
+    /// when the bar closes. What was open already is not in them, so it stays open.
+    pub opened: Vec<String>,
+    pub closed: Vec<String>,
     /// The conversation's revision when it was last searched.
     pub searched: u64,
     _sub: Subscription,
@@ -60,6 +65,8 @@ impl ChatPanel {
                 current: None,
                 earlier: HashMap::new(),
                 reading: false,
+                opened: Vec::new(),
+                closed: Vec::new(),
                 searched: 0,
                 _sub: sub,
             });
@@ -75,7 +82,15 @@ impl ChatPanel {
     }
 
     pub(super) fn close_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.find = None;
+        // What find opened is folded again; what was open before stays open.
+        if let Some(f) = self.find.take() {
+            for key in f.opened {
+                self.toggled.remove(&key);
+            }
+            self.toggled.extend(f.closed);
+            self.list.remeasure();
+            self.latest.list.remeasure();
+        }
         self.found = None;
         self.pending_find = None;
         self.focus_input(window, cx);
@@ -187,6 +202,7 @@ impl ChatPanel {
     fn go_to(&mut self, hit: Hit, cx: &mut Context<Self>) {
         match hit {
             Hit::Item { ix, at } => {
+                self.unfold(ix, cx);
                 let row = self
                     .rows
                     .iter()
@@ -201,6 +217,58 @@ impl ChatPanel {
                 self.pending_find = Some((from, ix, at));
                 self.load_earlier(from, to, cx);
             }
+        }
+    }
+
+    /// Open what hides item `ix`'s text: the folded run of tool calls it is in, its own card (a
+    /// tool's output, a subagent's messages), a report or compaction summary, its pastes. Kept
+    /// in the bar, to fold them again when it closes.
+    fn unfold(&mut self, ix: usize, cx: &mut Context<Self>) {
+        let mut open = Vec::new();
+        let mut close = Vec::new();
+        if let Some((_, key)) = self.tool_group(ix, cx) {
+            open.push(key);
+        }
+        let session = self.session.clone();
+        let chat = &session.read(cx).chat;
+        let item = self.find_items(chat).get(ix).cloned();
+        match &item {
+            Some(Item::Tool(tool)) if chat.agent(&tool.id).is_some() => open.push(format!("agent:{}", tool.id)),
+            // A diff starts open (its key closes it); other cards start closed (their key opens them).
+            Some(Item::Tool(tool)) if tool.diff.is_some() => close.push(tool.id.clone()),
+            Some(Item::Tool(tool)) => open.push(tool.id.clone()),
+            Some(Item::AgentMessage { from, text, .. }) => open.push(format!("report:{from}:{}", text.len())),
+            Some(Item::Compacted { summary, .. }) => {
+                open.push(format!("compact:{}:{}", summary.len(), summary.chars().take(40).collect::<String>()))
+            }
+            Some(Item::User(text)) => {
+                // As the conversation's list keys a message's pastes (the bar shows only there).
+                let key = format!("main{ix}-0");
+                for (k, part) in keleuo_core::paste::parts(text).iter().enumerate() {
+                    if matches!(part, keleuo_core::paste::Part::Pasted(_)) {
+                        open.push(format!("paste:{key}:{k}"));
+                    }
+                }
+            }
+            _ => {}
+        }
+        let Some(f) = self.find.as_mut() else { return };
+        let mut changed = false;
+        for key in open {
+            if self.toggled.insert(key.clone()) {
+                f.opened.push(key);
+                changed = true;
+            }
+        }
+        for key in close {
+            if self.toggled.remove(&key) {
+                f.closed.push(key);
+                changed = true;
+            }
+        }
+        if changed {
+            self.list.remeasure();
+            self.latest.list.remeasure();
         }
     }
 
