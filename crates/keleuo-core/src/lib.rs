@@ -43,6 +43,7 @@ pub mod settings;
 pub mod skill_install;
 pub mod skills;
 pub mod slash;
+pub mod spelling;
 pub mod summary;
 pub mod symbols;
 pub mod tabs;

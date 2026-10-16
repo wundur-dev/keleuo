@@ -81,6 +81,8 @@ pub struct Prefs {
     pub reopen_sessions: bool,
     /// Light Markdown highlighting in the message box.
     pub markdown_marks: bool,
+    /// Misspelled words in the message box are underlined as they are typed.
+    pub spell_check: bool,
     /// A long paste goes in the message box as a pill, its text kept aside.
     pub paste_pills: bool,
     /// A turn that changed files ends with a card listing them.
@@ -108,6 +110,7 @@ impl Default for Prefs {
         Self {
             reopen_sessions: true,
             markdown_marks: true,
+            spell_check: true,
             paste_pills: true,
             turn_card: true,
             command_changes: true,
@@ -328,7 +331,7 @@ mod tests {
         assert!(old.prefs.reopen_sessions && old.prefs.paste_pills && old.prefs.command_changes);
         // One turned off keeps the others on.
         let one: Settings = serde_json::from_str(r#"{"prefs": {"turn_card": false}}"#).unwrap();
-        assert!(!one.prefs.turn_card && one.prefs.markdown_marks);
+        assert!(!one.prefs.turn_card && one.prefs.markdown_marks && one.prefs.spell_check);
         // A font size out of range is brought back into it.
         let big: Settings = serde_json::from_str(r#"{"prefs": {"terminal_font_size": 90}}"#).unwrap();
         assert_eq!(big.prefs.terminal_font_size(), 24.0);

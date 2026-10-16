@@ -29,3 +29,11 @@ trash = "5"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+# Spelling in the message box off macOS and Windows: Hunspell dictionaries installed on the
+# system, read by a pure Rust checker (see spelling::hunspell). The tests use it everywhere.
+[target.'cfg(not(any(target_os = "macos", target_os = "windows")))'.dependencies]
+spellbook = "0.4"
+
+[dev-dependencies]
+spellbook = "0.4"

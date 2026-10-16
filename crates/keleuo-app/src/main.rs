@@ -53,6 +53,7 @@ mod skill_installer;
 mod settings_window;
 mod shell;
 mod skills_panel;
+mod spelling;
 mod terminal_view;
 mod theme;
 mod web_panel;

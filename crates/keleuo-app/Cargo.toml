@@ -43,5 +43,9 @@ gpui-kit = { version = "=0.7.1", features = ["tree-sitter-languages", "test-supp
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSDockTile", "NSImage", "NSResponder"] }
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSData", "NSString", "NSGeometry"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSData", "NSString", "NSGeometry", "NSRange"] }
 raw-window-handle = "0.6"
+
+# Spelling in the message box: the system's Spell Checking API (see src/spelling.rs).
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = ["Win32_Globalization", "Win32_System_Com"] }

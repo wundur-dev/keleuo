@@ -102,6 +102,17 @@ pub struct ChatPanel {
     md_marks: Option<TextDecorationCollection<TextareaMode>>,
     /// A syntax highlighter per language named on a code fence in the message box.
     md_highlighters: HashMap<String, gpui_kit::component::highlighter::SyntaxHighlighter>,
+    /// The message box's spelling checker (made the first time there is something to check).
+    spelling: Option<crate::spelling::Spelling>,
+    /// Its marks under misspelled words.
+    spell_marks: Option<TextDecorationCollection<TextareaMode>>,
+    /// The next check, a moment after the last change.
+    spell_check: Option<Task<()>>,
+    /// The word left unchecked by the last check as being typed, and the length of the text
+    /// then: checked when the cursor leaves it.
+    spell_held: Option<(std::ops::Range<usize>, usize)>,
+    /// The Settings switch as last seen (turning it on or off checks again).
+    spelled_as: Option<bool>,
     /// Choices made on an open question card, by request: the labels picked for each question.
     picks: HashMap<String, Vec<Vec<String>>>,
     /// The known failure whose fixes are being offered.
@@ -157,6 +168,8 @@ const TICK: std::time::Duration = std::time::Duration::from_millis(100);
 /// The ticker's pace while the chat is not shown: enough to notice the work has ended.
 const UNSEEN_TICK: std::time::Duration = std::time::Duration::from_secs(1);
 const TICKS_PER_SECOND: u32 = 10;
+/// The pause in typing after which the message box's spelling is checked.
+const SPELL_PAUSE: std::time::Duration = std::time::Duration::from_millis(150);
 
 /// The working line spinner's step.
 pub struct Pulse(u32);
@@ -187,12 +200,30 @@ impl ChatPanel {
             |panel, _, ev: &InputEvent, window, cx| {
                 match ev {
                     InputEvent::PressEnter { shift: false, .. } => panel.send_composed(window, cx),
-                    // Any edit clears the box's styles: mark the Markdown again.
-                    InputEvent::Change => panel.mark_markdown(cx),
+                    // Any edit clears the box's styles: mark the Markdown again, and check
+                    // the spelling once typing pauses.
+                    InputEvent::Change => {
+                        panel.mark_markdown(cx);
+                        panel.check_spelling_soon(SPELL_PAUSE, window, cx);
+                    }
+                    // Leaving the box: the word being typed is done.
+                    InputEvent::Blur => panel.check_spelling_soon(std::time::Duration::ZERO, window, cx),
                     _ => {}
                 }
             },
         );
+        // The cursor left the word held back as being typed: it is checked now.
+        let s3 = cx.observe_in(&input, window, |panel, input, window, cx| {
+            if let Some((held, len)) = &panel.spell_held {
+                let input = input.read(cx);
+                let cursor = input.selected_range().start;
+                // A change to the text is not a move: that check comes after the pause.
+                if input.value().len() == *len && (cursor < held.start || cursor > held.end) {
+                    panel.spell_held = None;
+                    panel.check_spelling_soon(std::time::Duration::ZERO, window, cx);
+                }
+            }
+        });
         let s2 = cx.observe(&session, |panel, session, cx| {
             match (session.read(cx).chat.busy, panel.busy_since) {
                 (true, None) => panel.busy_since = Some(std::time::Instant::now()),
@@ -277,6 +308,11 @@ impl ChatPanel {
             marked_as: None,
             md_marks: None,
             md_highlighters: HashMap::new(),
+            spelling: None,
+            spell_marks: None,
+            spell_check: None,
+            spell_held: None,
+            spelled_as: None,
             picks: HashMap::new(),
             fixing: None,
             fixed: Default::default(),
@@ -298,7 +334,7 @@ impl ChatPanel {
             ticker: None,
             on_screen: Default::default(),
             views: Rc::new(StripState::default()),
-            _subs: vec![s1, s2],
+            _subs: vec![s1, s2, s3],
         };
         Self::watch_scrolling(&panel.list, panel.latest.shown.clone(), panel.me.clone());
         panel
@@ -974,6 +1010,10 @@ impl Render for ChatPanel {
         // Light and dark changed, or the marks were turned on or off: they follow.
         if self.marked_as != Some((cx.theme().is_dark(), crate::prefs(cx).markdown_marks)) {
             self.mark_markdown(cx);
+        }
+        if self.spelled_as != Some(crate::prefs(cx).spell_check) {
+            self.spelled_as = Some(crate::prefs(cx).spell_check);
+            self.check_spelling_soon(std::time::Duration::ZERO, window, cx);
         }
         let started = std::time::Instant::now();
         if crate::perf::enabled() {

@@ -198,6 +198,11 @@ fn chat() -> SettingPage {
                 "Code, headings, bold, italic and links are marked as you type. The text is not changed.",
                 |p| &mut p.markdown_marks,
             ),
+            pref(
+                "Check spelling",
+                "Misspelled words are underlined as you type; right-click one for suggestions. Code, paths and links are left alone.",
+                |p| &mut p.spell_check,
+            ),
             SettingItem::new(
                 "Monospace while a message has code",
                 SettingField::switch(

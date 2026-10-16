@@ -5,6 +5,31 @@ use super::*;
 use gpui_kit::component::IndexPath;
 use gpui_kit::component::select::{SearchableVec, Select, SelectEvent, SelectGroup, SelectState};
 use gpui_kit::component::searchable_list::SearchableListItem;
+use gpui_kit::component::native_menu::NativeMenu;
+
+/// From the message box's right-click menu: put `with` in place of the misspelled `word` at
+/// `range`.
+#[derive(Clone, PartialEq, Action)]
+#[action(namespace = keleuo, no_json)]
+pub(super) struct ReplaceMisspelling {
+    range: std::ops::Range<usize>,
+    word: String,
+    with: String,
+}
+
+/// From the message box's right-click menu: `word` is spelled right, everywhere from now on.
+#[derive(Clone, PartialEq, Action)]
+#[action(namespace = keleuo, no_json)]
+pub(super) struct LearnSpelling {
+    word: String,
+}
+
+/// From the message box's right-click menu: `word` is not flagged in this message box.
+#[derive(Clone, PartialEq, Action)]
+#[action(namespace = keleuo, no_json)]
+pub(super) struct IgnoreSpelling {
+    word: String,
+}
 
 /// Shift+Enter on a list line in the message box: the next item's marker on the new line, or
 /// the marker taken away on an item left empty (ending the list). False when it is a plain new
@@ -130,8 +155,132 @@ impl ChatPanel {
         }
         match &self.md_marks {
             Some(marks) => marks.set(decorations, cx),
-            None => self.md_marks = Some(self.input.update(cx, |s, cx| s.create_decorations_collection(decorations, cx))),
+            None => {
+                self.spell_marks(cx);
+                self.md_marks = Some(self.input.update(cx, |s, cx| s.create_decorations_collection(decorations, cx)));
+            }
         }
+    }
+
+    /// The marks under misspelled words. Made before the Markdown's, so that on a link's text
+    /// the red line shows rather than the link's.
+    fn spell_marks(&mut self, cx: &mut Context<Self>) -> TextDecorationCollection<TextareaMode> {
+        if self.spell_marks.is_none() {
+            self.spell_marks = Some(self.input.update(cx, |s, cx| s.create_decorations_collection(Vec::new(), cx)));
+        }
+        self.spell_marks.clone().expect("made above")
+    }
+
+    /// Check the message box's spelling after `wait` (a pause in typing), unless something
+    /// changes first.
+    pub(super) fn check_spelling_soon(&mut self, wait: std::time::Duration, window: &mut Window, cx: &mut Context<Self>) {
+        self.spell_check = Some(cx.spawn_in(window, async move |this, cx| {
+            if !wait.is_zero() {
+                cx.background_executor().timer(wait).await;
+            }
+            let _ = this.update_in(cx, |p, window, cx| p.check_spelling(window, cx));
+        }));
+    }
+
+    /// Misspelled words in the message box get a red wavy line, as in a native text field.
+    /// Code, paths, links, names and the pasted pills are left alone (see
+    /// [`keleuo_core::spelling::words`]), as is the word being typed until the cursor leaves
+    /// it. Lines checked before are not asked about again; a lot of new text is checked a
+    /// piece at a time, so typing never waits on it.
+    fn check_spelling(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.spell_held = None;
+        let marks = self.spell_marks(cx);
+        let (text, cursor, pills) = {
+            let input = self.input.read(cx);
+            let selected = input.selected_range();
+            let typing = selected.is_empty() && input.focus_handle(cx).is_focused(window);
+            let pills: Vec<_> = input.tokens().iter().map(|t| t.range()).collect();
+            (input.value().to_string(), typing.then_some(selected.start), pills)
+        };
+        let mut words = if crate::prefs(cx).spell_check { keleuo_core::spelling::words(&text, &pills) } else { Vec::new() };
+        if let Some(cursor) = cursor
+            && let Some(i) = keleuo_core::spelling::typing(&words, cursor)
+        {
+            self.spell_held = Some((words.remove(i), text.len()));
+        }
+        if words.is_empty() {
+            if !marks.get_ranges(cx).is_empty() {
+                marks.clear(cx);
+            }
+            return;
+        }
+        let started = std::time::Instant::now();
+        let checked = self.spelling.get_or_insert_with(crate::spelling::Spelling::new).check(&text, &words);
+        crate::perf::record("spelling check", started.elapsed());
+        let red = cx.theme().red;
+        let style = HighlightStyle {
+            underline: Some(UnderlineStyle { thickness: px(1.), color: Some(red), wavy: true }),
+            ..Default::default()
+        };
+        // A lot of new text is checked a piece at a time; its marks are set once it all is
+        // (each set draws the box again, slow with that much text). Unchanged marks are left.
+        if !checked.done {
+            self.check_spelling_soon(std::time::Duration::from_millis(30), window, cx);
+        } else if marks.get_ranges(cx) != checked.misspelled {
+            marks.set(checked.misspelled.into_iter().map(|r| TextDecoration::new(r, style)).collect(), cx);
+        }
+    }
+
+    /// The message box's right-click menu. On a misspelled word: its guesses (choosing one
+    /// puts it in its place), Learn Spelling and Ignore Spelling; then the usual editing items.
+    fn composer_menu(&mut self, mut menu: NativeMenu, cx: &mut Context<Self>) -> NativeMenu {
+        let (text, selected) = {
+            let input = self.input.read(cx);
+            (input.value().to_string(), input.selected_range())
+        };
+        let flagged = self.spell_marks.as_ref().and_then(|marks| {
+            marks.get_ranges(cx).into_iter().find(|r| r.start <= selected.start && selected.end <= r.end)
+        });
+        if let Some(range) = flagged
+            && let Some(word) = text.get(range.clone()).map(str::to_string)
+            && let Some(spelling) = &mut self.spelling
+        {
+            for guess in spelling.guesses(&text, range.clone(), 5) {
+                let replace = ReplaceMisspelling { range: range.clone(), word: word.clone(), with: guess.clone() };
+                menu = menu.menu(guess, Box::new(replace));
+            }
+            menu = menu
+                .separator()
+                .menu("Learn Spelling", Box::new(LearnSpelling { word: word.clone() }))
+                .menu("Ignore Spelling", Box::new(IgnoreSpelling { word }))
+                .separator();
+        }
+        use gpui_kit::component::input::{Copy, Cut, Paste, SelectAll};
+        let none = selected.is_empty();
+        menu.menu_with_disabled("Cut", none, Box::new(Cut))
+            .menu_with_disabled("Copy", none, Box::new(Copy))
+            .menu("Paste", Box::new(Paste))
+            .separator()
+            .menu("Select All", Box::new(SelectAll))
+    }
+
+    /// A guess chosen from the right-click menu: it replaces the word (one edit, so Undo takes
+    /// it back), if the word is still there.
+    fn replace_misspelling(&mut self, replace: &ReplaceMisspelling, window: &mut Window, cx: &mut Context<Self>) {
+        if self.input.read(cx).value().get(replace.range.clone()) != Some(replace.word.as_str()) {
+            return;
+        }
+        self.input.update(cx, |s, cx| {
+            s.set_selected_range(replace.range.clone(), cx);
+            s.replace(replace.with.clone(), window, cx);
+        });
+    }
+
+    /// Learn Spelling or Ignore Spelling for a word, then check again without it.
+    fn accept_spelling(&mut self, word: &str, learn: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(spelling) = &mut self.spelling {
+            if learn {
+                spelling.learn(word);
+            } else {
+                spelling.ignore(word);
+            }
+        }
+        self.check_spelling_soon(std::time::Duration::ZERO, window, cx);
     }
 
     /// The `/` list for what is typed: its matches, when the message is a lone `/word` and the
@@ -365,6 +514,7 @@ impl ChatPanel {
         }
         self.input.update(cx, |s, cx| s.set_value(rebuilt, window, cx));
         self.mark_markdown(cx);
+        self.check_spelling_soon(std::time::Duration::ZERO, window, cx);
         cx.notify();
     }
 
@@ -419,6 +569,7 @@ impl ChatPanel {
         let mode_button = permission_prompts.then(|| self.render_mode_button(cx));
         let send = self.render_send(busy, has_text, cx);
         let paste_target = cx.entity().downgrade();
+        let me = paste_target.clone();
         div()
             .flex_none()
             .w_full()
@@ -480,6 +631,10 @@ impl ChatPanel {
                             cx.stop_propagation();
                         }
                     }))
+                    // The spelling items of the box's right-click menu.
+                    .on_action(cx.listener(|p, replace: &ReplaceMisspelling, window, cx| p.replace_misspelling(replace, window, cx)))
+                    .on_action(cx.listener(|p, a: &LearnSpelling, window, cx| p.accept_spelling(&a.word, true, window, cx)))
+                    .on_action(cx.listener(|p, a: &IgnoreSpelling, window, cx| p.accept_spelling(&a.word, false, window, cx)))
                     .when_some(restarting, |d, why| {
                         // Restarting (a new model or mode): what is typed now waits for it.
                         d.child(
@@ -504,6 +659,10 @@ impl ChatPanel {
                             // A message holding a code block is written in the code font (View menu).
                             .when(mono, |t| t.font_family(cx.theme().mono_font_family.clone()))
                             .token(paste_pill)
+                            .context_menu(move |menu, _, cx| match me.upgrade() {
+                                Some(panel) => panel.update(cx, |p, cx| p.composer_menu(menu, cx)),
+                                None => menu,
+                            })
                             .on_paste(move |item, window, cx| take_paste(item, &paste_target, window, cx)),
                     )
                     .child(
