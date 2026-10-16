@@ -32,6 +32,7 @@ mod agents;
 mod composer;
 mod items;
 mod tools;
+mod rows;
 
 use crate::actions::CopyConversation;
 use crate::agent_session::AgentSession;
@@ -68,6 +69,11 @@ pub struct ChatPanel {
     list: ListState,
     /// How many items the list knows of.
     list_len: usize,
+    /// The list's rows (an item each, a long reply several: see `rows`), how many items they
+    /// were made from, and each long reply's pieces.
+    rows: Vec<rows::Row>,
+    synced_items: usize,
+    pieces: rows::PieceCache,
     /// Earlier parts being read (by their start in the session file).
     loading: HashSet<u64>,
     /// Images to send with the next message.
@@ -126,6 +132,8 @@ pub struct ChatPanel {
 const OVERDRAW: f32 = 600.;
 /// Items at the end measured again on every change (text streaming in, a result arriving).
 const TAIL: usize = 4;
+/// The space between the pieces of a reply in pieces: a paragraph's.
+const PIECE_GAP: f32 = 12.;
 
 impl EventEmitter<ChatPanelEvent> for ChatPanel {}
 
@@ -181,8 +189,7 @@ impl ChatPanel {
             let rev = session.read(cx).chat.revision;
             if rev != panel.last_revision {
                 panel.last_revision = rev;
-                let len = panel.item_count(cx);
-                panel.sync_list(len);
+                panel.sync_rows(cx);
                 let running = clocks_running(&session.read(cx).chat);
                 if running && panel.ticker.is_none() {
                     panel.ticker = Some(cx.spawn(
@@ -242,6 +249,9 @@ impl ChatPanel {
                 list
             },
             list_len: 0,
+            rows: Vec::new(),
+            synced_items: 0,
+            pieces: Default::default(),
             loading: HashSet::new(),
             attachments: Vec::new(),
             pastes: Vec::new(),
@@ -313,24 +323,49 @@ impl ChatPanel {
         cx.notify();
     }
 
-    /// Tell the list what changed: new items at the end, and the last few measured again
-    /// (they may have grown). A shorter conversation (reloaded) starts over.
-    fn sync_list(&mut self, len: usize) {
-        if len < self.list_len {
-            self.list.reset(len);
-        } else {
-            // Measured again in place: their heights stay as hints and the scroll position
-            // stays where it was (replacing them dropped both, and reading higher up while a
-            // reply streamed could jump).
-            let from = self.list_len.saturating_sub(TAIL);
-            if from < self.list_len {
-                self.list.remeasure_items(from..self.list_len);
+    /// The rows for the items shown now: a watched subagent's an item each, the conversation's
+    /// with its long replies in pieces.
+    fn make_rows(&mut self, cx: &App) -> (Vec<rows::Row>, usize) {
+        let session = self.session.clone();
+        let chat = &session.read(cx).chat;
+        match &self.agent {
+            Some(id) => {
+                let n = chat.agent(id).map_or(0, |a| a.items.len());
+                ((0..n).map(rows::Row::whole).collect(), n)
             }
-            if len > self.list_len {
-                self.list.splice(self.list_len..self.list_len, len - self.list_len);
-            }
+            None => (rows::rows(&chat.items, &mut self.pieces), chat.items.len()),
         }
-        self.list_len = len;
+    }
+
+    /// Tell the list what changed: rows at the end (new items, a reply's new pieces), and the
+    /// last few items' rows measured again in place (they may have grown: their heights stay as
+    /// hints and the scroll position stays). A shorter conversation (reloaded) starts over.
+    fn sync_rows(&mut self, cx: &App) {
+        let (new, items) = self.make_rows(cx);
+        if items < self.synced_items {
+            self.pieces.clear();
+            let (new, _) = self.make_rows(cx);
+            self.list.reset(new.len());
+            self.list_len = new.len();
+            self.rows = new;
+            self.synced_items = items;
+            return;
+        }
+        let old_len = self.rows.len();
+        let from_item = self.synced_items.saturating_sub(TAIL);
+        let from = self.rows.iter().position(|r| r.item >= from_item).unwrap_or(old_len);
+        let new_len = new.len();
+        if from < old_len.min(new_len) {
+            self.list.remeasure_items(from..old_len.min(new_len));
+        }
+        if new_len > old_len {
+            self.list.splice(old_len..old_len, new_len - old_len);
+        } else if new_len < old_len {
+            self.list.splice(new_len.max(from)..old_len, 0);
+        }
+        self.list_len = new_len;
+        self.rows = new;
+        self.synced_items = items;
     }
 
     /// An earlier part came into view: read it off the UI thread, then put its items in its
@@ -362,12 +397,20 @@ impl ChatPanel {
                     s.chat.revision
                 });
                 let top = p.list.logical_scroll_top();
-                p.list.splice(ix..ix + 1, n);
-                p.list_len = p.list_len + n - 1;
+                // Its row, and the rows of what replaced it (the items after it moved down: the
+                // pieces kept by index are made again).
+                let at = p.rows.iter().position(|r| r.item == ix).unwrap_or(ix);
+                p.pieces.clear();
+                let (rows, items) = p.make_rows(cx);
+                let added = rows.iter().filter(|r| r.item >= ix && r.item < ix + n).count();
+                p.list.splice(at..at + 1, added);
+                p.list_len = rows.len();
+                p.rows = rows;
+                p.synced_items = items;
                 // Reached by scrolling up: carry on from its newest item. Jumped to the very top:
                 // stay at its start.
-                if top.item_ix == ix && ix > 0 && n > 0 {
-                    p.list.scroll_to(ListOffset { item_ix: ix + n - 1, offset_in_item: px(0.) });
+                if top.item_ix == at && at > 0 && added > 0 {
+                    p.list.scroll_to(ListOffset { item_ix: at + added - 1, offset_in_item: px(0.) });
                 }
                 p.last_revision = rev;
                 cx.notify();
@@ -417,10 +460,20 @@ impl ChatPanel {
     }
 
     /// One item of the conversation, for the list.
-    fn render_entry(&mut self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
+    fn render_entry(&mut self, row: usize, cx: &mut Context<Self>) -> AnyElement {
+        let Some(r) = self.rows.get(row).cloned() else { return div().into_any_element() };
+        let ix = r.item;
         let item = self.item_at(ix, cx);
         let Some(item) = item else { return div().into_any_element() };
-        let last = ix + 1 == self.list_len;
+        let last = row + 1 == self.list_len;
+        // A piece of a long reply: its text from the reply, close under the piece before.
+        if r.is_piece()
+            && let Item::Assistant { text, streaming } = &item
+        {
+            let top = if r.part == 0 { self.space_above(ix, cx) } else { px(PIECE_GAP) };
+            let piece = self.render_reply_piece(ix, &r, text, *streaming, cx);
+            return self.column(piece, last, top);
+        }
         let top = self.space_above(ix, cx);
         // The end-of-turn card, turned off in Settings: nothing, taking no room (but the last
         // entry keeps the gap at the bottom).
@@ -530,7 +583,19 @@ impl ChatPanel {
         };
         let found = items.iter().rposition(|i| matches!(i, Item::Assistant { text: t, .. } if t.contains(text)));
         if let Some(ix) = found {
-            self.list.scroll_to(ListOffset { item_ix: ix, offset_in_item: px(0.) });
+            // The piece holding it, in a reply in pieces.
+            let reply = match &items[ix] {
+                Item::Assistant { text: t, .. } => t.clone(),
+                _ => String::new(),
+            };
+            let at = reply.find(text).unwrap_or(0);
+            let row = self
+                .rows
+                .iter()
+                .position(|r| r.item == ix && (!r.is_piece() || r.range.contains(&at)))
+                .or_else(|| self.rows.iter().position(|r| r.item == ix))
+                .unwrap_or(ix);
+            self.list.scroll_to(ListOffset { item_ix: row, offset_in_item: px(0.) });
             cx.notify();
         }
     }
@@ -863,9 +928,8 @@ impl Render for ChatPanel {
             theme.border,
         );
         let backend_name = self.session.read(cx).backend.name();
-        let len = self.item_count(cx);
-        if self.list_len != len {
-            self.sync_list(len);
+        if self.item_count(cx) != self.synced_items {
+            self.sync_rows(cx);
         }
         let empty = self.list_len == 0;
         let _ = (fg, red, user_bg);

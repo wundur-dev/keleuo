@@ -742,6 +742,27 @@ impl ChatPanel {
         }
     }
 
+    /// One piece of a reply in pieces (see `rows`): its part of the text as Markdown; the last
+    /// piece of a finished reply carries the Copy button, for the whole reply.
+    pub(super) fn render_reply_piece(&self, ix: usize, row: &super::rows::Row, text: &str, streaming: bool, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let (fg, muted) = (theme.foreground, theme.muted_foreground);
+        let piece = text.get(row.range.clone()).unwrap_or_default();
+        let last = row.part + 1 == row.of;
+        let group = SharedString::from(format!("reply-main{ix}"));
+        div()
+            .group(group.clone())
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .text_color(fg)
+            .line_height(rems(1.5))
+            .child(self.markdown(SharedString::from(format!("msg-main{ix}-{}", row.part)), piece.trim_end(), cx))
+            .when(last && !streaming, |d| d.child(hover_actions(group, format!("main{ix}"), text.to_string(), muted)))
+            .into_any_element()
+    }
+
     /// What the working line says ("Thinking · 12s", or the tool running), or `None` when it
     /// does not show (idle, a question waiting, the Terminal view).
     pub(super) fn working_label(&self, cx: &App) -> Option<String> {

@@ -178,9 +178,8 @@ impl ChatPanel {
             }
             None => ("Subagent".to_string(), "no longer in this conversation".to_string()),
         };
-        let len = self.item_count(cx);
-        if self.list_len != len {
-            self.sync_list(len);
+        if self.item_count(cx) != self.synced_items {
+            self.sync_rows(cx);
         }
         let empty = self.list_len == 0;
         div()
