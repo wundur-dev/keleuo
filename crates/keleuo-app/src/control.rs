@@ -73,6 +73,25 @@ fn dispatch(line: &str, cx: &mut App) -> String {
     let Some((handle, ws)) = workspace else {
         return "no workspace".into();
     };
+    if let Some(args) = line.strip_prefix("wheel ") {
+        // A scroll wheel's turn inside the app (no system input): `wheel X Y DY`, in the
+        // window's points; a positive DY scrolls the content down (toward the top).
+        let n: Vec<f32> = args.split_whitespace().filter_map(|a| a.parse().ok()).collect();
+        let [x, y, dy] = n[..] else { return "wheel X Y DY".into() };
+        return handle
+            .update(cx, |_, window, cx| {
+                let event = ScrollWheelEvent {
+                    position: point(px(x), px(y)),
+                    delta: ScrollDelta::Pixels(point(px(0.), px(dy))),
+                    modifiers: Modifiers::default(),
+                    touch_phase: TouchPhase::Moved,
+                };
+                window.dispatch_event(PlatformInput::ScrollWheel(event), cx);
+                window.refresh();
+                "wheel".to_string()
+            })
+            .unwrap_or_else(|_| "window closed".into());
+    }
     if let Some(keys) = line.strip_prefix("key ") {
         // Keystrokes dispatched inside the app (no system input): `key cmd-n`.
         let keys = keys.trim().to_string();

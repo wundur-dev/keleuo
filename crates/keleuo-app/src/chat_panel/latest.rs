@@ -183,27 +183,32 @@ impl ChatPanel {
                 )
                 // Its own place among the window's elements: its messages keep their own state
                 // (selection, layout), apart from the same messages in the conversation above.
-                // It does not scroll: it always shows the end, so the wheel over it is taken
-                // before its list sees it.
-                .child(
-                    div()
-                        .id("latest")
-                        .flex_1()
-                        .min_h_0()
-                        .relative()
-                        .child(list)
-                        .child(
-                            canvas(|_, _, _| (), |bounds, _, window, _| {
-                                window.on_mouse_event(move |e: &ScrollWheelEvent, phase, _, cx| {
-                                    if phase == DispatchPhase::Capture && bounds.contains(&e.position) {
-                                        cx.stop_propagation();
-                                    }
-                                });
-                            })
-                            .absolute()
-                            .size_full(),
-                        ),
-                )
+                .child(div().id("latest").flex_1().min_h_0().child(list))
+                // One view with the conversation: the wheel anywhere over the pane scrolls the
+                // conversation above, taken before the pane's list sees it, so the pane stays on
+                // the end of the turn.
+                .child({
+                    let (conversation, view) = (self.list.clone(), cx.entity_id());
+                    canvas(|_, _, _| (), move |bounds, _, window, _| {
+                        let conversation = conversation.clone();
+                        window.on_mouse_event(move |e: &ScrollWheelEvent, phase, _, cx| {
+                            if phase != DispatchPhase::Capture || !bounds.contains(&e.position) {
+                                return;
+                            }
+                            cx.stop_propagation();
+                            // As the list scrolls itself: a wheel's lines at 20 px; down is less.
+                            let dy = -e.delta.pixel_delta(px(20.)).y;
+                            conversation.scroll_by(dy);
+                            // Back down at the end: follow it again (the pane then goes).
+                            if dy > px(0.) && conversation.is_scrolled_to_end() == Some(true) {
+                                conversation.set_follow_mode(FollowMode::Tail);
+                            }
+                            cx.notify(view);
+                        });
+                    })
+                    .absolute()
+                    .size_full()
+                })
                 // Down to the end of the conversation (which puts the pane away) and following
                 // it again: a pill on the separator's line, over both sides of it. Apart from
                 // the separator, so pressing it does not start a drag.
