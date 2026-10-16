@@ -130,6 +130,8 @@ pub struct ChatPanel {
     /// a match waiting for its part to be read in (where the part starts, its item, the offset).
     find: Option<find::FindBar>,
     found: Option<usize>,
+    /// While a row draws with the find bar open: the marks for its text (see `find_marks`).
+    marking: Option<gpui_kit::base::text::FindMarks>,
     pending_find: Option<(u64, usize, usize)>,
     /// The Chat and Terminal view tabs.
     views: Rc<StripState>,
@@ -285,6 +287,7 @@ impl ChatPanel {
             me: cx.entity().downgrade(),
             find: None,
             found: None,
+            marking: None,
             pending_find: None,
             ticker: None,
             on_screen: Default::default(),
@@ -478,13 +481,21 @@ impl ChatPanel {
         let ix = r.item;
         let item = self.item_at(ix, cx);
         let Some(item) = item else { return div().into_any_element() };
+        self.marking = self.find_marks(&r, cx);
+        let el = self.render_row(&r, row, item, cx);
+        self.marking = None;
+        el
+    }
+
+    fn render_row(&mut self, r: &rows::Row, row: usize, item: Item, cx: &mut Context<Self>) -> AnyElement {
+        let ix = r.item;
         let last = row + 1 == self.list_len;
         // A piece of a long reply: its text from the reply, close under the piece before.
         if r.is_piece()
             && let Item::Assistant { text, streaming } = &item
         {
             let top = if r.part == 0 { self.space_above(ix, cx) } else { px(PIECE_GAP) };
-            let piece = self.render_reply_piece(ix, &r, text, *streaming, cx);
+            let piece = self.render_reply_piece(ix, r, text, *streaming, cx);
             let el = self.column(piece, last, top);
             return self.mark_found(ix, el, cx);
         }

@@ -40,6 +40,11 @@ pub fn item_text(item: &Item) -> Cow<'_, str> {
 
 /// Where `query` occurs in `text`, ignoring case: the byte offset of each (in `text`).
 pub fn occurrences(text: &str, query: &str) -> Vec<usize> {
+    ranges(text, query).into_iter().map(|r| r.start).collect()
+}
+
+/// Where `query` occurs in `text`, ignoring case: byte ranges of `text`.
+pub fn ranges(text: &str, query: &str) -> Vec<std::ops::Range<usize>> {
     let query = query.trim();
     if query.is_empty() || text.is_empty() {
         return Vec::new();
@@ -47,12 +52,13 @@ pub fn occurrences(text: &str, query: &str) -> Vec<usize> {
     // Lowercased side by side, char by char, so offsets stay those of `text` (a lowercase
     // form can differ in length).
     let needle: Vec<char> = query.chars().flat_map(char::to_lowercase).collect();
-    let hay: Vec<(usize, char)> = text.char_indices().flat_map(|(i, c)| c.to_lowercase().map(move |l| (i, l))).collect();
+    let hay: Vec<(usize, usize, char)> =
+        text.char_indices().flat_map(|(i, c)| c.to_lowercase().map(move |l| (i, i + c.len_utf8(), l))).collect();
     let mut out = Vec::new();
     let mut i = 0;
     while i + needle.len() <= hay.len() {
-        if hay[i..i + needle.len()].iter().map(|(_, c)| *c).eq(needle.iter().copied()) {
-            out.push(hay[i].0);
+        if hay[i..i + needle.len()].iter().map(|(_, _, c)| *c).eq(needle.iter().copied()) {
+            out.push(hay[i].0..hay[i + needle.len() - 1].1);
             i += needle.len();
         } else {
             i += 1;
@@ -70,6 +76,8 @@ mod tests {
         assert_eq!(occurrences("Foo foo FOO", "foo"), vec![0, 4, 8]);
         assert_eq!(occurrences("Straße strasse", "STRASSE"), vec![8], "byte offsets: ß is two bytes");
         assert!(occurrences("anything", "  ").is_empty());
+        assert!(ranges("a Straße", "STRASSE").is_empty(), "ß lowercases to itself, not ss");
+        assert_eq!(ranges("Ab ab", "AB"), vec![0..2, 3..5]);
         assert_eq!(occurrences("añb añb", "ÑB"), vec![1, 6]);
     }
 

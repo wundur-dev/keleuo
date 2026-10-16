@@ -152,6 +152,9 @@ pub struct TextViewState {
     /// The rendered text of `parsed_content`, built when first read.
     rendered_index: Arc<OnceLock<RenderedIndex>>,
     range_highlights: Option<Arc<RangeHighlightFrame>>,
+    /// The find marks the range highlights were last made from, and the
+    /// revision of the text they were found in.
+    find_marks: Option<(super::FindMarks, usize)>,
     pub(super) pending_reveal: Option<PendingReveal>,
     pub(super) selection_revision: usize,
     compatible_layout_update: bool,
@@ -234,6 +237,7 @@ impl TextViewState {
             full_update_revision: 0,
             rendered_index: Arc::default(),
             range_highlights: None,
+            find_marks: None,
             pending_reveal: None,
             selection_revision: 0,
             compatible_layout_update: false,
@@ -733,6 +737,40 @@ impl TextViewState {
         );
         cx.notify();
         Ok(())
+    }
+
+    /// Mark `marks`' occurrences as range highlights, again only when the
+    /// marks or the parsed text changed. Called as the element lays out, so
+    /// it does not notify: the highlights paint in this same frame.
+    pub(crate) fn apply_find_marks(&mut self, marks: Option<&super::FindMarks>) {
+        let Some(marks) = marks.filter(|m| !m.query.trim().is_empty()) else {
+            if self.find_marks.take().is_some() {
+                self.range_highlights = None;
+            }
+            return;
+        };
+        if self.format != TextViewFormat::Markdown
+            || self
+                .find_marks
+                .as_ref()
+                .is_some_and(|(m, rev)| m == marks && *rev == self.committed_revision)
+        {
+            return;
+        }
+        let text = self.rendered_text();
+        let found = super::range_highlight::occurrences(text.as_str(), &marks.query);
+        let highlights = found.into_iter().enumerate().map(|(n, range)| {
+            let background = match marks.current {
+                Some((current, color)) if current == n => color,
+                _ => marks.background,
+            };
+            RangeHighlight::new(range, background)
+        });
+        self.range_highlights = RangeHighlightFrame::new(&text, highlights)
+            .ok()
+            .flatten()
+            .map(Arc::new);
+        self.find_marks = Some((marks.clone(), self.committed_revision));
     }
 
     /// Remove all range highlights.

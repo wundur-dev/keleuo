@@ -171,6 +171,36 @@ impl PartialEq for RenderedText {
 
 impl Eq for RenderedText {}
 
+/// Where `query` occurs in `text`, ignoring case: byte ranges of `text`.
+pub(super) fn occurrences(text: &str, query: &str) -> Vec<Range<usize>> {
+    let query = query.trim();
+    if query.is_empty() || text.is_empty() {
+        return Vec::new();
+    }
+    // Lowercased side by side, char by char, so the ranges stay those of
+    // `text` (a lowercase form can differ in length).
+    let needle: Vec<char> = query.chars().flat_map(char::to_lowercase).collect();
+    let hay: Vec<(usize, usize, char)> = text
+        .char_indices()
+        .flat_map(|(i, c)| c.to_lowercase().map(move |l| (i, i + c.len_utf8(), l)))
+        .collect();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i + needle.len() <= hay.len() {
+        if hay[i..i + needle.len()]
+            .iter()
+            .map(|(_, _, c)| *c)
+            .eq(needle.iter().copied())
+        {
+            out.push(hay[i].0..hay[i + needle.len() - 1].1);
+            i += needle.len();
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
 /// A background painted behind one range of a [`RenderedText`].
 ///
 /// It is painted under the text and under the selection, and never changes

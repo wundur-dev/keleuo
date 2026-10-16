@@ -7,6 +7,7 @@
 
 use std::collections::HashMap;
 
+use gpui_kit::base::text::FindMarks;
 use keleuo_core::find;
 
 use super::*;
@@ -225,6 +226,33 @@ impl ChatPanel {
             }
             self.go_to(hit, cx);
         }
+    }
+
+    /// The marks for a row's text: every match on a faint amber, the current one (when in
+    /// this row) stronger. The current one is counted among the row's matches in the item's
+    /// text; the drawn text leaves out Markdown's marks, so in a rare reply the count differs
+    /// and another match there is the stronger one.
+    pub(super) fn find_marks(&self, row: &rows::Row, cx: &App) -> Option<FindMarks> {
+        let f = self.find.as_ref()?;
+        if f.query.trim().is_empty() || f.hits.is_empty() {
+            return None;
+        }
+        let in_row = |at: usize| !row.is_piece() || row.range.contains(&at);
+        let current = f.current.and_then(|c| match f.hits.get(c) {
+            Some(Hit::Item { ix, at }) if *ix == row.item && in_row(*at) => Some(
+                f.hits
+                    .iter()
+                    .filter(|h| matches!(h, Hit::Item { ix, at: a } if *ix == row.item && in_row(*a) && a < at))
+                    .count(),
+            ),
+            _ => None,
+        });
+        let amber = cx.theme().warning;
+        Some(FindMarks {
+            query: f.query.clone().into(),
+            background: amber.opacity(0.22),
+            current: current.map(|n| (n, amber.opacity(0.55))),
+        })
     }
 
     /// The bar under the header: the field, "3 of 12", previous, next, close.

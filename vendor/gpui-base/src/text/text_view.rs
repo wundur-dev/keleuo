@@ -159,6 +159,38 @@ pub struct TextView {
     reveal_handler: Option<Rc<RevealHandlerFn>>,
     markdown_extensions: Arc<MarkdownExtensions>,
     motion: Option<TextViewMotion>,
+    find_marks: Option<FindMarks>,
+}
+
+/// Words to mark wherever they occur in the rendered text, ignoring case, as
+/// a find bar does: every occurrence on `background`, and the `current`-th
+/// (counted from 0) on its own colour.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FindMarks {
+    pub query: SharedString,
+    pub background: gpui::Hsla,
+    pub current: Option<(usize, gpui::Hsla)>,
+}
+
+thread_local! {
+    static FIND_MARKS: std::cell::RefCell<std::collections::HashMap<ElementId, FindMarks>> =
+        Default::default();
+}
+
+/// Set (or with `None` take away) the find marks of the text view with id
+/// `id`, for a wrapper that does not pass [`TextView::find_marks`] on: the
+/// view reads them as it lays out. Only a change of marks redoes the search.
+pub fn set_find_marks(id: &ElementId, marks: Option<FindMarks>) {
+    FIND_MARKS.with_borrow_mut(|all| match marks {
+        Some(marks) => {
+            if all.get(id) != Some(&marks) {
+                all.insert(id.clone(), marks);
+            }
+        }
+        None => {
+            all.remove(id);
+        }
+    });
 }
 
 /// A plugin that can configure a [`TextView`].
@@ -206,6 +238,7 @@ impl TextView {
             reveal_handler: None,
             markdown_extensions: Arc::default(),
             motion: None,
+            find_marks: None,
         }
     }
 
@@ -230,6 +263,7 @@ impl TextView {
             reveal_handler: None,
             markdown_extensions: Arc::default(),
             motion: None,
+            find_marks: None,
         }
     }
 
@@ -254,6 +288,7 @@ impl TextView {
             reveal_handler: None,
             markdown_extensions: Arc::default(),
             motion: None,
+            find_marks: None,
         }
     }
 
@@ -415,6 +450,13 @@ impl TextView {
         F: Fn(Bounds<Pixels>, &mut Window, &mut App) + 'static,
     {
         self.reveal_handler = Some(Rc::new(handler));
+        self
+    }
+
+    /// Mark the occurrences of a query in the text (see [`FindMarks`]);
+    /// `None` takes earlier marks away.
+    pub fn find_marks(mut self, marks: Option<FindMarks>) -> Self {
+        self.find_marks = marks;
         self
     }
 
@@ -693,6 +735,11 @@ impl Element for TextView {
             if let Some(text) = &self.text {
                 state.set_element_text(text, cx);
             }
+            let marks = self
+                .find_marks
+                .clone()
+                .or_else(|| FIND_MARKS.with_borrow(|all| all.get(&self.id).cloned()));
+            state.apply_find_marks(marks.as_ref());
         });
 
         let focus_handle = state.read(cx).focus_handle.clone();

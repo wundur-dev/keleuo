@@ -11,7 +11,7 @@ impl ChatPanel {
     pub(super) fn render_user_text(&self, key: &str, text: &str, cx: &mut Context<Self>) -> AnyElement {
         let parts = paste::parts(text);
         if !parts.iter().any(|p| matches!(p, paste::Part::Pasted(_))) {
-            return text.to_string().into_any_element();
+            return self.marked_text(text);
         }
         let theme = cx.theme();
         let (muted, border, hover, code_bg) = (theme.muted_foreground, theme.border, theme.secondary_hover, theme.background);
@@ -20,7 +20,7 @@ impl ChatPanel {
             match part {
                 paste::Part::Text(t) => {
                     if !t.trim().is_empty() {
-                        col = col.child(t.trim().to_string());
+                        col = col.child(self.marked_text(t.trim()));
                     }
                 }
                 paste::Part::Pasted(p) => {
@@ -504,9 +504,29 @@ impl ChatPanel {
         .into_any_element()
     }
 
+    /// Plain text, its find matches marked (as `find_marks` marks Markdown's).
+    fn marked_text(&self, text: &str) -> AnyElement {
+        let Some(marks) = &self.marking else { return text.to_string().into_any_element() };
+        let found = keleuo_core::find::ranges(text, &marks.query);
+        if found.is_empty() {
+            return text.to_string().into_any_element();
+        }
+        let highlights = found.into_iter().enumerate().map(|(n, r)| {
+            let bg = match marks.current {
+                Some((c, color)) if c == n => color,
+                _ => marks.background,
+            };
+            (r, HighlightStyle { background_color: Some(bg), ..Default::default() })
+        });
+        StyledText::new(text.to_string()).with_highlights(highlights).into_any_element()
+    }
+
     pub(super) fn markdown(&self, id: SharedString, text: &str, cx: &mut Context<Self>) -> AnyElement {
         let md = self.index.linkify_markdown(text);
         let entity = cx.entity().downgrade();
+        // Unique to this panel, so the find marks reach this chat's views only.
+        let id = ElementId::Name(SharedString::from(format!("{}:{id}", entity.entity_id())));
+        gpui_kit::base::text::set_find_marks(&id, self.marking.clone());
         TextView::markdown(id, md)
             .selectable(true)
             .text_sm()
