@@ -1035,7 +1035,12 @@ mod tests {
         // The rest arrives, the last line without its newline yet.
         let rest = lines[1..].join("\n");
         std::fs::write(&path, format!("{}\n{rest}", lines[0])).unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(900));
+        // Until both agents have ended (a busy machine delays the change notice), at most 10 s.
+        let ended = |got: &Mutex<Vec<Event>>| got.lock().unwrap().iter().filter(|e| matches!(e, Event::SubagentEnded { .. })).count();
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while ended(&got) < 2 && std::time::Instant::now() < until {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
         stop.store(true, std::sync::atomic::Ordering::Relaxed);
         t.join().unwrap();
         let mut chat = Conversation::new("/tmp/wb-proj");
