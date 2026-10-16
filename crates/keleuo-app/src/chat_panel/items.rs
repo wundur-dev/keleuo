@@ -811,7 +811,7 @@ impl ChatPanel {
             div()
                 .flex_none()
                 .size(px(16.))
-                .child(canvas(|_, _, _| {}, move |b, _, window, _| native.paint(b, window)).size_full())
+                .child(canvas(|_, _, _| {}, move |b, _, window, _| native.paint(b, muted, window)).size_full())
                 .into_any_element()
         } else {
             spinner_at(self.pulse.read(cx).0, muted).small().into_any_element()
