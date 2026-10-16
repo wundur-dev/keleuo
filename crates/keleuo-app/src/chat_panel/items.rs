@@ -778,12 +778,12 @@ impl ChatPanel {
     }
 
     pub(super) fn markdown(&self, id: SharedString, text: &str, cx: &mut Context<Self>) -> AnyElement {
-        let md = self.index.linkify_markdown(text);
+        let md = SharedString::from(self.index.linkify_markdown(text));
         let entity = cx.entity().downgrade();
         // Unique to this panel, so the find marks reach this chat's views only.
         let id = ElementId::Name(SharedString::from(format!("{}:{id}", entity.entity_id())));
         gpui_kit::base::text::set_find_marks(&id, self.marking.clone());
-        TextView::markdown(id, md)
+        TextView::markdown(id, md.clone())
             .selectable(true)
             .text_sm()
             // Code blocks: the language and a copy button; a one-line `!` command also gets Run,
@@ -820,6 +820,38 @@ impl ChatPanel {
                             }),
                     )
                 }
+            })
+            // Tables: copy as Markdown, or save as CSV for a spreadsheet.
+            .table_actions(move |table, _, cx| {
+                // The table as the reply has it; the renderer's own rewrite of it drops the
+                // backticks of a file reference, which Keleuo turned into a link.
+                let source = table.span.clone().and_then(|span| md.get(span)).map_or(table.markdown.as_str(), str::trim_end);
+                let markdown = keleuo_core::table::without_file_links(source);
+                let csv = keleuo_core::table::to_csv(&table.headers, &table.rows);
+                div()
+                    .flex()
+                    .justify_end()
+                    .gap_1()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(
+                        Button::new("copy-table")
+                            .xsmall()
+                            .ghost()
+                            .icon(gpui_kit::assets::IconName::Copy)
+                            .label("Copy as Markdown")
+                            .on_click(move |_, window, cx| {
+                                cx.write_to_clipboard(ClipboardItem::new_string(markdown.clone()));
+                                gpui_kit::component::WindowExt::push_notification(window, "Copied", cx);
+                            }),
+                    )
+                    .child(
+                        Button::new("save-table")
+                            .xsmall()
+                            .ghost()
+                            .icon(gpui_kit::assets::IconName::Download)
+                            .label("Save as CSV")
+                            .on_click(move |_, window, cx| save_csv(csv.clone(), window, cx)),
+                    )
             })
             .on_link_click(move |url, ev, _, cx| {
                 if let Some((path, line)) = links::parse_url(url) {
@@ -1307,6 +1339,25 @@ fn restarts_keleuo(command: &str) -> bool {
     command.trim().trim_start_matches('!').split_whitespace().next().is_some_and(|w| w.ends_with("scripts/restart"))
 }
 
+/// Ask where to save a table's CSV (in Downloads to start with), then write it. The file goes
+/// on this machine, whatever machine the session runs on.
+fn save_csv(csv: String, window: &mut Window, cx: &mut App) {
+    let home = dirs::home_dir().unwrap_or_default();
+    let downloads = home.join("Downloads");
+    let dir = if downloads.is_dir() { downloads } else { home };
+    let picked = cx.prompt_for_new_path(&dir, Some("table.csv"));
+    window
+        .spawn(cx, async move |cx| {
+            let Ok(Ok(Some(path))) = picked.await else { return };
+            let done = match std::fs::write(&path, csv) {
+                Ok(()) => format!("Saved {}", path.file_name().unwrap_or_default().to_string_lossy()),
+                Err(e) => format!("Not saved: {e}"),
+            };
+            let _ = cx.update(|window, cx| gpui_kit::component::WindowExt::push_notification(window, done, cx));
+        })
+        .detach();
+}
+
 #[cfg(test)]
 mod run_pill_tests {
     use crate::agent_session::AgentSession;
@@ -1373,4 +1424,79 @@ fn working_line(label: String, spinner: AnyElement, agents: Option<AnyElement>, 
             .child(div().flex_1().min_w_0().truncate().child(label))
             .children(agents),
     )
+}
+
+#[cfg(test)]
+mod table_tests {
+    use crate::agent_session::AgentSession;
+    use crate::chat_panel::ChatPanel;
+    use gpui_kit::test::TestWindowExt;
+    use gpui_kit::{div, AnyWindowHandle, AppContext, Context, Entity, IntoElement, ParentElement, Render, Styled, TestAppContext, Window};
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    /// Draws one reply through the chat's own Markdown view.
+    struct Reply(Entity<ChatPanel>, &'static str);
+
+    impl Render for Reply {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let text = self.1;
+            div().size_full().child(self.0.update(cx, |p, cx| p.markdown("reply".into(), text, cx)))
+        }
+    }
+
+    const REPLY: &str = "The numbers:\n\n| Region | **Revenue** |\n| :-- | --: |\n| North, East | 1,234 |\n| [`south.rs`](keleuo-open:south.rs#L2) | 980 |\n";
+
+    /// A window drawing [`REPLY`] in a chat panel.
+    fn reply_window(cx: &mut TestAppContext) -> AnyWindowHandle {
+        cx.update(gpui_kit::init);
+        cx.update(|cx| {
+            cx.set_global(crate::AppSettings(std::rc::Rc::new(std::cell::RefCell::new(keleuo_core::settings::Settings::load(None)))));
+            cx.set_global(crate::backends::Backends(crate::backends::registry()));
+        });
+        let handle = cx
+            .update(|cx| {
+                let backend = crate::backends::backend(None, cx);
+                gpui_kit::open_window(Default::default(), cx, |window, cx| {
+                    let session = cx.new(|_| AgentSession::new(Arc::new(keleuo_core::host::LocalHost), backend, PathBuf::from("/")));
+                    let panel = cx.new(|cx| ChatPanel::new(session, window, cx));
+                    cx.new(|_| Reply(panel, REPLY))
+                })
+            })
+            .unwrap();
+        handle.0
+    }
+
+    /// Copy as Markdown puts the table on the clipboard as the reply has it, without the links
+    /// Keleuo added for files.
+    #[gpui_kit::test]
+    fn a_table_copies_as_markdown(cx: &mut TestAppContext) {
+        let window = reply_window(cx);
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("copy-table", cx);
+        })
+        .unwrap();
+        let copied = cx.update(|cx| cx.read_from_clipboard().and_then(|c| c.text()));
+        assert_eq!(copied.as_deref(), Some("| Region | **Revenue** |\n| :-- | --: |\n| North, East | 1,234 |\n| `south.rs` | 980 |"));
+    }
+
+    /// Save as CSV writes the cells as text, where the save dialog says.
+    #[gpui_kit::test]
+    fn a_table_saves_as_csv(cx: &mut TestAppContext) {
+        let path = std::env::temp_dir().join(format!("keleuo-table-{}.csv", std::process::id()));
+        let window = reply_window(cx);
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("save-table", cx);
+        })
+        .unwrap();
+        assert!(cx.did_prompt_for_new_path());
+        let to = path.clone();
+        cx.simulate_new_path_selection(move |_| Some(to));
+        cx.run_until_parked();
+        let saved = std::fs::read_to_string(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(saved, "\u{feff}Region,Revenue\r\n\"North, East\",\"1,234\"\r\nsouth.rs,980\r\n");
+    }
 }

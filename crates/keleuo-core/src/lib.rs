@@ -18,7 +18,8 @@
 //! - [`compose`]: writing a message (lists that continue on Shift+Enter);
 //! - [`outbox`]: messages sent while the agent works, waiting their turn;
 //! - [`summary`]: turn summaries from a language model server the person chose;
-//! - [`skill_install`]: installing skills from git repositories.
+//! - [`skill_install`]: installing skills from git repositories;
+//! - [`table`]: a table from a reply, as CSV or as Markdown to copy.
 
 pub mod acp;
 pub mod agent;
@@ -53,6 +54,7 @@ pub mod slash;
 pub mod spelling;
 pub mod summary;
 pub mod symbols;
+pub mod table;
 pub mod tabs;
 pub mod term_history;
 pub mod web;
