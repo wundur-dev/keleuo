@@ -14,6 +14,8 @@ let HEIGHT = 420.0
 /// Where the two icons' centres are, in points from the top left; make-dmg places them there.
 let APP_AT = CGPoint(x: 170, y: 190)
 let APPLICATIONS_AT = CGPoint(x: 490, y: 190)
+/// How far below an icon's centre Finder writes its name (for 112-point icons, 13-point text).
+let LABEL_BELOW = 74.0
 
 let args = CommandLine.arguments
 guard args.count == 3, let scale = Double(args[2]) else {
@@ -76,7 +78,7 @@ for _ in 0..<260 {
     let tint: UInt32 = random() < 0.15 ? 0xffe9c4 : (random() < 0.2 ? 0xc9d6ff : 0xffffff)
     // None behind the icons, their names, or the words: the sky stays clear there.
     let nearIcon = [APP_AT, APPLICATIONS_AT].contains { hypot($0.x - x, $0.y + 12 - y) < 78 }
-    let nearWords = abs(x - WIDTH / 2) < 120 && abs(y - (APP_AT.y + 57)) < 16
+    let nearWords = abs(x - WIDTH / 2) < 120 && abs(y - (APP_AT.y - 49)) < 16
     if nearIcon || nearWords { continue }
     if bright > 0.93 {
         let glow = CGGradient(
@@ -177,7 +179,7 @@ ctx.setLineWidth(2.6)
 ctx.strokePath()
 ctx.restoreGState()
 
-// "Drag Keleuo to Applications", under the arrow.
+// "Drag Keleuo to Applications", over the arrow.
 let words = NSAttributedString(
     string: "Drag Keleuo to Applications",
     attributes: [
@@ -188,9 +190,27 @@ let line = CTLineCreateWithAttributedString(words)
 let width = CTLineGetTypographicBounds(line, nil, nil, nil)
 ctx.saveGState()
 ctx.textMatrix = CGAffineTransform(scaleX: 1, y: -1)
-ctx.textPosition = CGPoint(x: (WIDTH - width) / 2, y: APP_AT.y + 62)
+ctx.textPosition = CGPoint(x: (WIDTH - width) / 2, y: APP_AT.y - 44)
 CTLineDraw(line, ctx)
 ctx.restoreGState()
+
+// Under each icon's name, a pill of misty moonlight. Finder writes the names itself, black in
+// light mode and white in dark, and its colour cannot be set: this shade (a relative luminance
+// near 0.18) keeps both readable, each at about 4.5 to 1.
+for (at, width) in [(APP_AT, 86.0), (APPLICATIONS_AT, 118.0)] {
+    let pill = CGRect(x: at.x - width / 2, y: at.y + LABEL_BELOW - 12, width: width, height: 24)
+    let path = CGPath(roundedRect: pill, cornerWidth: 12, cornerHeight: 12, transform: nil)
+    ctx.saveGState()
+    ctx.setShadow(offset: .zero, blur: 10, color: rgb(0x8a8ac0, 0.45))
+    ctx.addPath(path)
+    ctx.setFillColor(rgb(0x7a7aa2))
+    ctx.fillPath()
+    ctx.restoreGState()
+    ctx.addPath(path)
+    ctx.setStrokeColor(rgb(0xc8ccff, 0.25))
+    ctx.setLineWidth(1)
+    ctx.strokePath()
+}
 
 let image = ctx.makeImage()!
 let dest = CGImageDestinationCreateWithURL(out as CFURL, "public.png" as CFString, 1, nil)!
