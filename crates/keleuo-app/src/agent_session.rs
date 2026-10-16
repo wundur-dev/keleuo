@@ -157,6 +157,8 @@ pub struct AgentSession {
     /// needed (a message, or its Terminal shown), so reopening many sessions costs nothing.
     pub dormant: bool,
     /// When the reply preview was last read off the terminal (at most ten times a second).
+    /// Reads the journals of the workflows running (see `follow_workflows`).
+    workflow_poll: Option<Task<()>>,
     preview_read: Option<std::time::Instant>,
     /// The preview last shown (this turn's): the same words again change nothing.
     previewed: Option<String>,
@@ -267,6 +269,7 @@ impl AgentSession {
             backend,
             host,
             dormant: false,
+            workflow_poll: None,
             preview_read: None,
             previewed: None,
             prompts_seen: 0,
@@ -1159,6 +1162,7 @@ impl AgentSession {
                     }
                     session.send_waiting(cx);
                     session.unseen = true;
+                    session.follow_workflows(cx);
                     cx.notify();
                 });
                 if ok.is_err() {
@@ -1171,6 +1175,65 @@ impl AgentSession {
                 cx.background_executor().timer(BATCH_EVERY).await;
             }
         })
+    }
+
+    /// While a workflow runs (Claude Code's Workflow tool, shown as a background agent): every
+    /// few seconds its journal is read, off the UI thread, and its card says how far it is
+    /// ("9 of 13 agents done"). Claude Code reports a workflow's agents nowhere else Keleuo reads.
+    fn follow_workflows(&mut self, cx: &mut Context<Self>) {
+        if self.workflow_poll.is_some() || self.host.is_remote() || self.running_workflows().is_empty() {
+            return;
+        }
+        self.workflow_poll = Some(cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let mut shown: HashMap<String, (usize, usize)> = HashMap::new();
+            loop {
+                let Ok(running) = this.update(cx, |s, _| s.running_workflows()) else { break };
+                if running.is_empty() {
+                    let _ = this.update(cx, |s, _| s.workflow_poll = None);
+                    break;
+                }
+                let read = cx
+                    .background_spawn(async move {
+                        running
+                            .into_iter()
+                            .map(|(id, dir)| {
+                                let journal = std::fs::read_to_string(dir.join("journal.jsonl")).unwrap_or_default();
+                                (id, keleuo_core::workflow::progress(&journal))
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .await;
+                let changed: Vec<_> = read.into_iter().filter(|(id, p)| shown.get(id) != Some(p)).collect();
+                if !changed.is_empty() {
+                    for (id, p) in &changed {
+                        shown.insert(id.clone(), *p);
+                    }
+                    let _ = this.update(cx, |s, cx| {
+                        for (id, (done, started)) in changed {
+                            let what = if started == 0 { "starting".to_string() } else { format!("{done} of {started} agents done") };
+                            s.chat.apply(Event::SubagentProgress { id, current_tool: Some(what), tokens: None, tool_uses: None, duration_ms: None });
+                        }
+                        cx.notify();
+                    });
+                }
+                cx.background_executor().timer(std::time::Duration::from_secs(3)).await;
+            }
+        }));
+    }
+
+    /// The workflows running, with where each keeps its journal.
+    fn running_workflows(&self) -> Vec<(String, PathBuf)> {
+        self.chat
+            .running_agents()
+            .filter(|a| a.kind == "workflow")
+            .filter_map(|a| {
+                let output = self.chat.items.iter().find_map(|i| match i {
+                    keleuo_core::conversation::Item::Tool(t) if t.id == a.tool_use_id => t.result.clone(),
+                    _ => None,
+                })?;
+                Some((a.tool_use_id.clone(), keleuo_core::workflow::dir(&output)?))
+            })
+            .collect()
     }
 
     fn handle(&mut self, message: Message, cx: &mut Context<Self>) {

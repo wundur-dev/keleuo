@@ -10,10 +10,14 @@ use super::summary::tool_summary;
 use crate::agent::Event;
 use crate::diff;
 
-/// Is this the tool that starts subagents?
+/// Is this a tool that starts subagents? A workflow (Claude Code's Workflow tool: a script
+/// running many agents in the background) shows as one, running until its task ends.
 pub fn is_agent_tool(name: &str) -> bool {
-    matches!(name, "Agent" | "Task")
+    matches!(name, "Agent" | "Task" | WORKFLOW)
 }
+
+/// The tool that runs a workflow.
+pub const WORKFLOW: &str = "Workflow";
 
 /// Keeps what the mapping needs between events: the session folder (for short paths), each
 /// tool call's name and input (for the diff of its result), task ids to tool calls.
@@ -104,10 +108,13 @@ impl Mapper {
                         Block::ToolUse { id, name, input } => {
                             self.tools.insert(id.clone(), (name.clone(), input.clone()));
                             let agent = is_agent_tool(&name) && parent.is_none();
-                            let started = agent.then(|| Event::SubagentStarted {
-                                id: id.clone(),
-                                description: s(&input, "description"),
-                                kind: s(&input, "subagent_type"),
+                            let started = agent.then(|| {
+                                let workflow = name == WORKFLOW;
+                                Event::SubagentStarted {
+                                    id: id.clone(),
+                                    description: if workflow { workflow_title(&input) } else { s(&input, "description") },
+                                    kind: if workflow { "workflow".into() } else { s(&input, "subagent_type") },
+                                }
                             });
                             out.push(Event::ToolCall {
                                 summary: tool_summary(&name, &input, &self.cwd),
@@ -129,10 +136,12 @@ impl Mapper {
                 let file_changed = diff.as_ref().map(|d| d.path.clone());
                 // A subagent sent to the background: the call returns at once, the agent runs on
                 // and reports later (see [`super::history`]).
-                let background = is_agent_tool(&name) && !is_error && content.starts_with(ASYNC_LAUNCHED);
+                let background = is_agent_tool(&name)
+                    && !is_error
+                    && (content.starts_with(ASYNC_LAUNCHED) || content.starts_with(WORKFLOW_LAUNCHED));
                 let mut out = Vec::new();
                 if background {
-                    let agent_id = launched_agent_id(&content);
+                    let agent_id = launched_agent_id(&content).or_else(|| workflow_task_id(&content));
                     // Its end may name it only by this id.
                     if let Some(a) = &agent_id {
                         self.tasks.insert(a.clone(), tool_use_id.clone());
@@ -250,6 +259,31 @@ fn resumed_agent_id(result: &str) -> Option<String> {
 const ASYNC_LAUNCHED: &str = "Async agent launched";
 
 /// The `agentId: <id>` line of an Agent tool result: the id its report comes back under.
+/// How the Workflow tool's result begins: the workflow runs on in the background.
+const WORKFLOW_LAUNCHED: &str = "Workflow launched in background";
+
+/// The task id a workflow was launched under (its end may name it only by that).
+fn workflow_task_id(result: &str) -> Option<String> {
+    result.lines().find_map(|l| Some(l.trim().strip_prefix("Task ID:")?.trim().to_string()))
+}
+
+/// A workflow's name for its card: its script's `description` (else `name`), from the script's
+/// `meta`, else the name of a saved workflow it runs.
+fn workflow_title(input: &Value) -> String {
+    let script = s(input, "script");
+    let field = |key: &str| {
+        let at = script.find(&format!("{key}:"))? + key.len() + 1;
+        let rest = script[at..].trim_start();
+        let quote = rest.chars().next().filter(|c| matches!(c, '\'' | '"' | '`'))?;
+        let end = rest[1..].find(quote)?;
+        Some(rest[1..1 + end].to_string())
+    };
+    field("description")
+        .or_else(|| field("name"))
+        .or_else(|| Some(s(input, "name")).filter(|n| !n.is_empty()))
+        .unwrap_or_else(|| "Workflow".into())
+}
+
 fn launched_agent_id(result: &str) -> Option<String> {
     result.lines().find_map(|l| {
         let id = l.trim().strip_prefix("agentId:")?.split_whitespace().next()?;

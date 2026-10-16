@@ -415,3 +415,26 @@ fn the_context_window_is_the_one_claude_code_reports() {
     apply_lines(&mut chat, &mut Mapper::new(""), old);
     assert_eq!(chat.context_window, None);
 }
+
+/// A workflow (Claude Code's Workflow tool) shows as a background agent named after its
+/// script, running until its task ends; its journal says how far it is.
+#[test]
+fn a_workflow_runs_as_a_background_agent_until_its_task_ends() {
+    use keleuo_core::workflow::{dir as workflow_dir, progress as workflow_progress};
+    let call = r#"{"type":"assistant","message":{"id":"m1","model":"claude-opus-5-5","content":[{"type":"tool_use","id":"toolu_wf","name":"Workflow","input":{"script":"export const meta = { name: 'port', description: 'Port the app to .NET' }\nphase('A')"}}]},"parent_tool_use_id":null}"#;
+    let result = r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_wf","content":"Workflow launched in background. Task ID: w0abc\nSummary: Port the app\nTranscript dir: /tmp/wf-run\nRun ID: wf_1"}]},"parent_tool_use_id":null}"#;
+    let mut chat = Conversation::default();
+    let mut m = Mapper::new("");
+    apply_lines(&mut chat, &mut m, &format!("{call}\n{result}"));
+    let agent = chat.agent("toolu_wf").expect("a workflow is an agent");
+    assert_eq!(agent.title(), "Port the app to .NET");
+    assert_eq!(agent.kind, "workflow");
+    assert!(agent.running() && agent.background, "launched: it runs on in the background");
+    let output = match chat.items.iter().find_map(|i| match i { Item::Tool(t) if t.id == "toolu_wf" => t.result.clone(), _ => None }) {
+        Some(o) => o,
+        None => panic!("the call's result is kept"),
+    };
+    assert_eq!(workflow_dir(&output), Some(std::path::PathBuf::from("/tmp/wf-run")));
+    let journal = "{\"type\":\"started\",\"agentId\":\"a\"}\n{\"type\":\"started\",\"agentId\":\"b\"}\n{\"type\":\"result\",\"agentId\":\"a\"}\n";
+    assert_eq!(workflow_progress(journal), (1, 2));
+}

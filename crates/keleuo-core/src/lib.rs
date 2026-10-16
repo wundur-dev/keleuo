@@ -47,6 +47,7 @@ pub mod symbols;
 pub mod tabs;
 pub mod term_history;
 pub mod web;
+pub mod workflow;
 
 /// An environment setting `KELEUO_<name>`, or one of the app's earlier names
 /// (`KELEION_<name>`, `WORKBENCH_<name>`; accepted too).
