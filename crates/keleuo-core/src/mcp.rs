@@ -105,6 +105,40 @@ pub fn claude_config(servers: &[Server], extra: &serde_json::Map<String, Value>)
     json!({ "mcpServers": all })
 }
 
+/// The servers in a Claude Code tool server file (as [`claude_config`] writes), as ACP's
+/// `session/new` takes them: local ones with their command and environment, remote ones with
+/// their address and headers, each `${VAR}` filled in from `env` (the values go to the agent
+/// over its pipe, never to a file).
+pub fn acp_servers(config: &Value, env: &[(String, String)]) -> Value {
+    let fill = |s: &str| {
+        let mut out = s.to_string();
+        for (k, v) in env {
+            out = out.replace(&format!("${{{k}}}"), v);
+        }
+        out
+    };
+    let pairs = |m: Option<&Value>| -> Vec<Value> {
+        m.and_then(Value::as_object)
+            .map(|m| m.iter().map(|(k, v)| json!({ "name": k, "value": fill(v.as_str().unwrap_or_default()) })).collect())
+            .unwrap_or_default()
+    };
+    let servers = config.get("mcpServers").and_then(Value::as_object).cloned().unwrap_or_default();
+    Value::Array(
+        servers
+            .iter()
+            .map(|(name, s)| {
+                let text = |k: &str| s.get(k).and_then(Value::as_str).unwrap_or_default().to_string();
+                if s.get("type").and_then(Value::as_str) == Some("http") {
+                    json!({ "type": "http", "name": name, "url": fill(&text("url")), "headers": pairs(s.get("headers")) })
+                } else {
+                    let args: Vec<String> = s.get("args").and_then(Value::as_array).map(|a| a.iter().filter_map(|x| x.as_str().map(fill)).collect()).unwrap_or_default();
+                    json!({ "name": name, "command": text("command"), "args": args, "env": pairs(s.get("env")) })
+                }
+            })
+            .collect(),
+    )
+}
+
 /// The variables the agent is started with: each secret `servers` use, read from the key
 /// store. A secret not there is left out (its server then gets the `${VAR}` unfilled, and says
 /// so).
@@ -211,6 +245,22 @@ mod tests {
         let config = claude_config(&[s], &serde_json::Map::new());
         assert_eq!(config["mcpServers"]["pg-dev"]["env"]["DATABASE_URL"], "${KELEUO_MCP_PG_DEV_DATABASE_URL}");
         assert_eq!(config["mcpServers"]["pg-dev"]["type"], "stdio");
+    }
+
+    #[test]
+    fn acp_gets_the_servers_with_their_secrets_filled_in() {
+        let s = Server {
+            name: "pg".into(),
+            command: "uvx".into(),
+            env: [("DATABASE_URL".to_string(), "${DATABASE_URL}".to_string())].into(),
+            secrets: vec!["DATABASE_URL".into()],
+            enabled: true,
+            ..Default::default()
+        };
+        let config = claude_config(&[s], &serde_json::Map::new());
+        let acp = acp_servers(&config, &[(secret_var("pg", "DATABASE_URL"), "postgres://x".into())]);
+        assert_eq!(acp[0]["name"], "pg");
+        assert_eq!(acp[0]["env"][0], json!({ "name": "DATABASE_URL", "value": "postgres://x" }));
     }
 
     #[test]

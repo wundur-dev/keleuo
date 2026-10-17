@@ -249,12 +249,21 @@ fn open_session(conn: &Connection, state: &Shared, options: &StartOptions, host:
     init["clientCapabilities"]["_meta"] = json!({"parameterizedModelPicker": true});
     conn.call("initialize", init)?;
     let cwd = options.cwd.to_string_lossy().to_string();
+    // The tool servers Keleuo gives it (its own and those set up in Settings), from the same
+    // file Claude Code gets.
+    let servers = options
+        .mcp_config
+        .as_ref()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+        .map(|c| crate::mcp::acp_servers(&c, &options.env))
+        .unwrap_or_else(|| json!([]));
     let mut opened = None;
     if let Some(id) = &options.resume {
         // A chat started in Terminal (or before ACP) is found through the link.
         share(id);
         state.lock().unwrap().loading = true;
-        let loaded = conn.call("session/load", json!({"sessionId": id, "cwd": cwd, "mcpServers": []}));
+        let loaded = conn.call("session/load", json!({"sessionId": id, "cwd": cwd, "mcpServers": servers}));
         state.lock().unwrap().loading = false;
         match loaded {
             Ok(r) => opened = Some((id.clone(), r)),
@@ -264,7 +273,7 @@ fn open_session(conn: &Connection, state: &Shared, options: &StartOptions, host:
     let (session, opened) = match opened {
         Some(o) => o,
         None => {
-            let r = conn.call("session/new", json!({"cwd": cwd, "mcpServers": []}))?;
+            let r = conn.call("session/new", json!({"cwd": cwd, "mcpServers": servers}))?;
             let id = r.get("sessionId").and_then(Value::as_str).ok_or_else(|| anyhow::anyhow!("no session id"))?.to_string();
             share(&id);
             (id, r)

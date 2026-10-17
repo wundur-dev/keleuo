@@ -102,6 +102,15 @@ pub fn policy_for(folder: &Path, state: &[PathBuf], extra: &[PathBuf]) -> WriteP
     WritePolicy { folders, file_prefixes }
 }
 
+/// The policy for an agent that only reads in `folder` (a reviewer): as [`policy_for`], but
+/// the folder and its repository's git folder are not writable.
+pub fn read_only_policy(folder: &Path, state: &[PathBuf], extra: &[PathBuf]) -> WritePolicy {
+    let mut p = policy_for(folder, state, extra);
+    let git = git_common_dir(folder);
+    p.folders.retain(|f| !f.starts_with(folder) && Some(f) != git.as_ref());
+    p
+}
+
 /// A refused write in a command's output: `Some(path)` when the output says where, `Some(None)`
 /// when it does not; `None` when nothing was refused. The forms differ by what refused it: zsh
 /// (`operation not permitted: /p`), Node (`EPERM: operation not permitted, open '/p'`), and

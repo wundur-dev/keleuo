@@ -161,7 +161,8 @@ fn route(call: Call, cx: &mut App) {
 /// A session's hooks: its token and the settings file to start its agent with. `None` when
 /// the window has no hook socket or the backend no hooks.
 pub struct Registration {
-    pub settings: PathBuf,
+    /// The hooks' settings file, for an agent with hooks.
+    pub settings: Option<PathBuf>,
     /// The tool servers file to start its agent with (see [`Registration::write_mcp`]), and
     /// the window's own server's entry in it (the messaging tools), when the window has it.
     pub mcp: Option<PathBuf>,
@@ -220,7 +221,9 @@ pub struct RemoteHooks {
 
 impl Drop for Registration {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.settings);
+        if let Some(settings) = &self.settings {
+            let _ = std::fs::remove_file(settings);
+        }
         if let Some(mcp) = &self.mcp {
             let _ = std::fs::remove_file(mcp);
         }
@@ -234,26 +237,33 @@ pub fn register(
 ) -> Option<Registration> {
     let hooks = cx.try_global::<Hooks>()?.clone();
     let mut state = hooks.0.borrow_mut();
-    let (socket, helper) = (state.socket.clone()?, state.helper.clone()?);
+    let socket = state.socket.clone()?;
     state.next += 1;
     let token = format!("s{}-{}", std::process::id(), state.next);
-    let command = |event: &str| {
-        format!(
-            "{} {} {} {event}",
-            keleuo_core::host::shell_quote(&helper.to_string_lossy()),
-            keleuo_core::host::shell_quote(&socket.to_string_lossy()),
-            token
-        )
-    };
-    let text = backend.hook_settings(&command)?;
-    let settings = state.dir.join(format!("{token}.json"));
-    std::fs::write(&settings, text).ok()?;
+    // Hooks, for an agent that has them (and with the helper there): a settings file naming it.
+    let settings = state.helper.clone().and_then(|helper| {
+        let command = |event: &str| {
+            format!(
+                "{} {} {} {event}",
+                keleuo_core::host::shell_quote(&helper.to_string_lossy()),
+                keleuo_core::host::shell_quote(&socket.to_string_lossy()),
+                token
+            )
+        };
+        let text = backend.hook_settings(&command)?;
+        let path = state.dir.join(format!("{token}.json"));
+        std::fs::write(&path, text).ok().map(|_| path)
+    });
     // The window's tool server, named with the same socket and token; the file with it is
     // written as the agent starts (see `write_mcp`).
     let keleuo_mcp = state.mcp.clone().map(|program| {
         serde_json::json!({ "type": "stdio", "command": program.to_string_lossy(), "args": [socket.to_string_lossy(), token] })
     });
     let mcp = keleuo_mcp.as_ref().map(|_| state.dir.join(format!("{token}-mcp.json")));
+    // Neither hooks nor the tool server: nothing to register.
+    if settings.is_none() && mcp.is_none() {
+        return None;
+    }
     state.sessions.insert(token.clone(), session);
     Some(Registration { settings, mcp, keleuo_mcp, token, socket })
 }

@@ -190,7 +190,8 @@ impl Backend for ClaudeBackend {
             args.extend(["--settings".into(), settings.to_string_lossy().to_string()]);
         }
         if let Some(config) = &options.mcp_config {
-            args.extend(["--mcp-config".into(), config.to_string_lossy().to_string()]);
+            // Keleuo's own tools need no asking: every message they send is the person's to allow.
+            args.extend(["--mcp-config".into(), config.to_string_lossy().to_string(), "--allowedTools".into(), "mcp__keleuo".into()]);
         }
         if let Some(model) = &options.model {
             args.extend(["--model".into(), model.clone()]);

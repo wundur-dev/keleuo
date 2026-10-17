@@ -194,6 +194,8 @@ pub struct AgentSession {
     pub writable: Vec<PathBuf>,
     /// The agent last started with its writes kept to its folder.
     confined: bool,
+    /// A reviewer: it reads and answers, its folder not writable (see `messaging`).
+    pub read_only: bool,
     /// Messages from other sessions on their way to the agent: they go as turns, but show as
     /// the other session's card, not as the person's message.
     quiet: Vec<String>,
@@ -311,6 +313,7 @@ impl AgentSession {
             writes_anywhere: false,
             writable: Vec::new(),
             confined: false,
+            read_only: false,
             quiet: Vec::new(),
             waiting_for: None,
             _reader: None,
@@ -657,7 +660,16 @@ impl AgentSession {
     /// when Settings keeps agents' writes there and this machine can; else `None` (anywhere).
     /// An agent on another machine runs unconfined.
     fn write_policy(&self, cx: &App) -> Option<keleuo_core::sandbox::WritePolicy> {
-        if !crate::prefs(cx).sandbox_writes || self.writes_anywhere || self.host.is_remote() {
+        if self.host.is_remote() {
+            return None;
+        }
+        // A reviewer writes nowhere in its folder, whatever Settings says.
+        if self.read_only {
+            let mut extra = keleuo_core::mcp::writes(&self.mcp_servers(cx));
+            extra.retain(|f| !f.starts_with(&self.cwd));
+            return Some(keleuo_core::sandbox::read_only_policy(&self.cwd, &self.backend.state_paths(), &extra));
+        }
+        if !crate::prefs(cx).sandbox_writes || self.writes_anywhere {
             return None;
         }
         // Its tool servers run inside it: where they write is allowed too.
@@ -690,7 +702,7 @@ impl AgentSession {
     pub fn receive_message(&mut self, from: &str, text: &str, cx: &mut Context<Self>) {
         self.chat.apply(Event::AgentMessage { from: format!("From {from}"), text: text.to_string() });
         let framed = format!(
-            "[A message from the Keleuo session \"{from}\", another agent (not the person):]\n\n{text}\n\n[To answer, use the keleuo send_message tool with to: \"{from}\".]"
+            "[A message from the Keleuo session \"{from}\", another agent (not the person):]\n\n{text}\n\n[If it needs an answer, use the keleuo send_message tool with to: \"{from}\".]"
         );
         self.quiet.push(framed.clone());
         self.send(&framed, cx);
@@ -716,6 +728,17 @@ impl AgentSession {
         }
         self.chat.revision += 1;
         cx.notify();
+    }
+
+    /// The folder it works in.
+    pub fn cwd(&self) -> &std::path::Path {
+        &self.cwd
+    }
+
+    /// Make it a reviewer: its folder not writable, the agent asking before it acts.
+    pub fn make_reviewer(&mut self) {
+        self.read_only = true;
+        self.permission_mode = Some("default".into());
     }
 
     /// Whether this session's agent can be kept to its folder at all (Settings has it on, this
@@ -820,7 +843,7 @@ impl AgentSession {
         let settings = match &remote {
             Some((r, _)) => Some(r.settings.clone()),
             None if self.host.is_remote() => None,
-            None => self.hooks.as_ref().map(|h| h.settings.clone()),
+            None => self.hooks.as_ref().and_then(|h| h.settings.clone()),
         };
         let options = StartOptions {
             cwd: self.cwd.clone(),

@@ -1,6 +1,6 @@
 //! `keleuo-mcp <socket> <token>`: the tool server (MCP, over stdin and stdout) an agent is
 //! started with while Keleuo drives its session. Its tools reach the other sessions in the
-//! window: `list_sessions` and `send_message`. It knows only what the tools are called and what
+//! window: `list_sessions`, `send_message` and `ask_for_review`. It knows only what the tools are called and what
 //! they take; each call goes to the window over its local socket as one line,
 //! `{"token": ..., "event": "mcp", "payload": {"tool": ..., "arguments": ...}}`, and the
 //! window's answer, `{"text": ..., "error": bool}`, is the call's result. With the window gone
@@ -80,6 +80,18 @@ fn tools() -> Value {
                     "message": { "type": "string", "description": "What to say: complete on its own, since the other agent has not seen this conversation." },
                 },
                 "required": ["to", "message"],
+            },
+        },
+        {
+            "name": "ask_for_review",
+            "description": "Ask another agent for a second opinion on work in this folder: Keleuo opens a new, read-only session of that agent here (it can read and run read-only commands, not change files), gives it your request, and its review comes back to this session as a message. The person allows it first. Don't wait for it: finish your turn; the review arrives as a new message.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "agent": { "type": "string", "description": "Which agent reviews: \"Claude Code\" or \"Cursor\". Left out: a different agent from this one, when there is one." },
+                    "request": { "type": "string", "description": "What to review and what to look for, complete on its own (the reviewer has not seen this conversation): the files or the change, the concerns, what kind of answer you want." },
+                },
+                "required": ["request"],
             },
         },
     ])

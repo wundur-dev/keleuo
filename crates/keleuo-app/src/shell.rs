@@ -1223,6 +1223,30 @@ impl Shell {
         }
     }
 
+    /// A reviewer for a session (see `messaging`): a new read-only session of `backend` in
+    /// `root`, named `name`, added to the list without leaving the shown session. Its number
+    /// and session.
+    pub fn open_reviewer(
+        &mut self,
+        root: PathBuf,
+        backend: Arc<dyn Backend>,
+        name: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<(usize, Entity<AgentSession>)> {
+        let shown = self.active;
+        let mut session = AgentSession::new(Arc::new(LocalHost), backend, root.clone());
+        session.make_reviewer();
+        self.add_session(Arc::new(LocalHost), root, session, None, None, window, cx);
+        let tab = self.tabs.last()?;
+        let (number, session) = (tab.number, tab.ws.read(cx).session.clone());
+        let _ = cx.global::<panels::Names>().0.borrow_mut().set(&panels::session_key(number), name);
+        if shown < self.tabs.len() - 1 {
+            self.activate(shown, window, cx);
+        }
+        Some((number, session))
+    }
+
     pub fn new_session_in(&mut self, host: Arc<dyn Host>, root: PathBuf, backend: Arc<dyn Backend>, window: &mut Window, cx: &mut Context<Self>) {
         let session = AgentSession::new(host.clone(), backend, root.clone());
         self.add_session(host, root, session, None, None, window, cx);

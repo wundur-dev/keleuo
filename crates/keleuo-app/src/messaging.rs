@@ -36,13 +36,19 @@ pub struct Peer {
     pub session: Entity<AgentSession>,
 }
 
+/// Where a message goes: a session in the window, or a new reviewer session.
+enum Target {
+    Session { to: WeakEntity<AgentSession>, to_number: usize },
+    /// A new read-only session of `backend` in the sender's folder, asked for a review.
+    Reviewer { backend: std::sync::Arc<dyn keleuo_core::agent::Backend> },
+}
+
 /// A message waiting for the person.
 struct Pending {
     from: Entity<AgentSession>,
     from_number: usize,
     from_name: String,
-    to: WeakEntity<AgentSession>,
-    to_number: usize,
+    target: Target,
     text: String,
 }
 
@@ -80,6 +86,7 @@ pub fn tool_call(session: Entity<AgentSession>, call: Call, cx: &mut App) {
     let (text, error) = match tool.as_str() {
         "list_sessions" => (list(&session, cx), false),
         "send_message" => send(&session, &args, cx),
+        "ask_for_review" => review(&session, &args, cx),
         _ => (format!("Keleuo has no tool {tool}."), true),
     };
     if let Some(reply) = call.reply {
@@ -144,8 +151,7 @@ fn send(me: &Entity<AgentSession>, args: &Value, cx: &mut App) -> (String, bool)
         from: me.clone(),
         from_number: from.number,
         from_name: from.name.clone(),
-        to: target.session.downgrade(),
-        to_number: target.number,
+        target: Target::Session { to: target.session.downgrade(), to_number: target.number },
         text: text.clone(),
     };
     let name = target.name.clone();
@@ -171,20 +177,98 @@ fn state_allows_always(pair: (usize, usize), cx: &App) -> bool {
     cx.try_global::<Messaging>().is_some_and(|m| m.always.contains(&pair))
 }
 
+/// A review: the person is asked to allow a new read-only session of the agent asked for (or
+/// another than this one's) to review, with `request`.
+fn review(me: &Entity<AgentSession>, args: &Value, cx: &mut App) -> (String, bool) {
+    let request = args.get("request").and_then(Value::as_str).unwrap_or_default().trim().to_string();
+    if request.is_empty() {
+        return ("Say what to review.".into(), true);
+    }
+    let peers = peers(cx);
+    let Some(from) = peers.iter().find(|p| &p.session == me) else { return ("This session is not in the window's list.".into(), true) };
+    let mine = me.read(cx).backend.id().to_string();
+    // The real agents (the scripted test one only when asked for by name).
+    let all = crate::backends::all(cx);
+    let asked = args.get("agent").and_then(Value::as_str).map(str::to_lowercase).filter(|a| !a.trim().is_empty());
+    let backend = match &asked {
+        Some(a) => all.iter().find(|b| b.name().to_lowercase().contains(a.trim()) || b.id().contains(a.trim())).cloned(),
+        None => all.iter().filter(|b| b.id() != "scripted").find(|b| b.id() != mine).or_else(|| all.first()).cloned(),
+    };
+    let Some(backend) = backend else {
+        let names = all.iter().filter(|b| b.id() != "scripted").map(|b| format!("\"{}\"", b.name())).collect::<Vec<_>>().join(", ");
+        return (format!("Keleuo has no agent called that. It has: {names}."), true);
+    };
+    let state = cx.default_global::<Messaging>();
+    state.next += 1;
+    let id = state.next;
+    let to = format!("a new {} reviewer (read-only)", backend.name());
+    state.pending.insert(id, Pending { from: me.clone(), from_number: from.number, from_name: from.name.clone(), target: Target::Reviewer { backend }, text: request.clone() });
+    me.update(cx, |s, cx| s.note_outgoing(id, &to, &request, SendState::Asking, cx));
+    (
+        format!("The person is asked to allow {to} to review this. Its review comes to this session as a new message; finish your turn rather than waiting for it."),
+        false,
+    )
+}
+
 /// The person's answer to message `id`, from its card.
 pub fn decide(id: u64, decision: Decision, cx: &mut App) {
     let Some(pending) = cx.default_global::<Messaging>().pending.remove(&id) else { return };
-    if decision == Decision::Always {
-        cx.default_global::<Messaging>().always.insert((pending.from_number, pending.to_number));
-    }
     let from = pending.from.clone();
     if decision == Decision::Deny {
         from.update(cx, |s, cx| s.set_outgoing(id, SendState::Denied, cx));
         return;
     }
-    let state = if pending.to.upgrade().is_some() { SendState::Sent } else { SendState::Failed("that session has closed".into()) };
-    from.update(cx, |s, cx| s.set_outgoing(id, state, cx));
-    deliver(pending, cx);
+    match &pending.target {
+        Target::Session { to, to_number } => {
+            if decision == Decision::Always {
+                cx.default_global::<Messaging>().always.insert((pending.from_number, *to_number));
+            }
+            let state = if to.upgrade().is_some() { SendState::Sent } else { SendState::Failed("that session has closed".into()) };
+            from.update(cx, |s, cx| s.set_outgoing(id, state, cx));
+            deliver(pending, cx);
+        }
+        Target::Reviewer { backend } => {
+            // After the click that allowed it, which still holds the window the reviewer opens in.
+            let backend = backend.clone();
+            cx.defer(move |cx| {
+                let state = match open_reviewer(&pending, backend, decision, cx) {
+                    Ok(()) => SendState::Sent,
+                    Err(why) => SendState::Failed(why),
+                };
+                from.update(cx, |s, cx| s.set_outgoing(id, state, cx));
+            });
+        }
+    }
+}
+
+/// Open the reviewer the person allowed: a new read-only session in the sender's folder, named
+/// for it, given the request; its review may come back without asking (and, `Always`, more).
+fn open_reviewer(pending: &Pending, backend: std::sync::Arc<dyn keleuo_core::agent::Backend>, decision: Decision, cx: &mut App) -> Result<(), String> {
+    let (handle, shell) = cx
+        .try_global::<crate::control::ControlTargets>()
+        .and_then(|t| t.workspace.clone())
+        .ok_or("the window is not there")?;
+    let folder = pending.from.read(cx).cwd().to_path_buf();
+    let name = format!("Review for {}", pending.from_name);
+    let opened = handle
+        .update(cx, |_, window, cx| shell.update(cx, |s, cx| s.open_reviewer(folder, backend, &name, window, cx)))
+        .map_err(|_| "the window is not there".to_string())?
+        .map_err(|_| "the window is not there".to_string())?
+        .ok_or("the window is not there")?;
+    let (number, reviewer) = opened;
+    let m = cx.default_global::<Messaging>();
+    // Its answer is what the person allowed; "always": the two may go on talking.
+    m.always.insert((number, pending.from_number));
+    if decision == Decision::Always {
+        m.always.insert((pending.from_number, number));
+    }
+    let text = format!(
+        "Please review, as a second opinion. You are in a read-only session: read files and run read-only commands, but do not change anything (writes to this folder are blocked).\n\n{}\n\nWhen you are done, send your review to \"{}\" with the keleuo send_message tool.",
+        pending.text, pending.from_name
+    );
+    let from = pending.from_name.clone();
+    reviewer.update(cx, |s, cx| s.receive_message(&from, &text, cx));
+    Ok(())
 }
 
 /// Whether sessions `a` and `b` may message each other without asking (either way).
@@ -212,8 +296,9 @@ pub fn forget_always(a: usize, b: usize, cx: &mut App) {
 }
 
 fn deliver(pending: Pending, cx: &mut App) {
-    let Some(to) = pending.to.upgrade() else { return };
-    cx.default_global::<Messaging>().sent.entry((pending.from_number, pending.to_number)).or_default().push(Instant::now());
+    let Target::Session { to, to_number } = &pending.target else { return };
+    let Some(to) = to.upgrade() else { return };
+    cx.default_global::<Messaging>().sent.entry((pending.from_number, *to_number)).or_default().push(Instant::now());
     let (from, text) = (pending.from_name, pending.text);
     to.update(cx, |s, cx| s.receive_message(&from, &text, cx));
 }
