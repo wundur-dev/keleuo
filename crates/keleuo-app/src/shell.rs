@@ -1837,8 +1837,7 @@ impl Shell {
                     .items_center()
                     .gap_2()
                     .rounded(px(8.))
-                    // On the pressed-in look's ground (the sidebar's own tone) it is lifted with white.
-                    .bg(if crate::prefs(cx).inset_text && !cx.theme().is_dark() { gpui::white().opacity(0.5) } else { bg })
+                    .bg(bg)
                     .text_size(px(14.))
                     .text_color(fg)
                     .cursor_pointer()

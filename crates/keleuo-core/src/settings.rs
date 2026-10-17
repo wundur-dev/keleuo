@@ -83,8 +83,8 @@ pub struct Prefs {
     pub markdown_marks: bool,
     /// Misspelled words in the message box are underlined as they are typed.
     pub spell_check: bool,
-    /// The side lists' text looks pressed into the surface (a faint copy a pixel lower), on a
-    /// sidebar a shade darker.
+    /// The side lists' text looks pressed into the surface: mid dark grey, with a light copy a
+    /// pixel lower.
     pub inset_text: bool,
     /// A long paste goes in the message box as a pill, its text kept aside.
     pub paste_pills: bool,

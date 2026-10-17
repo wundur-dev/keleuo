@@ -15,10 +15,9 @@ pub const PERIWINKLE: u32 = 0x6084e8;
 /// The crane's yellow.
 pub const CRANE: u32 = 0xffc354;
 
-/// The light lists' ground with the pressed-in look: a shade darker, for the text's white edge.
-const PRESSED_GROUND: u32 = 0xe6e6e9;
-/// And its text.
-const PRESSED_TEXT: u32 = 0x45454b;
+/// The side lists' text with the pressed-in look: a mid dark grey, so the white edge under it
+/// reads (on near black it is lost).
+const PRESSED_TEXT: u32 = 0x55555b;
 
 thread_local! {
     /// The light lists' ground, while trying others (the control channel's `sidebar`).
@@ -46,7 +45,7 @@ pub fn pressed(el: Div, text: impl Into<SharedString>, cx: &App) -> Div {
     if !crate::prefs(cx).inset_text {
         return el.child(text);
     }
-    let shadow = if cx.theme().is_dark() { gpui::black().opacity(0.45) } else { gpui::white().opacity(0.75) };
+    let shadow = if cx.theme().is_dark() { gpui::black().opacity(0.45) } else { gpui::white() };
     el.relative()
         .child(div().absolute().top(px(1.)).left_0().right_0().truncate().text_color(shadow).child(text.clone()))
         .child(div().relative().truncate().child(text))
@@ -71,8 +70,6 @@ pub fn apply(dark: bool, cx: &mut App) {
     Theme::change(if dark { ThemeMode::Dark } else { ThemeMode::Light }, None, cx);
     crate::fonts::apply(cx);
     crate::palette::set_dark(dark);
-    // The pressed-in look: the whole light sidebar a shade darker, for the text's white edge.
-    let pressed = crate::prefs(cx).inset_text;
     Theme::update(cx, |t| {
         let c = &mut t.colors;
         if dark {
@@ -97,7 +94,7 @@ pub fn apply(dark: bool, cx: &mut App) {
         } else {
             // Neutral greys: the ground (the session list, the space between panels) a soft
             // grey, the panels white on it.
-            c.sidebar = hex(if pressed { PRESSED_GROUND } else { 0xf1f1f1 });
+            c.sidebar = hex(0xf1f1f1);
             c.tab_bar = hex(0xe9e9e9);
             c.background = hex(0xffffff);
             c.secondary = hex(0xf3f3f3);
@@ -136,11 +133,10 @@ pub fn strip_ground(cx: &App) -> Hsla {
 /// the session list's, so the chat and files stand out white beside them.
 pub fn tool_ground(cx: &App) -> Hsla {
     let t = cx.theme();
-    if !t.is_dark() {
-        let tried = SIDEBAR_TONE.with(|t| t.get());
-        if let Some(tone) = tried.or(crate::prefs(cx).inset_text.then_some(PRESSED_GROUND)) {
-            return hex(tone);
-        }
+    if !t.is_dark()
+        && let Some(tone) = SIDEBAR_TONE.with(|t| t.get())
+    {
+        return hex(tone);
     }
     crate::sheet_tabs::mix(t.background, t.sidebar, 0.45)
 }

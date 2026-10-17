@@ -195,7 +195,7 @@ fn general(page: WeakEntity<SettingsPage>) -> SettingPage {
                 )
                 .default_value(true),
             )
-            .description("The session, file and agent lists' text looks pressed into a slightly darker sidebar."),
+            .description("The session, file and agent lists' text in a softer grey, pressed into the surface."),
         ),
         SettingGroup::new().title("Fonts").items([Which::App, Which::Chat, Which::Terminal].map(|which| {
             let page = page.clone();
