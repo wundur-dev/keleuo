@@ -29,6 +29,7 @@ pub mod command_changes;
 pub mod compose;
 pub mod conversation;
 pub mod diff;
+pub mod file_clipboard;
 pub mod files;
 pub mod find;
 pub mod frontmatter;

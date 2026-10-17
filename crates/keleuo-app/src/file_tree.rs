@@ -208,6 +208,11 @@ impl FileTree {
         }
     }
 
+    /// The file or folder a right-click is on, if any.
+    fn menu_entry(&self) -> Option<PathBuf> {
+        self.hovered.and_then(|ix| self.rows.get(ix)).filter(|r| r.kind == RowKind::Entry).map(|r| r.path.clone())
+    }
+
     pub fn root(&self) -> &std::path::Path {
         &self.root
     }
@@ -331,6 +336,42 @@ impl FileTree {
         .detach();
     }
 
+    /// Put the file (or folder) itself on the clipboard, for Finder or any app to paste.
+    pub fn copy_file(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        cx.background_spawn(async move {
+            if let Err(e) = keleuo_core::file_clipboard::copy(&[path]) {
+                eprintln!("keleuo: could not copy: {e}");
+            }
+        })
+        .detach();
+    }
+
+    /// Copy the files on the clipboard (from here, Finder or any app) into `dir`, and show the
+    /// last one.
+    pub fn paste_into(&mut self, dir: PathBuf, cx: &mut Context<Self>) {
+        cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let made = cx
+                .background_spawn(async move {
+                    keleuo_core::file_clipboard::pasted().iter().map(|f| keleuo_core::file_clipboard::copy_into(f, &dir)).collect::<Vec<_>>()
+                })
+                .await;
+            let _ = this.update(cx, |tree, cx| {
+                let mut last = None;
+                for m in made {
+                    match m {
+                        Ok(p) => last = Some(p),
+                        Err(e) => eprintln!("keleuo: {e}"),
+                    }
+                }
+                tree.refresh(cx);
+                if let Some(p) = last {
+                    tree.selected = Some(p);
+                }
+            });
+        })
+        .detach();
+    }
+
     /// Take `path` away once the person says so: into the Trash (deleted over SSH, said first).
     pub fn discard(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
@@ -438,6 +479,7 @@ impl Render for FileTree {
         }
         let rows = self.rows.clone();
         let selected = self.selected.clone();
+        let remote = self.host.is_remote();
         let entity = cx.entity().downgrade();
         let menu_tree = entity.clone();
         let sidebar_bg = crate::theme::tool_ground(cx);
@@ -508,13 +550,26 @@ impl Render for FileTree {
                     }
                     // Rename and remove, on hover (right-click is easy to miss on a Mac).
                     let group = SharedString::from(format!("file-row-{ix}"));
-                    let (ren, rem) = (entity.clone(), entity.clone());
-                    let (ren_path, rem_path) = (row.path.clone(), row.path.clone());
+                    let (ren, rem, cop) = (entity.clone(), entity.clone(), entity.clone());
+                    let (ren_path, rem_path, cop_path) = (row.path.clone(), row.path.clone(), row.path.clone());
                     let icons = div()
                         .flex_none()
                         .flex()
                         .invisible()
                         .group_hover(group.clone(), |d| d.visible())
+                        .when(!remote, |d| {
+                            d.child(
+                                Button::new(("file-copy", ix))
+                                    .icon(gpui_kit::assets::IconName::Copy)
+                                    .xsmall()
+                                    .ghost()
+                                    .tooltip("Copy (paste it in Finder or any app)")
+                                    .on_click(move |_, _, cx| {
+                                        cx.stop_propagation();
+                                        let _ = cop.update(cx, |t, cx| t.copy_file(cop_path.clone(), cx));
+                                    }),
+                            )
+                        })
                         .child(
                             Button::new(("file-rename", ix))
                                 .icon(gpui_kit::assets::IconName::Pencil)
@@ -580,8 +635,22 @@ impl Render for FileTree {
             .child(list)
             .context_menu(move |menu, _, cx| {
                 let Some(tree) = menu_tree.upgrade() else { return menu };
-                let dir = tree.read(cx).menu_folder();
-                new_menu(menu, menu_tree.clone(), dir)
+                let (dir, entry, remote) = (tree.read(cx).menu_folder(), tree.read(cx).menu_entry(), tree.read(cx).host.is_remote());
+                let menu = new_menu(menu, menu_tree.clone(), dir.clone());
+                if remote {
+                    return menu;
+                }
+                let (t1, t2) = (menu_tree.clone(), menu_tree.clone());
+                let menu = menu.separator();
+                let menu = match entry {
+                    Some(path) => menu.item(PopupMenuItem::new("Copy").icon(Icon::new(gpui_kit::assets::IconName::Copy)).on_click(move |_, _, cx| {
+                        let _ = t1.update(cx, |t, cx| t.copy_file(path.clone(), cx));
+                    })),
+                    None => menu,
+                };
+                menu.item(PopupMenuItem::new("Paste").icon(Icon::new(gpui_kit::assets::IconName::Clipboard)).on_click(move |_, _, cx| {
+                    let _ = t2.update(cx, |t, cx| t.paste_into(dir.clone(), cx));
+                }))
             })
             .into_any_element()
     }
