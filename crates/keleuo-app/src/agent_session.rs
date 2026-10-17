@@ -730,6 +730,32 @@ impl AgentSession {
         cx.notify();
     }
 
+    /// A run of one of the person's tools the agent asked for, as its card (see `tool_runs`).
+    pub fn note_tool_run(&mut self, id: u64, tool: &str, command: &str, state: keleuo_core::conversation::SendState, cx: &mut Context<Self>) {
+        self.chat.items.push(keleuo_core::conversation::Item::ToolRun { id, tool: tool.to_string(), command: command.to_string(), state });
+        self.chat.revision += 1;
+        cx.notify();
+    }
+
+    /// Where tool run `id` is now (allowed, denied).
+    pub fn set_tool_run(&mut self, id: u64, state: keleuo_core::conversation::SendState, cx: &mut Context<Self>) {
+        for item in self.chat.items.iter_mut().rev() {
+            if let keleuo_core::conversation::Item::ToolRun { id: i, state: s, .. } = item
+                && *i == id
+            {
+                *s = state;
+                break;
+            }
+        }
+        self.chat.revision += 1;
+        cx.notify();
+    }
+
+    /// Whether it runs on another machine.
+    pub fn host_is_remote(&self) -> bool {
+        self.host.is_remote()
+    }
+
     /// The folder it works in.
     pub fn cwd(&self) -> &std::path::Path {
         &self.cwd

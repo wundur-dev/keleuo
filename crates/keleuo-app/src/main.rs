@@ -52,12 +52,14 @@ mod native_spinner;
 mod sheet_tabs;
 mod skill_installer;
 mod settings_mcp;
+mod settings_tools;
 mod settings_window;
 mod shell;
 mod skills_panel;
 mod spelling;
 mod terminal_view;
 mod theme;
+mod tool_runs;
 mod web_panel;
 mod workspace;
 

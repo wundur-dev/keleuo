@@ -483,6 +483,79 @@ impl ChatPanel {
             .into_any_element()
     }
 
+    /// A run of one of the person's tools the agent asked for: the command, and Allow, Always
+    /// or Deny while it waits.
+    pub(super) fn render_tool_run(&self, id: u64, tool: &str, command: &str, state: &keleuo_core::conversation::SendState, cx: &mut Context<Self>) -> AnyElement {
+        use crate::messaging::Decision;
+        use crate::tool_runs::decide;
+        use keleuo_core::conversation::SendState;
+        let theme = cx.theme();
+        let (fg, muted, border, accent, danger) = (theme.foreground, theme.muted_foreground, theme.border, theme.cyan, theme.danger);
+        let status = match state {
+            SendState::Asking => None,
+            SendState::Sent => Some(("Allowed".to_string(), muted)),
+            SendState::Denied => Some(("Not run".to_string(), muted)),
+            SendState::Failed(why) => Some((format!("Not run: {why}"), danger)),
+        };
+        let button = |label: &'static str, decision: Decision, primary: bool| {
+            Button::new(SharedString::from(format!("run-{id}-{label}")))
+                .xsmall()
+                .label(label)
+                .when(primary, |b| b.primary())
+                .on_click(move |_, _, cx| decide(id, decision, cx))
+        };
+        div()
+            .flex()
+            .flex_col()
+            .border_1()
+            .border_color(border)
+            .rounded_md()
+            .bg(accent.opacity(0.05))
+            .overflow_hidden()
+            .child(
+                div()
+                    .h(px(24.))
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .text_xs()
+                    .child(div().flex_none().font_weight(FontWeight::SEMIBOLD).text_color(accent).child("tool"))
+                    .child(div().min_w_0().truncate().text_color(fg).child(tool.to_string()))
+                    .child(div().flex_1())
+                    .children(status.map(|(s, c)| div().flex_none().text_color(c).child(s))),
+            )
+            .child(
+                div()
+                    .px_2()
+                    .py_1()
+                    .border_t_1()
+                    .border_color(border)
+                    .text_xs()
+                    .font_family(MONO)
+                    .text_color(fg)
+                    .child(command.to_string()),
+            )
+            .when(*state == SendState::Asking, |d| {
+                d.child(
+                    div()
+                        .px_2()
+                        .py_1p5()
+                        .border_t_1()
+                        .border_color(border)
+                        .flex()
+                        .flex_wrap()
+                        .items_center()
+                        .gap_2()
+                        .child(div().flex_1().min_w(px(160.)).text_xs().text_color(muted).child(format!("Run {tool}?")))
+                        .child(button("Allow", Decision::Allow, true))
+                        .child(button("Always for this session", Decision::Always, false))
+                        .child(button("Deny", Decision::Deny, false)),
+                )
+            })
+            .into_any_element()
+    }
+
     /// Another agent's message (a subagent's report): one row with its first line, the whole
     /// report on request.
     pub(super) fn render_agent_message(&self, from: &str, title: &str, text: &str, cx: &mut Context<Self>) -> AnyElement {
@@ -809,6 +882,7 @@ impl ChatPanel {
                     .into_any_element(),
                 Item::AgentMessage { from, title, text, .. } => self.render_agent_message(from, title, text, cx),
                 Item::Outgoing { id, to, text, state } => self.render_outgoing(*id, to, text, state, cx),
+                Item::ToolRun { id, tool, command, state } => self.render_tool_run(*id, tool, command, state, cx),
                 Item::TurnChanges(changes) => self.render_turn_changes(ix, changes, cx),
                 Item::Summary { state, .. } => self.render_summary(state, cx),
             };

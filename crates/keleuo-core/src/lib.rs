@@ -24,6 +24,7 @@ pub mod acp;
 pub mod agent;
 pub mod backends;
 pub mod changes;
+pub mod cli_tools;
 pub mod command_changes;
 pub mod compose;
 pub mod conversation;

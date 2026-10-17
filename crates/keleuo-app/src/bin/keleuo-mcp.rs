@@ -1,6 +1,7 @@
 //! `keleuo-mcp <socket> <token>`: the tool server (MCP, over stdin and stdout) an agent is
 //! started with while Keleuo drives its session. Its tools reach the other sessions in the
-//! window: `list_sessions`, `send_message` and `ask_for_review`. It knows only what the tools are called and what
+//! window: `list_sessions`, `send_message` and `ask_for_review`, and the tools the person made
+//! from command-line programs in Settings (asked of the window when the agent lists them). It knows only what the tools are called and what
 //! they take; each call goes to the window over its local socket as one line,
 //! `{"token": ..., "event": "mcp", "payload": {"tool": ..., "arguments": ...}}`, and the
 //! window's answer, `{"text": ..., "error": bool}`, is the call's result. With the window gone
@@ -43,12 +44,17 @@ fn main() {
                 }))
             }
             "ping" => Ok(json!({})),
-            "tools/list" => Ok(json!({ "tools": tools() })),
+            "tools/list" => {
+                // Keleuo's own, then the person's (from the window; none when it is not there).
+                let mut all = tools().as_array().cloned().unwrap_or_default();
+                let theirs = ask(socket, token, &json!({ "list": true }));
+                all.extend(theirs.and_then(|v| v.get("tools").and_then(Value::as_array).cloned()).unwrap_or_default());
+                Ok(json!({ "tools": all }))
+            }
             "tools/call" => {
                 let tool = params.get("name").and_then(Value::as_str).unwrap_or_default();
                 let arguments = params.get("arguments").cloned().unwrap_or(json!({}));
-                let (text, error) = call(socket, token, tool, &arguments);
-                Ok(json!({ "content": [{ "type": "text", "text": text }], "isError": error }))
+                Ok(call(socket, token, tool, &arguments))
             }
             _ => Err(json!({ "code": -32601, "message": format!("unknown method {method}") })),
         };
@@ -97,21 +103,28 @@ fn tools() -> Value {
     ])
 }
 
-/// One tool call, answered by the window: its text, and whether it failed.
-fn call(socket: &str, token: &str, tool: &str, arguments: &Value) -> (String, bool) {
-    let ask = || -> Option<Value> {
-        let mut stream = Stream::connect(socket.to_fs_name::<GenericFilePath>().ok()?).ok()?;
-        let line = json!({ "token": token, "event": "mcp", "payload": { "tool": tool, "arguments": arguments } });
-        stream.write_all(format!("{line}\n").as_bytes()).ok()?;
-        let mut answer = String::new();
-        BufReader::new(stream).read_line(&mut answer).ok()?;
-        serde_json::from_str(answer.trim()).ok()
-    };
-    match ask() {
-        Some(v) => (
-            v.get("text").and_then(Value::as_str).unwrap_or_default().to_string(),
-            v.get("error").and_then(Value::as_bool).unwrap_or(false),
-        ),
-        None => ("Keleuo is not answering (its window may have closed).".into(), true),
+/// One message to the window, its answer (`None` when it is not there).
+fn ask(socket: &str, token: &str, payload: &Value) -> Option<Value> {
+    let mut stream = Stream::connect(socket.to_fs_name::<GenericFilePath>().ok()?).ok()?;
+    let line = json!({ "token": token, "event": "mcp", "payload": payload });
+    stream.write_all(format!("{line}\n").as_bytes()).ok()?;
+    let mut answer = String::new();
+    BufReader::new(stream).read_line(&mut answer).ok()?;
+    serde_json::from_str(answer.trim()).ok()
+}
+
+/// One tool call, answered by the window (`{"text", "error", "images": [{"data", "mimeType"}]}`),
+/// as MCP's result.
+fn call(socket: &str, token: &str, tool: &str, arguments: &Value) -> Value {
+    match ask(socket, token, &json!({ "tool": tool, "arguments": arguments })) {
+        Some(v) => {
+            let text = v.get("text").and_then(Value::as_str).unwrap_or_default().to_string();
+            let mut content = vec![json!({ "type": "text", "text": text })];
+            for image in v.get("images").and_then(Value::as_array).cloned().unwrap_or_default() {
+                content.push(json!({ "type": "image", "data": image["data"], "mimeType": image["mimeType"] }));
+            }
+            json!({ "content": content, "isError": v.get("error").and_then(Value::as_bool).unwrap_or(false) })
+        }
+        None => json!({ "content": [{ "type": "text", "text": "Keleuo is not answering (its window may have closed)." }], "isError": true }),
     }
 }

@@ -24,6 +24,7 @@ path = "src/bin/keleuo-mcp.rs"
 keleuo-core = { workspace = true }
 anyhow = { workspace = true }
 dirs = { workspace = true }
+base64 = "0.22"
 # Times in local time ("Today, 16:11") in the session browser.
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 serde_json = { workspace = true }

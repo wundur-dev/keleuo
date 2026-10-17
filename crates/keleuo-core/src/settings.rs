@@ -216,6 +216,9 @@ pub struct Settings {
     /// Tool servers (MCP) every agent gets ([`crate::mcp`]); and each folder's own.
     pub mcp_servers: Vec<crate::mcp::Server>,
     pub folder_mcp: std::collections::BTreeMap<PathBuf, crate::mcp::FolderServers>,
+    /// Tools made from command-line programs ([`crate::cli_tools`]); and each folder's own.
+    pub cli_tools: Vec<crate::cli_tools::Tool>,
+    pub folder_tools: std::collections::BTreeMap<PathBuf, crate::cli_tools::FolderTools>,
     /// Settings this build does not know (written by a newer one), kept as they are so
     /// saving does not drop them.
     #[serde(flatten)]

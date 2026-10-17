@@ -116,6 +116,9 @@ pub enum Item {
     /// A message this session's agent sent to another session (`to`, by name): `id` the
     /// window's for it, `state` whether it went.
     Outgoing { id: u64, to: String, text: String, state: SendState },
+    /// A run of one of the person's tools (see [`crate::cli_tools`]) the agent asked for:
+    /// `command` as it runs, `state` whether the person allowed it.
+    ToolRun { id: u64, tool: String, command: String, state: SendState },
 }
 
 /// Where a message to another session is.
@@ -1060,6 +1063,7 @@ pub fn to_markdown(items: &[Item], agent: &str) -> String {
             }
             Item::Earlier { messages, .. } => format!("*[{} earlier not loaded]*", plural(*messages, "message")),
             Item::Outgoing { to, text, .. } => format!("**To {to}:** {}", text.trim()),
+            Item::ToolRun { tool, command, .. } => format!("**Tool {tool}:** `{command}`"),
             Item::Compacted { trigger, tokens, .. } => {
                 let mut facts: Vec<String> = trigger.iter().cloned().collect();
                 if let Some(t) = tokens {

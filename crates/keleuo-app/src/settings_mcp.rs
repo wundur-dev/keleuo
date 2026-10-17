@@ -46,7 +46,7 @@ struct Form {
     writes: Entity<InputState>,
 }
 
-fn input(window: &mut Window, cx: &mut App, placeholder: &str, masked: bool) -> Entity<InputState> {
+pub(crate) fn input(window: &mut Window, cx: &mut App, placeholder: &str, masked: bool) -> Entity<InputState> {
     let placeholder = placeholder.to_string();
     cx.new(|cx| InputState::new(window, cx).placeholder(placeholder).masked(masked))
 }
@@ -87,12 +87,12 @@ fn change_scope(scope: &Option<PathBuf>, cx: &mut App, f: impl FnOnce(&mut Vec<S
     });
 }
 
-fn name_of(p: &Path) -> String {
+pub(crate) fn name_of(p: &Path) -> String {
     p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| p.display().to_string())
 }
 
 /// A command line split into words (a word in quotes keeps its spaces).
-fn words(line: &str) -> Vec<String> {
+pub(crate) fn words(line: &str) -> Vec<String> {
     let (mut out, mut word, mut quote) = (Vec::new(), String::new(), None::<char>);
     for c in line.trim().chars() {
         match (quote, c) {

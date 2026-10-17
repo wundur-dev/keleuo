@@ -81,13 +81,21 @@ fn peers(cx: &App) -> Vec<Peer> {
 
 /// An agent's tool call: answered on the call's connection.
 pub fn tool_call(session: Entity<AgentSession>, call: Call, cx: &mut App) {
+    // `keleuo-mcp` asking which of the person's tools the agent gets.
+    if call.payload.get("list").is_some_and(|v| v == &json!(true)) {
+        if let Some(reply) = call.reply {
+            reply.send(&crate::tool_runs::list(&session, cx).to_string());
+        }
+        return;
+    }
     let tool = call.payload.get("tool").and_then(Value::as_str).unwrap_or_default().to_string();
     let args = call.payload.get("arguments").cloned().unwrap_or(json!({}));
     let (text, error) = match tool.as_str() {
         "list_sessions" => (list(&session, cx), false),
         "send_message" => send(&session, &args, cx),
         "ask_for_review" => review(&session, &args, cx),
-        _ => (format!("Keleuo has no tool {tool}."), true),
+        // The person's tools answer when their run ends.
+        _ => return crate::tool_runs::call(session, &tool, args, call.reply, cx),
     };
     if let Some(reply) = call.reply {
         reply.send(&json!({ "text": text, "error": error }).to_string());
