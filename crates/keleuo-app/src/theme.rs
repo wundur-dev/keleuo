@@ -17,6 +17,8 @@ pub const CRANE: u32 = 0xffc354;
 
 /// The light lists' ground with the pressed-in look: a shade darker, for the text's white edge.
 const PRESSED_GROUND: u32 = 0xe6e6e9;
+/// And its text.
+const PRESSED_TEXT: u32 = 0x45454b;
 
 thread_local! {
     /// The light lists' ground, while trying others (the control channel's `sidebar`).
@@ -28,6 +30,12 @@ pub fn try_sidebar_tone(tone: Option<u32>, cx: &mut App) {
     SIDEBAR_TONE.with(|t| t.set(tone));
     apply(wants_dark(cx), cx);
     cx.refresh_windows();
+}
+
+/// The side lists' main text: a dark grey with the pressed-in look on a light theme (black
+/// reads as printed on, not pressed in), else the theme's.
+pub fn list_text(cx: &App) -> Hsla {
+    if crate::prefs(cx).inset_text && !cx.theme().is_dark() { hex(PRESSED_TEXT) } else { cx.theme().foreground }
 }
 
 /// `text` pressed into the surface, letterpress style: a faint copy a pixel lower drawn
@@ -63,6 +71,8 @@ pub fn apply(dark: bool, cx: &mut App) {
     Theme::change(if dark { ThemeMode::Dark } else { ThemeMode::Light }, None, cx);
     crate::fonts::apply(cx);
     crate::palette::set_dark(dark);
+    // The pressed-in look: the whole light sidebar a shade darker, for the text's white edge.
+    let pressed = crate::prefs(cx).inset_text;
     Theme::update(cx, |t| {
         let c = &mut t.colors;
         if dark {
@@ -87,7 +97,7 @@ pub fn apply(dark: bool, cx: &mut App) {
         } else {
             // Neutral greys: the ground (the session list, the space between panels) a soft
             // grey, the panels white on it.
-            c.sidebar = hex(0xf1f1f1);
+            c.sidebar = hex(if pressed { PRESSED_GROUND } else { 0xf1f1f1 });
             c.tab_bar = hex(0xe9e9e9);
             c.background = hex(0xffffff);
             c.secondary = hex(0xf3f3f3);

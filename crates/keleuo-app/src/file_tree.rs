@@ -422,12 +422,12 @@ impl Render for FileTree {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let (fg, muted, sel_bg, hover) = (
-            theme.foreground,
+            crate::theme::list_text(cx),
             theme.muted_foreground,
             theme.accent,
             theme.secondary_hover,
         );
-        let quiet = theme.sidebar_foreground.opacity(0.88);
+        let quiet = if crate::prefs(cx).inset_text { fg.opacity(0.88) } else { theme.sidebar_foreground.opacity(0.88) };
         if self.loading {
             return div()
                 .p_2()

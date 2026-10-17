@@ -1626,7 +1626,7 @@ impl Shell {
     fn render_list(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
         let (fg, muted, border, hover, ring, bg, sel) =
-            (theme.foreground, theme.muted_foreground, theme.border, theme.secondary_hover, theme.ring, theme.sidebar, theme.secondary);
+            (crate::theme::list_text(cx), theme.muted_foreground, theme.border, theme.secondary_hover, theme.ring, theme.sidebar, theme.secondary);
         let (yellow, red, blue) = (theme.yellow, theme.red, theme.blue);
         let mut col = div().id("session-list").flex_1().min_h_0().flex().flex_col().overflow_y_scroll();
         for ix in 0..self.tabs.len() {
@@ -1837,7 +1837,8 @@ impl Shell {
                     .items_center()
                     .gap_2()
                     .rounded(px(8.))
-                    .bg(bg)
+                    // On the pressed-in look's ground (the sidebar's own tone) it is lifted with white.
+                    .bg(if crate::prefs(cx).inset_text && !cx.theme().is_dark() { gpui::white().opacity(0.5) } else { bg })
                     .text_size(px(14.))
                     .text_color(fg)
                     .cursor_pointer()

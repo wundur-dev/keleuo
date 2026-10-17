@@ -99,7 +99,7 @@ impl AgentSide {
     fn render_row(&self, a: &SubAgent, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
         let (fg, muted, hover, green, red, violet) = (
-            theme.sidebar_foreground,
+            if crate::prefs(cx).inset_text { crate::theme::list_text(cx) } else { theme.sidebar_foreground },
             theme.muted_foreground,
             theme.secondary_hover,
             theme.green,
