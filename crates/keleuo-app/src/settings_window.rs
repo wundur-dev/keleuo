@@ -12,7 +12,7 @@ use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_kit::component::{ActiveTheme, IconName, Sizable};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
-use keleuo_core::settings::{Prefs, Settings, TERMINAL_FONT_SIZE, TERMINAL_FONT_SIZES};
+use keleuo_core::settings::{AGENT_FONT_SIZE, Prefs, Settings, TERMINAL_FONT_SIZE, TERMINAL_FONT_SIZES};
 
 use crate::AppSettings;
 
@@ -280,7 +280,17 @@ fn terminals() -> SettingPage {
                 )
                 .default_value(TERMINAL_FONT_SIZE as f64),
             )
-            .description("In points, for the shell terminals and the agents' own interfaces."),
+            .description("In points, for shell terminals. Cmd+= and Cmd+- change one terminal's size for as long as it is open."),
+            SettingItem::new(
+                "Agents' interface font size",
+                SettingField::number_input(
+                    NumberFieldOptions { min: min as f64, max: max as f64, step: 0.5 },
+                    |cx: &App| get(cx, |s| s.prefs.agent_font_size()) as f64,
+                    move |v: f64, cx: &mut App| change(cx, |s| s.prefs.agent_font_size = (v as f32).clamp(min, max)),
+                )
+                .default_value(AGENT_FONT_SIZE as f64),
+            )
+            .description("In points, for an agent's own interface (a session's Terminal view), where you read and type."),
             pref(
                 "Keep terminal history",
                 "A terminal shows what it showed before Keleuo quit. Kept 30 days.",

@@ -120,6 +120,8 @@ pub struct TerminalView {
     /// This terminal's zoom: points over (or under) the size in Settings, for as long as it is
     /// open; and when it last changed (the program's size waits until zooming stops).
     zoom: f32,
+    /// An agent's own interface (its size is the agents', not the shells').
+    pub agent: bool,
     zoomed_at: Rc<Cell<Option<std::time::Instant>>>,
     zoom_settle: Option<Task<()>>,
     /// 1, 2, ... in opening order: the key of its saved name.
@@ -333,6 +335,7 @@ impl TerminalView {
             selecting: false,
             wheel_rest: 0.,
             zoom: 0.,
+            agent: false,
             zoomed_at: Rc::default(),
             zoom_settle: None,
             number: 0,
@@ -1087,13 +1090,18 @@ impl TerminalView {
     /// The size its text is drawn at: Settings' size, zoomed.
     pub fn text_size(&self, cx: &App) -> f32 {
         let (min, max) = (*keleuo_core::settings::TERMINAL_FONT_SIZES.start(), *keleuo_core::settings::TERMINAL_FONT_SIZES.end());
-        (font_size(cx) + self.zoom).clamp(min, max)
+        (self.base_size(cx) + self.zoom).clamp(min, max)
+    }
+
+    /// Settings' size for it: an agent's interface has its own, larger than a shell's.
+    fn base_size(&self, cx: &App) -> f32 {
+        if self.agent { crate::prefs(cx).agent_font_size() } else { font_size(cx) }
     }
 
     /// Zoom by `steps` (in or out), or back to Settings' size with `None`.
     fn zoom_by(&mut self, steps: Option<f32>, cx: &mut Context<Self>) {
         let (min, max) = (*keleuo_core::settings::TERMINAL_FONT_SIZES.start(), *keleuo_core::settings::TERMINAL_FONT_SIZES.end());
-        let base = font_size(cx);
+        let base = self.base_size(cx);
         let zoom = match steps {
             // Kept within the sizes allowed, so zooming back starts from what shows.
             Some(n) => ((base + self.zoom + n * ZOOM_STEP).clamp(min, max)) - base,

@@ -904,6 +904,7 @@ impl AgentSession {
             let mut v = TerminalView::new(command, cx);
             v.placeholder = Some(placeholder);
             v.images = images;
+            v.agent = true;
             v
         });
         self.pasted_images.clear();

@@ -93,6 +93,9 @@ pub struct Prefs {
     pub keep_terminal_history: bool,
     /// The terminals' font size, in points.
     pub terminal_font_size: f32,
+    /// The agents' own interfaces' font size (their Terminal view), in points: larger than
+    /// the shells', being where the person reads and types.
+    pub agent_font_size: f32,
     /// Experimental: an agent with its own terminal interface runs it for the session's whole
     /// life, Chat drawing from its session file, so switching views is instant. Off: Chat runs
     /// the agent headless and Terminal its interface, one at a time, switching between turns.
@@ -106,6 +109,8 @@ pub struct Prefs {
 
 /// The terminals' font size when none is set, and the range allowed.
 pub const TERMINAL_FONT_SIZE: f32 = 11.0;
+/// The agents' interfaces' font size when none is set.
+pub const AGENT_FONT_SIZE: f32 = 12.5;
 pub const TERMINAL_FONT_SIZES: std::ops::RangeInclusive<f32> = 9.0..=24.0;
 
 impl Default for Prefs {
@@ -119,6 +124,7 @@ impl Default for Prefs {
             command_changes: true,
             keep_terminal_history: true,
             terminal_font_size: TERMINAL_FONT_SIZE,
+            agent_font_size: AGENT_FONT_SIZE,
             hybrid_views: false,
             latest_pane: true,
             sandbox_writes: true,
@@ -128,6 +134,15 @@ impl Default for Prefs {
 
 impl Prefs {
     /// The terminal font size, kept in range (a hand-edited file may hold anything).
+    /// The agents' interfaces' font size, kept in range.
+    pub fn agent_font_size(&self) -> f32 {
+        if self.agent_font_size.is_finite() && self.agent_font_size > 0. {
+            self.agent_font_size.clamp(*TERMINAL_FONT_SIZES.start(), *TERMINAL_FONT_SIZES.end())
+        } else {
+            AGENT_FONT_SIZE
+        }
+    }
+
     pub fn terminal_font_size(&self) -> f32 {
         if self.terminal_font_size.is_finite() {
             self.terminal_font_size.clamp(*TERMINAL_FONT_SIZES.start(), *TERMINAL_FONT_SIZES.end())
