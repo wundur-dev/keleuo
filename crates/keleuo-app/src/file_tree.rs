@@ -483,6 +483,7 @@ impl Render for FileTree {
                         let cancel = entity.clone();
                         return div()
                             .id(ix)
+                            .w_full()
                             .h(px(ROW_HEIGHT))
                             .pl(indent)
                             .pr_1()
@@ -536,9 +537,11 @@ impl Render for FileTree {
                                     let _ = rem.update(cx, |t, cx| t.discard(rem_path.clone(), window, cx));
                                 }),
                         );
+                    // The whole width: the highlight runs to the edge, the buttons sit at the right.
                     div()
                         .id(ix)
                         .group(group)
+                        .w_full()
                         .h(px(ROW_HEIGHT))
                         .pl(indent)
                         .pr_1()
