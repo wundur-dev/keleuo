@@ -396,7 +396,7 @@ impl ChatPanel {
                     .cursor_pointer()
                     .when(n == ix, |d| d.bg(sel))
                     .hover(|d| d.bg(sel))
-                    .child(div().flex_none().text_sm().font_family("monospace").text_color(fg).child(format!("/{}", choice.name)))
+                    .child(div().flex_none().text_sm().font_family(crate::fonts::code(cx)).text_color(fg).child(format!("/{}", choice.name)))
                     .child(div().flex_1().min_w_0().truncate().text_xs().text_color(muted).child(choice.description))
                     .child(div().flex_none().text_xs().text_color(muted).child(choice.from))
                     .on_click(cx.listener(move |p, _, window, cx| {
@@ -855,7 +855,7 @@ impl ChatPanel {
                     .text_xs()
                     .text_color(muted)
                     .child(div().text_color(fg).truncate().child(format!("Pasted text · {}", paste::size(text))))
-                    .child(div().truncate().font_family("monospace").child(first))
+                    .child(div().truncate().font_family(crate::fonts::code(cx)).child(first))
                     .child(
                         div()
                             .flex()

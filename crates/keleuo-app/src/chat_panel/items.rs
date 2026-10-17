@@ -61,7 +61,7 @@ impl ChatPanel {
                                         .px_2()
                                         .py_1()
                                         .bg(code_bg)
-                                        .font_family("monospace")
+                                        .font_family(crate::fonts::code(cx))
                                         .text_xs()
                                         .flex()
                                         .flex_col()
@@ -307,7 +307,7 @@ impl ChatPanel {
                                             .flex_1()
                                             .min_w_0()
                                             .truncate()
-                                            .font_family(MONO)
+                                            .font_family(crate::fonts::code(cx))
                                             .text_size(px(12.))
                                             .text_color(muted)
                                             .child(command.clone()),
@@ -532,7 +532,7 @@ impl ChatPanel {
                     .border_t_1()
                     .border_color(border)
                     .text_xs()
-                    .font_family(MONO)
+                    .font_family(crate::fonts::code(cx))
                     .text_color(fg)
                     .child(command.to_string()),
             )
@@ -759,7 +759,7 @@ impl ChatPanel {
         }
         let style = TextStyle {
             color,
-            font_family: MONO.into(),
+            font_family: crate::fonts::code(cx),
             font_size: px(11.).into(),
             ..Default::default()
         };

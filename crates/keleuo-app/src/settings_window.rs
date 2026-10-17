@@ -23,6 +23,8 @@ pub struct SettingsPage {
     pub(crate) mcp: crate::settings_mcp::McpState,
     /// The tools page's state (see `settings_tools`).
     pub(crate) tools: crate::settings_tools::ToolsState,
+    /// The font search open under one of the fonts (see `settings_fonts`).
+    pub(crate) font_search: Option<crate::settings_fonts::Search>,
     /// The page shown first (a link to a setting opens on its page).
     start: usize,
 }
@@ -38,7 +40,7 @@ impl EventEmitter<CloseSettings> for SettingsPage {}
 impl SettingsPage {
     /// `folders`: the folders the MCP servers page offers (the shown session's first).
     pub fn new(folders: Vec<std::path::PathBuf>, cx: &mut Context<Self>) -> Self {
-        Self { focus: cx.focus_handle(), tools: crate::settings_tools::ToolsState::new(folders.clone()), mcp: crate::settings_mcp::McpState::new(folders), start: 0 }
+        Self { focus: cx.focus_handle(), font_search: None, tools: crate::settings_tools::ToolsState::new(folders.clone()), mcp: crate::settings_mcp::McpState::new(folders), start: 0 }
     }
 
     /// Show page `name` first (see [`PAGES`]); its folder for the MCP servers page.
@@ -68,7 +70,7 @@ fn mcp_page(page: WeakEntity<SettingsPage>) -> SettingPage {
 
 /// Tools: the person's own, made from command-line programs (see `settings_tools`).
 fn tools_page(page: WeakEntity<SettingsPage>) -> SettingPage {
-    SettingPage::new("Tools").icon(gpui_kit::assets::IconName::Wrench).group(
+    SettingPage::new("Tools").icon(gpui_kit::assets::IconName::Toolbox).group(
         SettingGroup::new().item(SettingItem::render(move |_, window, cx| crate::settings_tools::render(&page, window, cx))),
     )
 }
@@ -149,7 +151,8 @@ fn choice(
     .description(description)
 }
 
-fn general() -> SettingPage {
+fn general(page: WeakEntity<SettingsPage>) -> SettingPage {
+    use crate::fonts::Which;
     SettingPage::new("General").icon(IconName::Settings).resettable(true).groups([
         SettingGroup::new().title("Look").item(
             SettingItem::new(
@@ -178,7 +181,12 @@ fn general() -> SettingPage {
                 s.tab_style = v.to_string();
                 crate::sheet_tabs::set_style(v);
             },
-        )),
+        ))
+,
+        SettingGroup::new().title("Fonts").items([Which::App, Which::Chat, Which::Terminal].map(|which| {
+            let page = page.clone();
+            SettingItem::render(move |_, _, cx| crate::settings_fonts::render(&page, which, cx))
+        })),
         SettingGroup::new().title("Sessions").items([
             choice(
                 "New sessions open in",
@@ -533,7 +541,7 @@ impl Render for SettingsPage {
                         // As wide as New session's folders.
                         .sidebar_width(px(252.))
                         .default_selected_index(gpui_kit::component::setting::SelectIndex { page_ix: self.start, group_ix: None })
-                        .pages([general(), chat(), mcp_page(cx.entity().downgrade()), tools_page(cx.entity().downgrade()), terminals(), notifications(), summaries()]),
+                        .pages([general(cx.entity().downgrade()), chat(), mcp_page(cx.entity().downgrade()), tools_page(cx.entity().downgrade()), terminals(), notifications(), summaries()]),
                 ),
             )
     }

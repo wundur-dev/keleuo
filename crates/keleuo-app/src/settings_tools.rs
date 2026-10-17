@@ -359,7 +359,7 @@ pub fn render(page: &WeakEntity<SettingsPage>, window: &mut Window, cx: &mut App
                     .child(Switch::new(SharedString::from(format!("{id}-on"))).checked(on).on_click(move |on: &bool, _, cx| toggle(*on, cx))),
             )
             .when(!t.description.is_empty(), |d| d.child(div().text_sm().text_color(fg).child(t.description.clone())))
-            .child(div().text_sm().text_color(muted).font_family("Menlo").child(line(&t.command)))
+            .child(div().text_sm().text_color(muted).font_family(crate::fonts::code(cx)).child(line(&t.command)))
             .when(!params.is_empty(), |d| d.child(div().text_sm().text_color(muted).child(format!("Takes: {}", params.join(", ")))))
             .when(!secrets.is_empty(), |d| d.child(div().text_sm().text_color(muted).child(format!("Secrets: {}", secrets.join(", ")))))
             .when(!t.writes.is_empty(), |d| {
@@ -500,7 +500,7 @@ pub fn render(page: &WeakEntity<SettingsPage>, window: &mut Window, cx: &mut App
                             .flex()
                             .items_center()
                             .gap_2()
-                            .child(div().w(px(120.)).truncate().font_family("Menlo").text_sm().text_color(fg).child(pf.name.clone()))
+                            .child(div().w(px(120.)).truncate().font_family(crate::fonts::code(cx)).text_sm().text_color(fg).child(pf.name.clone()))
                             .child(
                                 Button::new(SharedString::from(format!("tool-param-{i}-kind")))
                                     .xsmall()

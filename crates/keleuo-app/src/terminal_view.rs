@@ -1027,10 +1027,10 @@ impl Render for TerminalView {
             });
         base.px_1().relative().child(
             canvas(
-                move |bounds, window, _| {
+                move |bounds, window, cx| {
                     bounds_cell.set(bounds);
                     let font_size = px(text_size);
-                    let font = font(FONT_FAMILY);
+                    let font = font(crate::fonts::code(cx));
                     let ts = window.text_system();
                     let font_id = ts.resolve_font(&font);
                     let cw = ts
@@ -1139,7 +1139,7 @@ fn paint_grid(
     let cols = term.columns();
     let rows = term.screen_lines();
     let font_size = px(text_size);
-    let base_font = font(FONT_FAMILY);
+    let base_font = font(crate::fonts::code(cx));
     let default_bg = palette::background();
     let grid = term.grid();
 

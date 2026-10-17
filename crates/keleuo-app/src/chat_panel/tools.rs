@@ -154,7 +154,7 @@ impl ChatPanel {
         let mut col = div()
             .flex()
             .flex_col()
-            .font_family(MONO)
+            .font_family(crate::fonts::code(cx))
             .text_size(px(11.5))
             .line_height(px(16.));
         let max_lines = 400;
@@ -290,7 +290,7 @@ impl ChatPanel {
                     .flex_1()
                     .min_w_0()
                     .truncate()
-                    .font_family(MONO)
+                    .font_family(crate::fonts::code(cx))
                     .text_color(muted)
                     .child(shown.summary.lines().next().unwrap_or_default().to_string()),
             )
@@ -405,7 +405,7 @@ impl ChatPanel {
                     .flex_1()
                     .min_w_0()
                     .truncate()
-                    .font_family(MONO)
+                    .font_family(crate::fonts::code(cx))
                     .child(summary_el),
             )
             .children(stats)
@@ -466,7 +466,7 @@ impl ChatPanel {
                     .border_t_1()
                     .border_color(border)
                     .bg(page_bg.opacity(0.6))
-                    .font_family(MONO)
+                    .font_family(crate::fonts::code(cx))
                     .text_size(px(11.))
                     .line_height(px(15.))
                     .text_color(muted)
@@ -488,7 +488,7 @@ impl ChatPanel {
                     div()
                         .px_2()
                         .py_1()
-                        .font_family(MONO)
+                        .font_family(crate::fonts::code(cx))
                         .text_size(px(11.))
                         .text_color(muted)
                         .max_h(px(160.))
@@ -507,7 +507,7 @@ impl ChatPanel {
                         .py_1()
                         .border_t_1()
                         .border_color(border)
-                        .font_family(MONO)
+                        .font_family(crate::fonts::code(cx))
                         .text_size(px(11.))
                         .text_color(if tool.is_error { red } else { fg })
                         .child(self.linked_text(
@@ -580,7 +580,7 @@ impl ChatPanel {
             )
             .child(
                 div()
-                    .font_family(MONO)
+                    .font_family(crate::fonts::code(cx))
                     .text_color(fg)
                     .child(p.summary.clone()),
             );

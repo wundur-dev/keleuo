@@ -32,6 +32,7 @@ pub fn wants_dark(cx: &App) -> bool {
 /// Apply the light or dark theme to everything, the terminals' palette included.
 pub fn apply(dark: bool, cx: &mut App) {
     Theme::change(if dark { ThemeMode::Dark } else { ThemeMode::Light }, None, cx);
+    crate::fonts::apply(cx);
     crate::palette::set_dark(dark);
     Theme::update(cx, |t| {
         let c = &mut t.colors;

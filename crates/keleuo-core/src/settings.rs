@@ -197,6 +197,14 @@ pub struct Settings {
     pub cost_display: String,
     /// Light or dark: `"system"` (the default: follow macOS), `"light"` or `"dark"`.
     pub appearance: String,
+    /// The app's font (panels, inputs, menus): a family Keleuo carries, or empty for the
+    /// system's.
+    pub ui_font: String,
+    /// The chat's font (its messages and message box): as `ui_font`; empty: the app's.
+    pub chat_font: String,
+    /// The terminals' font, and code's in the chat: a monospace Keleuo carries, or empty for
+    /// the system's.
+    pub terminal_font: String,
     /// How tabs are drawn: `"block"` (the default), `"sheet"` or `"underline"`.
     pub tab_style: String,
     /// Model names typed in beyond a backend's own list, most recent first.

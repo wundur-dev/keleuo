@@ -161,7 +161,6 @@ const PIECE_GAP: f32 = 12.;
 
 impl EventEmitter<ChatPanelEvent> for ChatPanel {}
 
-const MONO: &str = crate::terminal_view::FONT_FAMILY;
 /// How often the chat redraws while something runs: the spinners' step and the clocks.
 /// Ten a second reads as motion; continuous animation would redraw every frame.
 const TICK: std::time::Duration = std::time::Duration::from_millis(100);
@@ -1055,10 +1054,13 @@ impl Render for ChatPanel {
         };
         crate::perf::record("chat build (elements)", started.elapsed());
         crate::perf::switch_shown(window);
+        let font = crate::fonts::chat(cx);
         div()
             .size_full()
             .flex()
             .flex_col()
+            .font_weight(crate::fonts::weight(&font))
+            .font_family(font)
             .bg(cx.theme().background)
             .key_context("Chat")
             .track_focus(&self.focus)

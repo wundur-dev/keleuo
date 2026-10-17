@@ -33,6 +33,7 @@ pub mod files;
 pub mod find;
 pub mod frontmatter;
 pub mod images;
+pub mod google_fonts;
 pub mod host;
 pub mod links;
 pub mod markdown_marks;

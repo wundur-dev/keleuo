@@ -292,7 +292,7 @@ pub fn render(page: &WeakEntity<SettingsPage>, window: &mut Window, cx: &mut App
                     }))
                     .child(Switch::new(SharedString::from(format!("{id}-on"))).checked(on).on_click(move |on: &bool, _, cx| toggle(*on, cx))),
             )
-            .child(div().text_sm().text_color(muted).font_family("Menlo").child(kind))
+            .child(div().text_sm().text_color(muted).font_family(crate::fonts::code(cx)).child(kind))
             .when(!auth.is_empty(), |d| d.child(div().text_sm().text_color(muted).child(format!("Secrets: {}", auth.join(", ")))))
             .when(!s.writes.is_empty(), |d| {
                 d.child(div().text_sm().text_color(muted).child(format!("Writes in: {}", s.writes.iter().map(|w| w.display().to_string()).collect::<Vec<_>>().join(", "))))

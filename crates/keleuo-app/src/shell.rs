@@ -1288,6 +1288,41 @@ impl Shell {
                 self.new_session_in(host, root, b, window, cx);
                 "ok".into()
             }
+            "font-search" | "font-pick" => {
+                // Tests: `font-search app|chat|terminal [text]` opens a font's search in the
+                // shown Settings and types `text`; `font-pick <which> <family>` picks a Google
+                // Font (once the catalogue is in: ask again until it says ok).
+                let (w, rest) = arg.split_once(' ').unwrap_or((arg, ""));
+                let which = match w {
+                    "chat" => crate::fonts::Which::Chat,
+                    "terminal" => crate::fonts::Which::Terminal,
+                    _ => crate::fonts::Which::App,
+                };
+                if cmd == "font-pick" {
+                    crate::fonts::ask_catalogue(cx);
+                    let Some(f) = crate::fonts::matches(which, rest, 50, cx).into_iter().find(|f| f.name == rest) else {
+                        return Some("not in the catalogue (yet)".into());
+                    };
+                    crate::fonts::pick(which, Some(f), cx);
+                    return Some("ok".into());
+                }
+                let Some((page, _)) = self.settings.as_ref() else { return Some("no settings".into()) };
+                let page = page.downgrade();
+                crate::settings_fonts::open_for_test(&page, which, rest, window, cx);
+                "ok".into()
+            }
+            "fonts" => {
+                // Tests: `fonts <app>|<chat>|<terminal>` (empty: the default).
+                let mut parts = arg.split('|').map(|p| p.trim().to_string());
+                let (ui, chat, term) = (parts.next().unwrap_or_default(), parts.next().unwrap_or_default(), parts.next().unwrap_or_default());
+                crate::settings_window::change(cx, |s| {
+                    s.ui_font = ui;
+                    s.chat_font = chat;
+                    s.terminal_font = term;
+                });
+                crate::fonts::apply(cx);
+                "ok".into()
+            }
             "new-scripted" => {
                 // A session on the scripted test backend (needs KELEUO_TEST_BACKENDS=1).
                 // It is registered last.
@@ -2257,8 +2292,9 @@ impl Render for Shell {
             .flex_col()
             .bg(bg)
             .text_color(fg)
+            .font_family(crate::fonts::ui(cx))
             // A touch heavier than regular, as Codex sets SF Pro (430): denser, still not bold.
-            .font_weight(FontWeight(crate::theme::UI_WEIGHT))
+            .font_weight(crate::fonts::weight(&crate::fonts::ui(cx)))
             // An image opened full size: Esc closes it, wherever the keyboard is.
             .capture_key_down(cx.listener(|_, ev: &KeyDownEvent, _, cx| {
                 if ev.keystroke.key == "escape" && crate::image_view::is_open(cx) {
