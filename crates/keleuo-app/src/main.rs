@@ -287,7 +287,7 @@ fn main() {
             workspace::register_panels(cx);
             theme::apply(theme::wants_dark(cx), cx);
             cx.on_action(|_: &ShowAbout, cx| about::open(cx));
-            cx.on_action(|_: &ShowSettings, cx| settings_window::open(cx));
+            cx.on_action(|_: &ShowSettings, cx| shell::open_settings(cx));
             cx.on_action(|_: &AppearanceSystem, cx| theme::set_appearance("system", cx));
             cx.on_action(|_: &AppearanceLight, cx| theme::set_appearance("light", cx));
             cx.on_action(|_: &AppearanceDark, cx| theme::set_appearance("dark", cx));

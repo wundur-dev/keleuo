@@ -179,6 +179,8 @@ pub struct Shell {
     active: usize,
     next: usize,
     browser: Option<Entity<Browser>>,
+    /// Settings, shown in place of the session while open.
+    settings: Option<(Entity<crate::settings_window::SettingsPage>, Subscription)>,
     folded: bool,
     /// The folded list is shown in full over the content (the rail was hovered).
     peek: bool,
@@ -227,6 +229,7 @@ impl Shell {
             active: 0,
             next: 1,
             browser: None,
+            settings: None,
             folded,
             peek: false,
             peek_held: false,
@@ -538,6 +541,33 @@ impl Shell {
             .collect()
     }
 
+    /// Show Settings in place of the session (focused, so Escape closes it).
+    pub fn show_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let page = match &self.settings {
+            Some((page, _)) => page.clone(),
+            None => {
+                let page = cx.new(crate::settings_window::SettingsPage::new);
+                let sub = cx.subscribe_in(&page, window, |s, _, _: &crate::settings_window::CloseSettings, window, cx| {
+                    s.close_settings(window, cx)
+                });
+                self.settings = Some((page.clone(), sub));
+                page
+            }
+        };
+        window.focus(&page.focus_handle(cx), cx);
+        cx.notify();
+    }
+
+    /// Back from Settings to the session (or New session) it covered.
+    pub fn close_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.settings.take().is_some() {
+            if let Some(w) = self.active_workspace() {
+                w.update(cx, |w, cx| w.focus_main(window, cx));
+            }
+            cx.notify();
+        }
+    }
+
     pub fn active_workspace(&self) -> Option<Entity<Workspace>> {
         self.tabs.get(self.active).map(|t| t.ws.clone())
     }
@@ -555,6 +585,7 @@ impl Shell {
 
     /// Show the directory browser at `dir` (in place of the shown session, if any).
     pub fn open_browser(&mut self, host: Arc<dyn Host>, dir: PathBuf, note: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+        self.settings = None;
         // Unchecked: the browser drops the ones that are gone off the UI thread (a recent folder
         // on a sleeping or unplugged disk must not hold up the window).
         let recent = if host.is_remote() { Vec::new() } else { cx.global::<AppSettings>().0.borrow().recent.clone() };
@@ -1001,6 +1032,8 @@ impl Shell {
         if ix >= self.tabs.len() {
             return;
         }
+        // Picking a session leaves Settings.
+        self.settings = None;
         self.active = ix;
         // A session picked from the peeking list leaves the list out: it goes when the pointer
         // moves on over the content.
@@ -1382,7 +1415,7 @@ impl Shell {
                 "ok".into()
             }
             "settings" => {
-                crate::settings_window::open(cx);
+                if arg == "off" { self.close_settings(window, cx) } else { self.show_settings(window, cx) }
                 "ok".into()
             }
             "tabs" => (0..self.tabs.len())
@@ -2031,12 +2064,16 @@ impl Render for Shell {
                 }
             })
         };
-        let title = if self.browser.is_some() || self.tabs.is_empty() {
+        let showing_settings = self.settings.is_some();
+        let title = if showing_settings {
+            "Settings".to_string()
+        } else if self.browser.is_some() || self.tabs.is_empty() {
             "New session".to_string()
         } else {
             self.name(self.active, cx)
         };
-        let has_session = !self.tabs.is_empty() && self.browser.is_none();
+        // The session's own buttons, only while it shows.
+        let has_session = !self.tabs.is_empty() && self.browser.is_none() && !showing_settings;
         // The tool panels by name, each opening the sidebar on it: what the icon strip beside
         // the folded sidebar did.
         let tools_menu = {
@@ -2116,11 +2153,24 @@ impl Render for Shell {
                             ),
                     )
                 })
+                // Settings: pressed while open; again goes back.
+                .child(
+                    button("t-settings", Icon::new(IconName::Settings), "Settings (Cmd+,)")
+                        .when(showing_settings, |d| d.bg(hover))
+                        .on_click(cx.listener(|s, _, window, cx| {
+                            if s.settings.is_some() {
+                                s.close_settings(window, cx)
+                            } else {
+                                s.show_settings(window, cx)
+                            }
+                        })),
+                )
                 .child(div().flex_none().pr_1().occlude().child(menu_button)),
         );
-        let main = match &self.browser {
-            Some(b) => b.clone().into_any_element(),
-            None => self.active_workspace().map(|w| w.into_any_element()).unwrap_or_else(|| div().into_any_element()),
+        let main = match (&self.settings, &self.browser) {
+            (Some((page, _)), _) => page.clone().into_any_element(),
+            (None, Some(b)) => b.clone().into_any_element(),
+            (None, None) => self.active_workspace().map(|w| w.into_any_element()).unwrap_or_else(|| div().into_any_element()),
         };
         let list = if self.tabs.is_empty() {
             None
@@ -2320,4 +2370,15 @@ mod tests {
         g.finish("abc");
         assert!(g.start("abc"));
     }
+}
+
+/// Keleuo > Settings… and Cmd+,: Settings in the window.
+pub fn open_settings(cx: &mut App) {
+    let Some((handle, shell)) = cx.try_global::<crate::control::ControlTargets>().and_then(|t| t.workspace.clone()) else { return };
+    // After the key press or menu click that asked, which still holds the window.
+    cx.defer(move |cx| {
+        let _ = handle.update(cx, |_, window, cx| {
+            let _ = shell.update(cx, |s, cx| s.show_settings(window, cx));
+        });
+    });
 }

@@ -1,6 +1,7 @@
-//! The Settings window (Keleuo > Settings…, Cmd+,): every option in one place, a page per
-//! subject. Each change is saved at once and applies at once; the menus' checks follow.
-//! One window at a time; asking again brings it to the front.
+//! Settings (Keleuo > Settings…, Cmd+,, the gear in the title bar): a page in the window, in
+//! place of the shown session, as New session is: every option, a page per subject, searchable.
+//! Each change is saved at once and applies at once; the menus' checks follow. Escape, the gear
+//! again or a session in the list goes back.
 
 use gpui_kit::component::setting::{
     NumberFieldOptions, SettingField, SettingGroup, SettingItem, SettingPage, Settings as SettingsView,
@@ -15,34 +16,25 @@ use keleuo_core::settings::{Prefs, Settings, TERMINAL_FONT_SIZE, TERMINAL_FONT_S
 
 use crate::AppSettings;
 
-/// The open Settings window, if any.
-#[derive(Default)]
-struct Open(Option<AnyWindowHandle>);
-impl Global for Open {}
+/// The Settings page.
+pub struct SettingsPage {
+    focus: FocusHandle,
+}
 
-pub struct SettingsWindow;
+/// The page asks to be closed (Escape).
+pub struct CloseSettings;
 
-/// Show the Settings window (or bring the open one forward).
-pub fn open(cx: &mut App) {
-    if let Some(handle) = cx.try_global::<Open>().and_then(|o| o.0)
-        && handle.update(cx, |_, window, _| window.activate_window()).is_ok()
-    {
-        return;
+impl EventEmitter<CloseSettings> for SettingsPage {}
+
+impl SettingsPage {
+    pub fn new(cx: &mut Context<Self>) -> Self {
+        Self { focus: cx.focus_handle() }
     }
-    let options = WindowOptions {
-        window_bounds: Some(WindowBounds::centered(size(px(760.), px(560.)), cx)),
-        titlebar: Some(TitlebarOptions {
-            title: Some("Settings".into()),
-            appears_transparent: true,
-            traffic_light_position: Some(point(px(12.), px(12.))),
-        }),
-        is_minimizable: false,
-        window_min_size: Some(size(px(560.), px(400.))),
-        ..Default::default()
-    };
-    match gpui_kit::open_window(options, cx, |_, cx| cx.new(|_| SettingsWindow)) {
-        Ok((handle, _)) => cx.set_global(Open(Some(handle))),
-        Err(e) => eprintln!("keleuo: could not open the Settings window: {e}"),
+}
+
+impl Focusable for SettingsPage {
+    fn focus_handle(&self, _: &App) -> FocusHandle {
+        self.focus.clone()
     }
 }
 
@@ -310,7 +302,7 @@ struct ServerModels {
 impl Global for ServerModels {}
 
 /// Ask the summary server for its models when its address or key changed since last asked.
-fn refresh_models(cx: &mut Context<SettingsWindow>) {
+fn refresh_models(cx: &mut Context<SettingsPage>) {
     let asked = get(cx, |s| (s.summaries.endpoint.trim().to_string(), s.summaries.api_key.trim().to_string()));
     if cx.try_global::<ServerModels>().is_some_and(|m| m.asked == asked) || asked.0.is_empty() {
         return;
@@ -472,19 +464,31 @@ fn summaries() -> SettingPage {
     ])
 }
 
-impl Render for SettingsWindow {
+impl Render for SettingsPage {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         refresh_models(cx);
+        let theme = cx.theme();
         div()
+            .id("settings-page")
+            .track_focus(&self.focus)
             .size_full()
-            .bg(cx.theme().background)
-            .text_color(cx.theme().foreground)
-            // Room for the window buttons above the page.
-            .pt(px(32.))
+            .bg(theme.background)
+            .text_color(theme.foreground)
+            .on_key_down(cx.listener(|_, ev: &KeyDownEvent, _, cx| {
+                if ev.keystroke.key == "escape" {
+                    cx.stop_propagation();
+                    cx.emit(CloseSettings);
+                }
+            }))
             .child(
-                SettingsView::new("keleuo-settings")
-                    .sidebar_width(px(200.))
-                    .pages([general(), chat(), terminals(), notifications(), summaries()]),
+                // The pages no wider than New session's form, so a setting's words stay near its
+                // control on a wide window.
+                div().h_full().w_full().max_w(px(252. + 860.)).child(
+                    SettingsView::new("keleuo-settings")
+                        // As wide as New session's folders.
+                        .sidebar_width(px(252.))
+                        .pages([general(), chat(), terminals(), notifications(), summaries()]),
+                ),
             )
     }
 }
