@@ -28,6 +28,8 @@ pub struct Options {
     pub effort: Option<String>,
     /// `--mcp-config`: tool servers beside the person's own.
     pub mcp_config: Option<PathBuf>,
+    /// Environment it starts with (the tool servers' secrets).
+    pub env: Vec<(String, String)>,
 }
 
 impl Options {
@@ -40,7 +42,7 @@ impl Options {
                 .map(|p| p.to_string_lossy().to_string())
                 .unwrap_or_else(|| "claude".into()),
             args: self.args(),
-            env: Vec::new(),
+            env: self.env.clone(),
             // Claude Code marks processes it starts; a window started from inside a Claude
             // session must not pass that on, or the agent stops saving its transcript.
             unset: inherited_session_vars(),

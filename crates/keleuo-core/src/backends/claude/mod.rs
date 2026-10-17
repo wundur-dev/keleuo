@@ -204,7 +204,7 @@ impl Backend for ClaudeBackend {
         Some(ProgramSpec {
             program: self.program_name(),
             args,
-            env: Vec::new(),
+            env: options.env.clone(),
             unset: process::inherited_session_vars(),
             cwd: options.cwd.clone(),
         })
@@ -418,6 +418,7 @@ impl Agent for ClaudeCode {
                 fork: options.fork,
                 effort: options.effort.clone(),
                 mcp_config: options.mcp_config.clone(),
+                env: options.env.clone(),
             }
             .program_spec(),
         );

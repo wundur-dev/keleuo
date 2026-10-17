@@ -660,15 +660,29 @@ impl AgentSession {
         if !crate::prefs(cx).sandbox_writes || self.writes_anywhere || self.host.is_remote() {
             return None;
         }
-        Some(keleuo_core::sandbox::policy_for(&self.cwd, &self.backend.state_paths(), &self.writable))
+        // Its tool servers run inside it: where they write is allowed too.
+        let mut extra = self.writable.clone();
+        extra.extend(keleuo_core::mcp::writes(&self.mcp_servers(cx)));
+        Some(keleuo_core::sandbox::policy_for(&self.cwd, &self.backend.state_paths(), &extra))
     }
 
-    /// The window's tool server for the agent (the messaging tools): on this machine only.
-    fn mcp_config(&self) -> Option<PathBuf> {
+    /// The tool servers set up in Settings for this session's folder (none over SSH: they
+    /// run where the agent does).
+    fn mcp_servers(&self, cx: &App) -> Vec<keleuo_core::mcp::Server> {
+        if self.host.is_remote() {
+            return Vec::new();
+        }
+        let s = cx.global::<crate::AppSettings>().0.borrow();
+        keleuo_core::mcp::servers_for(&s.mcp_servers, &s.folder_mcp, &self.cwd)
+    }
+
+    /// The tool servers file for the agent: the window's own (the messaging tools) and those
+    /// set up in Settings; on this machine only.
+    fn mcp_config(&self, cx: &App) -> Option<PathBuf> {
         if self.host.is_remote() {
             return None;
         }
-        self.hooks.as_ref().and_then(|h| h.mcp.clone())
+        self.hooks.as_ref().and_then(|h| h.write_mcp(&self.mcp_servers(cx)))
     }
 
     /// A message from the session `from`: shown as its card, and sent to the agent as a turn
@@ -817,7 +831,8 @@ impl AgentSession {
             fork,
             settings,
             sandbox: self.write_policy(cx),
-            mcp_config: self.mcp_config(),
+            mcp_config: self.mcp_config(cx),
+            env: keleuo_core::mcp::secret_env(&self.mcp_servers(cx)),
         };
         self.confined = options.sandbox.is_some();
         let Some(spec) = self.backend.terminal_program(&options, &id, new) else { return };
@@ -1308,7 +1323,8 @@ impl AgentSession {
             fork: std::mem::take(&mut self.fork_next),
             settings: None,
             sandbox: self.write_policy(cx),
-            mcp_config: self.mcp_config(),
+            mcp_config: self.mcp_config(cx),
+            env: keleuo_core::mcp::secret_env(&self.mcp_servers(cx)),
         };
         self.confined = options.sandbox.is_some();
         let (tx, rx) = async_channel::unbounded::<Message>();

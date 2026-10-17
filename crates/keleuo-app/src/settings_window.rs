@@ -19,7 +19,14 @@ use crate::AppSettings;
 /// The Settings page.
 pub struct SettingsPage {
     focus: FocusHandle,
+    /// The MCP servers page's state (its scope, its form).
+    pub(crate) mcp: crate::settings_mcp::McpState,
+    /// The page shown first (a link to a setting opens on its page).
+    start: usize,
 }
+
+/// The pages, in order, by the names links and tests use.
+const PAGES: [&str; 6] = ["general", "chat", "mcp", "terminals", "notifications", "summaries"];
 
 /// The page asks to be closed (Escape).
 pub struct CloseSettings;
@@ -27,8 +34,18 @@ pub struct CloseSettings;
 impl EventEmitter<CloseSettings> for SettingsPage {}
 
 impl SettingsPage {
-    pub fn new(cx: &mut Context<Self>) -> Self {
-        Self { focus: cx.focus_handle() }
+    /// `folders`: the folders the MCP servers page offers (the shown session's first).
+    pub fn new(folders: Vec<std::path::PathBuf>, cx: &mut Context<Self>) -> Self {
+        Self { focus: cx.focus_handle(), mcp: crate::settings_mcp::McpState::new(folders), start: 0 }
+    }
+
+    /// Show page `name` first (see [`PAGES`]); its folder for the MCP servers page.
+    pub fn starting_at(mut self, name: &str, folder: Option<std::path::PathBuf>) -> Self {
+        self.start = PAGES.iter().position(|p| *p == name).unwrap_or(0);
+        if name == "mcp" {
+            self.mcp.scope = folder;
+        }
+        self
     }
 }
 
@@ -36,6 +53,13 @@ impl Focusable for SettingsPage {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus.clone()
     }
+}
+
+/// MCP servers: the tool servers every agent gets (see `settings_mcp`).
+fn mcp_page(page: WeakEntity<SettingsPage>) -> SettingPage {
+    SettingPage::new("MCP servers").icon(gpui_kit::assets::IconName::Puzzle).group(
+        SettingGroup::new().item(SettingItem::render(move |_, window, cx| crate::settings_mcp::render(&page, window, cx))),
+    )
 }
 
 /// Read a setting.
@@ -487,7 +511,8 @@ impl Render for SettingsPage {
                     SettingsView::new("keleuo-settings")
                         // As wide as New session's folders.
                         .sidebar_width(px(252.))
-                        .pages([general(), chat(), terminals(), notifications(), summaries()]),
+                        .default_selected_index(gpui_kit::component::setting::SelectIndex { page_ix: self.start, group_ix: None })
+                        .pages([general(), chat(), mcp_page(cx.entity().downgrade()), terminals(), notifications(), summaries()]),
                 ),
             )
     }

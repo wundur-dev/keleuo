@@ -543,10 +543,28 @@ impl Shell {
 
     /// Show Settings in place of the session (focused, so Escape closes it).
     pub fn show_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.show_settings_at("general", false, window, cx)
+    }
+
+    /// Show Settings on page `name` (a fresh page when it is not the open one's); `here`: the
+    /// MCP servers page on the shown session's folder.
+    pub fn show_settings_at(&mut self, name: &str, here: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if name != "general" {
+            self.settings = None;
+        }
         let page = match &self.settings {
             Some((page, _)) => page.clone(),
             None => {
-                let page = cx.new(crate::settings_window::SettingsPage::new);
+                // Folders for the MCP servers page: the shown session's, then the recent ones.
+                let mut folders: Vec<PathBuf> = self.active_workspace().map(|w| w.read(cx).root().to_path_buf()).into_iter().collect();
+                for f in cx.global::<AppSettings>().0.borrow().recent.iter() {
+                    if !folders.contains(f) {
+                        folders.push(f.clone());
+                    }
+                }
+                let folder = here.then(|| folders.first().cloned()).flatten();
+                let name = name.to_string();
+                let page = cx.new(|cx| crate::settings_window::SettingsPage::new(folders, cx).starting_at(&name, folder));
                 let sub = cx.subscribe_in(&page, window, |s, _, _: &crate::settings_window::CloseSettings, window, cx| {
                     s.close_settings(window, cx)
                 });
@@ -1415,7 +1433,17 @@ impl Shell {
                 "ok".into()
             }
             "settings" => {
-                if arg == "off" { self.close_settings(window, cx) } else { self.show_settings(window, cx) }
+                // Tests: `settings`, `settings off`, `settings <page>` (`mcp here`: on this
+                // session's folder).
+                match arg {
+                    "off" => self.close_settings(window, cx),
+                    "" => self.show_settings(window, cx),
+                    _ => {
+                        let mut w = arg.split_whitespace();
+                        let page = w.next().unwrap_or("general").to_string();
+                        self.show_settings_at(&page, w.next() == Some("here"), window, cx)
+                    }
+                }
                 "ok".into()
             }
             "tabs" => (0..self.tabs.len())

@@ -162,9 +162,10 @@ fn route(call: Call, cx: &mut App) {
 /// the window has no hook socket or the backend no hooks.
 pub struct Registration {
     pub settings: PathBuf,
-    /// The tool servers file to start its agent with (the messaging tools), when the window
-    /// has its tool server.
+    /// The tool servers file to start its agent with (see [`Registration::write_mcp`]), and
+    /// the window's own server's entry in it (the messaging tools), when the window has it.
     pub mcp: Option<PathBuf>,
+    keleuo_mcp: Option<serde_json::Value>,
     token: String,
     /// The window's socket.
     socket: PathBuf,
@@ -176,6 +177,18 @@ const REMOTE_HELPER: &str = include_str!("bin/keleuo-hook.py");
 impl Registration {
     pub fn token(&self) -> &str {
         &self.token
+    }
+
+    /// Write the tool servers file for a start of its agent: the window's own server and
+    /// `servers` (those set up in Settings for its folder). Its path, when written.
+    pub fn write_mcp(&self, servers: &[keleuo_core::mcp::Server]) -> Option<PathBuf> {
+        let path = self.mcp.clone()?;
+        let mut own = serde_json::Map::new();
+        if let Some(entry) = &self.keleuo_mcp {
+            own.insert("keleuo".into(), entry.clone());
+        }
+        let config = keleuo_core::mcp::claude_config(servers, &own);
+        std::fs::write(&path, config.to_string()).ok().map(|_| path)
     }
 
     /// For an agent on another machine, which has no `keleuo-hook`: the settings file to start
@@ -235,18 +248,14 @@ pub fn register(
     let text = backend.hook_settings(&command)?;
     let settings = state.dir.join(format!("{token}.json"));
     std::fs::write(&settings, text).ok()?;
-    // The tool server, named with the same socket and token.
-    let mcp = state.mcp.clone().and_then(|program| {
-        let config = serde_json::json!({ "mcpServers": { "keleuo": {
-            "type": "stdio",
-            "command": program.to_string_lossy(),
-            "args": [socket.to_string_lossy(), token],
-        } } });
-        let path = state.dir.join(format!("{token}-mcp.json"));
-        std::fs::write(&path, config.to_string()).ok().map(|_| path)
+    // The window's tool server, named with the same socket and token; the file with it is
+    // written as the agent starts (see `write_mcp`).
+    let keleuo_mcp = state.mcp.clone().map(|program| {
+        serde_json::json!({ "type": "stdio", "command": program.to_string_lossy(), "args": [socket.to_string_lossy(), token] })
     });
+    let mcp = keleuo_mcp.as_ref().map(|_| state.dir.join(format!("{token}-mcp.json")));
     state.sessions.insert(token.clone(), session);
-    Some(Registration { settings, mcp, token, socket })
+    Some(Registration { settings, mcp, keleuo_mcp, token, socket })
 }
 
 #[cfg(test)]

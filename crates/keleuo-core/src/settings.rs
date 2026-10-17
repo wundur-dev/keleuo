@@ -198,6 +198,9 @@ pub struct Settings {
     pub continue_on_start: Vec<String>,
     /// Turn summaries by a language model server (off until set up).
     pub summaries: crate::summary::Config,
+    /// Tool servers (MCP) every agent gets ([`crate::mcp`]); and each folder's own.
+    pub mcp_servers: Vec<crate::mcp::Server>,
+    pub folder_mcp: std::collections::BTreeMap<PathBuf, crate::mcp::FolderServers>,
     /// Settings this build does not know (written by a newer one), kept as they are so
     /// saving does not drop them.
     #[serde(flatten)]
