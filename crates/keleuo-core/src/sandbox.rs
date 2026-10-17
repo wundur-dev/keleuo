@@ -88,6 +88,11 @@ pub fn policy_for(folder: &Path, state: &[PathBuf], extra: &[PathBuf]) -> WriteP
         ] {
             folders.push(home.join(cache));
         }
+        // The login keychain: a program saving a password (an agent signing in) writes its
+        // file itself, and reports the refusal as "keychain locked".
+        if cfg!(target_os = "macos") {
+            folders.push(home.join("Library/Keychains"));
+        }
     }
     folders.extend(extra.iter().cloned());
     let mut file_prefixes = Vec::new();
@@ -349,6 +354,14 @@ mod tests {
     /// The real thing: a shell under the macOS sandbox writes in the allowed folder and
     /// not beside it.
     #[cfg(target_os = "macos")]
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn an_agent_may_save_to_the_login_keychain() {
+        let home = dirs::home_dir().unwrap();
+        let policy = policy_for(Path::new("/tmp/project"), &[], &[]);
+        assert!(policy.folders.contains(&home.join("Library/Keychains")), "signing in saves there");
+    }
+
     #[test]
     fn on_macos_writes_outside_the_folder_are_refused() {
         // Run from inside a sandbox (a confined agent's shell), another cannot be applied.
