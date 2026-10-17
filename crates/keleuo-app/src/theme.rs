@@ -15,6 +15,35 @@ pub const PERIWINKLE: u32 = 0x6084e8;
 /// The crane's yellow.
 pub const CRANE: u32 = 0xffc354;
 
+/// The light lists' ground with the pressed-in look: a shade darker, for the text's white edge.
+const PRESSED_GROUND: u32 = 0xe6e6e9;
+
+thread_local! {
+    /// The light lists' ground, while trying others (the control channel's `sidebar`).
+    static SIDEBAR_TONE: std::cell::Cell<Option<u32>> = const { std::cell::Cell::new(None) };
+}
+
+/// Try `tone` as the light lists' ground (`None`: its own).
+pub fn try_sidebar_tone(tone: Option<u32>, cx: &mut App) {
+    SIDEBAR_TONE.with(|t| t.set(tone));
+    apply(wants_dark(cx), cx);
+    cx.refresh_windows();
+}
+
+/// `text` pressed into the surface, letterpress style: a faint copy a pixel lower drawn
+/// under it (light on a light theme, dark on a dark one), when the setting is on. `el` holds it
+/// and sets its size, colour and truncation.
+pub fn pressed(el: Div, text: impl Into<SharedString>, cx: &App) -> Div {
+    let text = text.into();
+    if !crate::prefs(cx).inset_text {
+        return el.child(text);
+    }
+    let shadow = if cx.theme().is_dark() { gpui::black().opacity(0.45) } else { gpui::white().opacity(0.75) };
+    el.relative()
+        .child(div().absolute().top(px(1.)).left_0().right_0().truncate().text_color(shadow).child(text.clone()))
+        .child(div().relative().truncate().child(text))
+}
+
 fn hex(c: u32) -> Hsla {
     rgb(c).into()
 }
@@ -97,6 +126,12 @@ pub fn strip_ground(cx: &App) -> Hsla {
 /// the session list's, so the chat and files stand out white beside them.
 pub fn tool_ground(cx: &App) -> Hsla {
     let t = cx.theme();
+    if !t.is_dark() {
+        let tried = SIDEBAR_TONE.with(|t| t.get());
+        if let Some(tone) = tried.or(crate::prefs(cx).inset_text.then_some(PRESSED_GROUND)) {
+            return hex(tone);
+        }
+    }
     crate::sheet_tabs::mix(t.background, t.sidebar, 0.45)
 }
 

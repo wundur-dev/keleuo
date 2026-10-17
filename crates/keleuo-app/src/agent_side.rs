@@ -127,7 +127,7 @@ impl AgentSide {
             .text_color(if a.running() { fg } else { muted })
             .hover(|d| d.bg(hover))
             .child(icon)
-            .child(div().flex_1().min_w_0().truncate().child(title))
+            .child(crate::theme::pressed(div().flex_1().min_w_0().truncate(), title, cx))
             .when_some(a.current_tool.clone(), |d, t| d.child(div().flex_none().text_color(muted).child(t)))
             .child(div().flex_none().text_color(muted).child(elapsed))
             .on_click(move |_, _, cx| {

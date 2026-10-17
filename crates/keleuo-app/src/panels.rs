@@ -118,6 +118,16 @@ pub fn title_element(
         .into_any_element()
 }
 
+/// A session's name in the side list: as [`title_element`], its text pressed in (see
+/// [`crate::theme::pressed`]).
+pub fn session_title(key: &str, auto: String, cx: &App) -> AnyElement {
+    if cx.global::<Renaming>().0.as_ref().is_some_and(|r| r.key == key) {
+        return title_element(key, auto, None, None, cx);
+    }
+    let renamed = cx.global::<Names>().0.borrow().get(key).is_some();
+    crate::theme::pressed(div().truncate().when(renamed, |d| d.italic()), tab_label(key, auto, cx), cx).into_any_element()
+}
+
 /// "Rename" and "Reset name" in a tab's ellipsis menu.
 fn rename_menu(menu: PopupMenu, key: String, auto: String, cx: &App) -> PopupMenu {
     let current = tab_label(&key, auto.clone(), cx);

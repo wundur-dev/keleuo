@@ -83,6 +83,9 @@ pub struct Prefs {
     pub markdown_marks: bool,
     /// Misspelled words in the message box are underlined as they are typed.
     pub spell_check: bool,
+    /// The side lists' text looks pressed into the surface (a faint copy a pixel lower), on a
+    /// sidebar a shade darker.
+    pub inset_text: bool,
     /// A long paste goes in the message box as a pill, its text kept aside.
     pub paste_pills: bool,
     /// A turn that changed files ends with a card listing them.
@@ -119,6 +122,7 @@ impl Default for Prefs {
             reopen_sessions: true,
             markdown_marks: true,
             spell_check: true,
+            inset_text: true,
             paste_pills: true,
             turn_card: true,
             command_changes: true,

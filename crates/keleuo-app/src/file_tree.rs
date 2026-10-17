@@ -550,7 +550,7 @@ impl Render for FileTree {
                         .when(is_sel, |d| d.bg(sel_bg))
                         .hover(|d| d.bg(hover))
                         .child(icon)
-                        .child(div().flex_1().min_w_0().truncate().child(row.name.clone()))
+                        .child(crate::theme::pressed(div().flex_1().min_w_0().truncate(), row.name.clone(), cx))
                         .child(icons)
                         .on_click(move |_, _, cx| {
                             let _ = entity.update(cx, |tree, cx| tree.click(ix, cx));

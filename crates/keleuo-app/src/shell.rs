@@ -1311,6 +1311,18 @@ impl Shell {
                 crate::settings_fonts::open_for_test(&page, which, rest, window, cx);
                 "ok".into()
             }
+            "inset" => {
+                // Tests: `inset on|off`: the side lists' pressed-in text.
+                let on = arg != "off";
+                crate::settings_window::change(cx, |s| s.prefs.inset_text = on);
+                crate::theme::apply(crate::theme::wants_dark(cx), cx);
+                "ok".into()
+            }
+            "sidebar" => {
+                // Tests: `sidebar <hex>` tries a light sidebar tone; `sidebar off` its own.
+                crate::theme::try_sidebar_tone(u32::from_str_radix(arg.trim_start_matches('#'), 16).ok(), cx);
+                "ok".into()
+            }
             "fonts" => {
                 // Tests: `fonts <app>|<chat>|<terminal>` (empty: the default).
                 let mut parts = arg.split('|').map(|p| p.trim().to_string());
@@ -1641,7 +1653,7 @@ impl Shell {
             let key = self.key(ix);
             let auto = self.list_name(ix, cx);
             let current = self.name(ix, cx);
-            let title = panels::title_element(&key, auto.clone(), None, None, cx);
+            let title = panels::session_title(&key, auto.clone(), cx);
             let drag = SessionDrag { number, name: current.clone().into() };
             let (k1, a1, c1) = (key, auto, current);
             let menu = self.session_menu(ix, cx);
@@ -1694,7 +1706,7 @@ impl Shell {
                                     .gap_1()
                                     .text_size(px(11.))
                                     .text_color(muted)
-                                    .child(div().min_w_0().truncate().child(place))
+                                    .child(crate::theme::pressed(div().min_w_0().truncate(), place, cx))
                                     .children(short_id.map(|id| panels::short_id(id, ("session-id", number), cx)))
                                     .children(worktree.map(|_| {
                                         div().flex_none().px_1().rounded_sm().bg(border).text_size(px(10.)).child("worktree")
@@ -1718,10 +1730,10 @@ impl Shell {
                                             .gap_1()
                                             .text_size(px(11.))
                                             .children(label.map(|l| div().flex_none().text_color(tone).child(l)))
-                                            .child(div().min_w_0().truncate().text_color(muted.opacity(0.9)).child(headline)),
+                                            .child(crate::theme::pressed(div().min_w_0().truncate().text_color(muted.opacity(0.9)), headline, cx)),
                                     )
                                 }
-                                None => activity.map(|a| div().flex().text_size(px(11.)).text_color(muted.opacity(0.8)).child(div().min_w_0().truncate().child(a))),
+                                None => activity.map(|a| div().flex().text_size(px(11.)).text_color(muted.opacity(0.8)).child(crate::theme::pressed(div().min_w_0().truncate(), a, cx))),
                             }),
                     )
                     // Rename and close, on hover (right-click is easy to miss on a Mac).

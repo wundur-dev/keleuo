@@ -182,7 +182,21 @@ fn general(page: WeakEntity<SettingsPage>) -> SettingPage {
                 crate::sheet_tabs::set_style(v);
             },
         ))
-,
+
+        .item(
+            SettingItem::new(
+                "Pressed-in look",
+                SettingField::switch(
+                    |cx: &App| get(cx, |s| s.prefs.inset_text),
+                    |on: bool, cx: &mut App| {
+                        change(cx, |s| s.prefs.inset_text = on);
+                        crate::theme::apply(crate::theme::wants_dark(cx), cx);
+                    },
+                )
+                .default_value(true),
+            )
+            .description("The session, file and agent lists' text looks pressed into a slightly darker sidebar."),
+        ),
         SettingGroup::new().title("Fonts").items([Which::App, Which::Chat, Which::Terminal].map(|which| {
             let page = page.clone();
             SettingItem::render(move |_, _, cx| crate::settings_fonts::render(&page, which, cx))
