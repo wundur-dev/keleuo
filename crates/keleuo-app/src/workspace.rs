@@ -1428,6 +1428,12 @@ impl Workspace {
                 // Tests: what Retry does (the person's last message sent again).
                 self.session.update(cx, |s, cx| s.send_again(cx));
             }
+            "chat-head" => {
+                // Tests: how many items, and the first few, each as its start.
+                let chat = &self.session.read(cx).chat;
+                let first = chat.items.iter().take(6).map(|i| format!("{i:?}").chars().take(70).collect::<String>()).collect::<Vec<_>>().join(" | ");
+                return format!("{} items: {first}", chat.items.len());
+            }
             "chat-items" => {
                 // Tests: the chat's last few items, each as its start.
                 let chat = &self.session.read(cx).chat;

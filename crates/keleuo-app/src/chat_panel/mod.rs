@@ -439,8 +439,9 @@ impl ChatPanel {
         if !self.loading.is_empty() {
             return;
         }
-        self.loading.insert(from);
+        // Not readable (yet): nothing is marked as being read, so the next look tries again.
         let Some(load) = self.session.read(cx).earlier_loader() else { return };
+        self.loading.insert(from);
         cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
             let started = std::time::Instant::now();
             let items = cx.background_spawn(async move { load(from, to) }).await;
