@@ -1060,6 +1060,7 @@ impl Render for ChatPanel {
             self.sync_rows(cx);
         }
         let empty = self.list_len == 0;
+        let loading = self.session.read(cx).loading_chat;
         let _ = (fg, red, user_bg);
         let terminal = {
             let s = self.session.read(cx);
@@ -1100,7 +1101,8 @@ impl Render for ChatPanel {
                 div()
                     .flex_1()
                     .min_h_0()
-                    .when(empty, |d| d.p_2().child(
+                    .when(loading, |d| d.child(crate::shell::loading_skeleton(cx)))
+                    .when(empty && !loading, |d| d.p_2().child(
                         div()
                             .text_xs()
                             .text_color(muted)

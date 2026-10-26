@@ -303,9 +303,45 @@ impl Shell {
             order.insert(0, s);
         }
         let shown_number = order.first().map(|(_, s)| s.number);
+        // The shown one's workspace at once (its files, terminals, its row), its chat showing
+        // its shape until its conversation is read.
+        let mut placed: Vec<usize> = Vec::new();
+        let mut first: Option<(SavedSession, Entity<AgentSession>)> = None;
+        if let Some((place, s)) = order.first().cloned().filter(|(_, s)| s.folder.is_dir()) {
+            order.remove(0);
+            let host: Arc<dyn Host> = Arc::new(LocalHost);
+            let backend = backends.iter().find(|b| b.id() == s.backend).cloned().unwrap_or_else(|| fallback.clone());
+            let mut session = AgentSession::new(host.clone(), backend, s.folder.clone());
+            session.dormant = true;
+            session.loading_chat = s.id.is_some();
+            session.chat.session_id = s.id.clone();
+            session.writes_anywhere = s.writes_anywhere;
+            session.writable = s.writable.clone();
+            let next = self.next;
+            self.next = s.number.max(1);
+            let ix = self.insert_session(host, s.folder.clone(), session, None, None, 0, window, cx);
+            self.next = next.max(s.number + 1);
+            self.activate(ix, window, cx);
+            placed.push(place);
+            first = Some((s, self.tabs[ix].ws.read(cx).session.clone()));
+        }
         cx.spawn_in(window, async move |this, cx| {
-            // The saved place of each tab added so far, to put the next one among them.
-            let mut placed: Vec<usize> = Vec::new();
+            if let Some((s, session)) = first {
+                let backend = Some(session.read_with(cx, |s, _| s.backend.clone()));
+                let read = cx
+                    .background_spawn(async move {
+                        let (backend, id) = (backend?, s.id.clone()?);
+                        backend.load_session(&LocalHost, &s.folder, &id).ok()
+                    })
+                    .await;
+                session.update(cx, |s, cx| match read {
+                    Some(chat) => s.take_chat(chat, cx),
+                    None => {
+                        s.loading_chat = false;
+                        cx.notify();
+                    }
+                });
+            }
             for (place, s) in order {
                 let (backends, fallback) = (backends.clone(), fallback.clone());
                 let loaded = cx
@@ -2326,8 +2362,6 @@ impl Render for Shell {
             (None, Some(b)) => b.clone().into_any_element(),
             (None, None) => match self.active_workspace() {
                 Some(w) => w.into_any_element(),
-                // The last run's sessions are being read: a chat's shape, pulsing, in its place.
-                None if self.restoring => loading_skeleton(cx),
                 None => div().into_any_element(),
             },
         };
@@ -2543,8 +2577,8 @@ pub fn open_settings(cx: &mut App) {
     });
 }
 
-/// What shows while the last run's sessions are being read: a few message shapes, pulsing.
-fn loading_skeleton(cx: &App) -> AnyElement {
+/// What shows while a conversation is being read: a few message shapes, pulsing.
+pub fn loading_skeleton(cx: &App) -> AnyElement {
     let shade = cx.theme().muted_foreground.opacity(0.14);
     let bar = |w: f32, h: f32| div().w(relative(w)).h(px(h)).rounded(px(6.)).bg(shade);
     div()

@@ -234,6 +234,8 @@ pub struct AgentSession {
     restart_after_turn: bool,
     /// A watch for the agent's sign-in runs (see `watch_sign_in`).
     sign_in_watching: bool,
+    /// Its conversation is being read (reopened from the last run): the chat shows its shape.
+    pub loading_chat: bool,
     /// The person's last message is set to go again at this time (Unix), when the usage
     /// limit resets.
     pub scheduled_retry: Option<u64>,
@@ -341,6 +343,7 @@ impl AgentSession {
             pasted_images: Vec::new(),
             restart_after_turn: false,
             sign_in_watching: false,
+            loading_chat: false,
             scheduled_retry: None,
             restarting: None,
             git_turn: None,
@@ -370,6 +373,19 @@ impl AgentSession {
             "Resumed: the next message continues this conversation."
         });
         s
+    }
+
+    /// The conversation read for a session opened before it was ready (see `loading_chat`):
+    /// it takes it as [`AgentSession::resumed`] does.
+    pub fn take_chat(&mut self, chat: Conversation, cx: &mut Context<Self>) {
+        let revision = self.chat.revision.max(chat.revision) + 1;
+        self.chat = chat;
+        self.attach_summaries();
+        self.chat.process_ended();
+        self.chat.push_notice("Resumed: the next message continues this conversation.");
+        self.chat.revision = revision;
+        self.loading_chat = false;
+        cx.notify();
     }
 
     /// Read an earlier part of this session's file (off the UI thread).
