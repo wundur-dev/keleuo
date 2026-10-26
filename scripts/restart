@@ -36,8 +36,11 @@ if [ "$1" = "--relaunch" ]; then
         for p in "$@"; do kill -9 "$p" 2>/dev/null; done
     fi
     cd "$folder" || cd "$HOME" || exit 1
+    # What it prints (warnings, and timings with KELEUO_PERF=1) goes to a log, new each start.
+    LOG="$HOME/Library/Logs/Keleuo/keleuo.log"
+    mkdir -p "$(dirname "$LOG")"
     # shellcheck disable=SC2086
-    exec "$REPO/scripts/keleuo" $args
+    exec "$REPO/scripts/keleuo" $args >"$LOG" 2>&1
 fi
 
 if [ "$1" != "--no-build" ]; then

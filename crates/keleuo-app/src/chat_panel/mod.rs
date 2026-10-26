@@ -106,6 +106,8 @@ pub struct ChatPanel {
     spelling: Option<crate::spelling::Spelling>,
     /// Its marks under misspelled words.
     spell_marks: Option<gpui_kit::base::input::RangeDecorationCollection<TextareaMode>>,
+    /// Speaking a message (see `composer::toggle_voice`).
+    voice: composer::Voice,
     /// The next check, a moment after the last change.
     spell_check: Option<Task<()>>,
     /// The word left unchecked by the last check as being typed, and the length of the text
@@ -183,6 +185,8 @@ impl ChatPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        // Signed out: the card shows as the chat opens, before anything is sent.
+        session.update(cx, |s, cx| s.check_sign_in(cx));
         let placeholder = format!(
             "Message {} (Enter sends, Shift+Enter new line)",
             session.read(cx).backend.name()
@@ -309,6 +313,7 @@ impl ChatPanel {
             md_highlighters: HashMap::new(),
             spelling: None,
             spell_marks: None,
+            voice: composer::Voice::default(),
             spell_check: None,
             spell_held: None,
             spelled_as: None,
@@ -437,8 +442,9 @@ impl ChatPanel {
         if !self.loading.is_empty() {
             return;
         }
-        self.loading.insert(from);
+        // Not readable (yet): nothing is marked as being read, so the next look tries again.
         let Some(load) = self.session.read(cx).earlier_loader() else { return };
+        self.loading.insert(from);
         cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
             let started = std::time::Instant::now();
             let items = cx.background_spawn(async move { load(from, to) }).await;
@@ -752,6 +758,7 @@ impl ChatPanel {
         // Where its agent may write, for the menu: kept to the folder (and the folders allowed
         // too), or anywhere; nothing when it cannot be kept (Settings, this system, SSH).
         let writes = session.can_confine(cx).then(|| (session.writes_anywhere, session.writable.clone()));
+        let sign_in = session.backend.sign_in().map(|_| format!("Sign in to {}…", session.backend.name()));
         // Sessions it may message (or be messaged by) without asking: a click asks again.
         let allowed = crate::messaging::allowed_with(&self.session, cx);
         // As tall as a tool panel's title bar, a hairline under it.
@@ -850,7 +857,7 @@ impl ChatPanel {
                     .ghost()
                     .tab_stop(false)
                     .dropdown_menu(move |menu, _, _| {
-                        let weak = weak.clone();
+                        let (weak, panel) = (weak.clone(), weak.clone());
                         let session = weak_session.clone();
                         menu.item(
                             gpui_kit::component::menu::PopupMenuItem::new("Copy conversation (Cmd+Alt+C)").on_click(
@@ -866,6 +873,15 @@ impl ChatPanel {
                                     let _ = session.update(cx, |s, cx| s.compact(cx));
                                 },
                             ))
+                        })
+                        .when_some(sign_in.clone(), |menu, label| {
+                            let (panel, session) = (panel.clone(), session.clone());
+                            menu.item(gpui_kit::component::menu::PopupMenuItem::new(label).on_click(move |_, _, cx| {
+                                let line = session.update(cx, |s, cx| s.start_sign_in(cx)).ok().flatten();
+                                if let Some(line) = line {
+                                    let _ = panel.update(cx, |_, cx| cx.emit(ChatPanelEvent::RunCommand(line)));
+                                }
+                            }))
                         })
                         .when_some(writes.clone(), |menu, (anywhere, writable)| write_items(menu, session.clone(), anywhere, writable))
                         .when(!allowed.is_empty(), |menu| {
@@ -1047,6 +1063,7 @@ impl Render for ChatPanel {
             self.sync_rows(cx);
         }
         let empty = self.list_len == 0;
+        let loading = self.session.read(cx).loading_chat;
         let _ = (fg, red, user_bg);
         let terminal = {
             let s = self.session.read(cx);
@@ -1087,7 +1104,8 @@ impl Render for ChatPanel {
                 div()
                     .flex_1()
                     .min_h_0()
-                    .when(empty, |d| d.p_2().child(
+                    .when(loading, |d| d.child(crate::shell::loading_skeleton(cx)))
+                    .when(empty && !loading, |d| d.p_2().child(
                         div()
                             .text_xs()
                             .text_color(muted)

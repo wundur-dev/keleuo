@@ -38,6 +38,14 @@ pub enum Incoming {
     Closed,
 }
 
+/// The error code ACP gives a request the agent refuses until it is signed in.
+pub const AUTH_REQUIRED: i64 = -32000;
+
+/// Whether `e` is the agent asking to be signed in first.
+pub fn needs_sign_in(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<RpcError>().is_some_and(|r| r.code == AUTH_REQUIRED)
+}
+
 /// An error response.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RpcError {
@@ -266,6 +274,14 @@ pub fn prompt_blocks(text: &str, images: &[std::path::PathBuf]) -> std::io::Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_refusal_to_sign_in_first_is_known_by_its_code() {
+        let e: anyhow::Error = RpcError { code: AUTH_REQUIRED, message: "Authentifizierung erforderlich".into(), data: None }.into();
+        assert!(needs_sign_in(&e));
+        let other: anyhow::Error = RpcError { code: -32603, message: "Authentication required".into(), data: None }.into();
+        assert!(!needs_sign_in(&other), "the words alone are no sign");
+    }
 
     #[test]
     fn messages_are_told_apart() {

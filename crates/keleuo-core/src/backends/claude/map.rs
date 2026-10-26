@@ -23,6 +23,8 @@ pub const WORKFLOW: &str = "Workflow";
 /// tool call's name and input (for the diff of its result), task ids to tool calls.
 #[derive(Default)]
 pub struct Mapper {
+    /// When the usage limit's window starts again, as the last limit event said.
+    limit_resets: Option<u64>,
     cwd: String,
     tools: HashMap<String, (String, Value)>,
     tasks: HashMap<String, String>,
@@ -91,14 +93,14 @@ impl Mapper {
                 _ => Vec::new(),
             },
             Raw::TextDelta { text, .. } => vec![Event::TextDelta(text)],
-            Raw::Assistant { blocks, parent_tool_use_id: parent, model, context_tokens, .. } => {
+            Raw::Assistant { blocks, parent_tool_use_id: parent, model, context_tokens, error, .. } => {
                 if parent.is_none()
                     && let Some(n) = context_tokens.filter(|n| *n > 0)
                 {
                     self.context = Some(n);
                 }
                 let mut out = Vec::new();
-                if parent.is_none() && !model.is_empty() {
+                if parent.is_none() && !model.is_empty() && model != "<synthetic>" {
                     out.push(Event::Started { session_id: None, model: Some(model), permission_mode: None, cwd: None });
                 }
                 for block in blocks {
@@ -127,6 +129,13 @@ impl Mapper {
                             out.extend(started);
                         }
                     }
+                }
+                // After its words: the card offering the sign-in follows them.
+                match error.as_deref() {
+                    Some("authentication_failed") => out.push(Event::SignedOut),
+                    // The limit refused it: when it resets, from the last limit event.
+                    Some("rate_limit") => out.push(Event::Limit { reached: true, resets_at: self.limit_resets }),
+                    _ => {}
                 }
                 out
             }
@@ -239,6 +248,12 @@ impl Mapper {
                 .collect()
             }
             Raw::Unparsed(line) => vec![Event::Notice(line)],
+            Raw::RateLimit { status, resets_at } => {
+                if resets_at.is_some() {
+                    self.limit_resets = resets_at;
+                }
+                vec![Event::Limit { reached: status == "rejected", resets_at }]
+            }
             Raw::Other(_) => Vec::new(),
         }
     }
@@ -293,4 +308,62 @@ fn launched_agent_id(result: &str) -> Option<String> {
 
 fn s(v: &Value, key: &str) -> String {
     v.get(key).and_then(Value::as_str).unwrap_or_default().to_string()
+}
+
+#[cfg(test)]
+mod sign_in_tests {
+    use super::*;
+    use crate::conversation::{Conversation, Item, SignIn};
+
+    /// What Claude Code 2.1 sends signed out (`claude -p` with an empty config folder).
+    const SIGNED_OUT: &str = r#"{"type":"assistant","message":{"id":"x","model":"<synthetic>","role":"assistant","content":[{"type":"text","text":"Not logged in · Please run /login"}]},"parent_tool_use_id":null,"session_id":"s","error":"authentication_failed","is_api_error_message":true}
+{"type":"result","subtype":"success","is_error":true,"result":"Not logged in · Please run /login","session_id":"s","terminal_reason":"api_error","duration_ms":43,"total_cost_usd":0,"usage":{"input_tokens":0,"output_tokens":0}}"#;
+
+    #[test]
+    fn signed_out_is_known_by_its_code_and_gets_one_card() {
+        let events = Mapper::new("/p").map_lines(SIGNED_OUT);
+        assert!(events.iter().any(|e| matches!(e, Event::SignedOut)), "{events:?}");
+        assert!(!events.iter().any(|e| matches!(e, Event::Started { model: Some(m), .. } if m == "<synthetic>")), "not a model");
+        // In another language the words change, the code does not.
+        let other = SIGNED_OUT.replace("Not logged in · Please run /login", "Nicht angemeldet");
+        assert!(Mapper::new("/p").map_lines(&other).iter().any(|e| matches!(e, Event::SignedOut)));
+        let mut chat = Conversation::default();
+        chat.apply_all(events.clone());
+        chat.apply_all(events);
+        let cards = chat.items.iter().filter(|i| matches!(i, Item::SignIn(SignIn::Needed))).count();
+        assert_eq!(cards, 1, "a second refusal adds no second card");
+    }
+}
+
+#[cfg(test)]
+mod limit_tests {
+    use super::*;
+    use crate::conversation::Conversation;
+
+    #[test]
+    fn a_refusal_by_the_usage_limit_carries_when_it_resets() {
+        let lines = r#"{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":1793031600,"rateLimitType":"five_hour"}}
+{"type":"assistant","message":{"id":"x","model":"<synthetic>","role":"assistant","content":[{"type":"text","text":"Limite atteinte"}]},"parent_tool_use_id":null,"session_id":"s","error":"rate_limit","is_api_error_message":true}"#;
+        let mut chat = Conversation::default();
+        chat.apply_all(Mapper::new("/p").map_lines(lines));
+        assert_eq!(chat.limit_reached, Some(Some(1793031600)), "from the codes, whatever the words");
+        chat.apply_all(Mapper::new("/p").map_lines(r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","resetsAt":1793050000}}"#));
+        assert_eq!(chat.limit_reached, None, "allowed again");
+    }
+}
+
+#[cfg(test)]
+mod status_check {
+    /// Runs the real agents (so ignored): `KL_EXPECT=true|false cargo test status_check -- --ignored`.
+    #[test]
+    #[ignore]
+    fn both_agents_say_whether_they_are_signed_in() {
+        use crate::agent::Backend;
+        let want = std::env::var("KL_EXPECT").ok().map(|v| v == "true");
+        let host = crate::host::LocalHost;
+        let claude = crate::backends::claude::ClaudeBackend::default().signed_in(&host);
+        let cursor = crate::backends::cursor::CursorBackend::default().signed_in(&host);
+        eprintln!("claude {claude:?} cursor {cursor:?}");
+        assert_eq!((claude, cursor), (want, want));
+    }
 }

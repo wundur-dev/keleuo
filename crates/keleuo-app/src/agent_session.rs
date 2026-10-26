@@ -232,6 +232,15 @@ pub struct AgentSession {
     pasted_images: Vec<PathBuf>,
     /// Restart the interface when the turn ends (a new model).
     restart_after_turn: bool,
+    /// A watch for the agent's sign-in runs (see `watch_sign_in`).
+    sign_in_watching: bool,
+    /// Its conversation is being read (reopened from the last run): the chat shows its shape.
+    pub loading_chat: bool,
+    /// The person's last message is set to go again at this time (Unix), when the usage
+    /// limit resets.
+    pub scheduled_retry: Option<u64>,
+    /// Counts uses of the session: an idle timer set before the last one does nothing.
+    idle_gen: u64,
     /// Why the interface is starting again, while it does (for the composer).
     pub restarting: Option<String>,
     /// The current turn (where it starts in the chat) and the git working tree when it started,
@@ -335,6 +344,10 @@ impl AgentSession {
             skip_images: 0,
             pasted_images: Vec::new(),
             restart_after_turn: false,
+            sign_in_watching: false,
+            loading_chat: false,
+            scheduled_retry: None,
+            idle_gen: 0,
             restarting: None,
             git_turn: None,
             hybrid: false,
@@ -363,6 +376,19 @@ impl AgentSession {
             "Resumed: the next message continues this conversation."
         });
         s
+    }
+
+    /// The conversation read for a session opened before it was ready (see `loading_chat`):
+    /// it takes it as [`AgentSession::resumed`] does.
+    pub fn take_chat(&mut self, chat: Conversation, cx: &mut Context<Self>) {
+        let revision = self.chat.revision.max(chat.revision) + 1;
+        self.chat = chat;
+        self.attach_summaries();
+        self.chat.process_ended();
+        self.chat.push_notice("Resumed: the next message continues this conversation.");
+        self.chat.revision = revision;
+        self.loading_chat = false;
+        cx.notify();
     }
 
     /// Read an earlier part of this session's file (off the UI thread).
@@ -749,6 +775,140 @@ impl AgentSession {
         }
         self.chat.revision += 1;
         cx.notify();
+    }
+
+    /// Where the sign-in card is now (the last one).
+    fn set_sign_in(&mut self, state: keleuo_core::conversation::SignIn, cx: &mut Context<Self>) {
+        if let Some(keleuo_core::conversation::Item::SignIn(s)) =
+            self.chat.items.iter_mut().rev().find(|i| matches!(i, keleuo_core::conversation::Item::SignIn(_)))
+        {
+            *s = state;
+        }
+        self.chat.revision += 1;
+        cx.notify();
+    }
+
+    /// Start the agent's own sign-in: the command line to run in a terminal (the chat runs
+    /// it), while Keleuo asks the agent every few seconds whether it is signed in yet.
+    pub fn start_sign_in(&mut self, cx: &mut Context<Self>) -> Option<String> {
+        use keleuo_core::conversation::{Item, SignIn};
+        let spec = self.backend.sign_in()?;
+        let line = std::iter::once(&spec.program).chain(&spec.args).map(|w| keleuo_core::host::shell_quote(w)).collect::<Vec<_>>().join(" ");
+        // From the menu, before anything was refused: a card of its own to follow it on.
+        let open = self.chat.items.iter().rev().find_map(|i| match i {
+            Item::SignIn(s) => Some(*s != SignIn::Done),
+            _ => None,
+        });
+        if open != Some(true) {
+            self.chat.items.push(Item::SignIn(SignIn::Needed));
+        }
+        self.set_sign_in(SignIn::Waiting, cx);
+        self.watch_sign_in(cx);
+        Some(line)
+    }
+
+    /// While the sign-in card shows, ask the agent whether it is signed in (its status
+    /// command): every few seconds once its sign-in runs, less often while the card only waits,
+    /// for up to an hour. Signed in, however it was done, the card says so and the agent starts
+    /// afresh with its next message (a running one keeps the sign-in it started with).
+    pub fn watch_sign_in(&mut self, cx: &mut Context<Self>) {
+        use keleuo_core::conversation::{Item, SignIn};
+        if self.sign_in_watching {
+            return;
+        }
+        self.sign_in_watching = true;
+        let (backend, host) = (self.backend.clone(), self.host.clone());
+        cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let until = std::time::Instant::now() + std::time::Duration::from_secs(3600);
+            while std::time::Instant::now() < until {
+                let (backend, host) = (backend.clone(), host.clone());
+                let signed = cx.background_spawn(async move { backend.signed_in(host.as_ref()) }).await;
+                let card = this
+                    .update(cx, |s, cx| {
+                        let card = s.chat.items.iter().rev().find_map(|i| match i {
+                            Item::SignIn(st) => Some(*st),
+                            _ => None,
+                        });
+                        if signed == Some(true) && card.is_some_and(|c| c != SignIn::Done) {
+                            s.stop(cx);
+                            s.set_sign_in(SignIn::Done, cx);
+                            return None;
+                        }
+                        card.filter(|c| *c != SignIn::Done)
+                    })
+                    .ok()
+                    .flatten();
+                let Some(card) = card else { break };
+                let pause = if card == SignIn::Waiting { 3 } else { 15 };
+                cx.background_executor().timer(std::time::Duration::from_secs(pause)).await;
+            }
+            let _ = this.update(cx, |s, cx| {
+                s.sign_in_watching = false;
+                let waiting = s.chat.items.iter().rev().find_map(|i| match i {
+                    Item::SignIn(st) => Some(*st == SignIn::Waiting),
+                    _ => None,
+                });
+                if waiting == Some(true) {
+                    s.set_sign_in(SignIn::Needed, cx);
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Ask the agent (its status command, off the window's thread) whether it is signed in;
+    /// signed out, the chat shows the sign-in card at once.
+    pub fn check_sign_in(&mut self, cx: &mut Context<Self>) {
+        let (backend, host) = (self.backend.clone(), self.host.clone());
+        cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let signed = cx.background_spawn(async move { backend.signed_in(host.as_ref()) }).await;
+            if signed == Some(false) {
+                let _ = this.update(cx, |s, cx| {
+                    s.chat.apply(keleuo_core::agent::Event::SignedOut);
+                    s.chat.revision += 1;
+                    s.watch_sign_in(cx);
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
+    /// Send the person's last message again at `at` (Unix time: when the usage limit resets),
+    /// a little after it, unless sent or cancelled before.
+    pub fn retry_at(&mut self, at: u64, cx: &mut Context<Self>) {
+        self.scheduled_retry = Some(at);
+        cx.notify();
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(at);
+        let wait = std::time::Duration::from_secs(at.saturating_sub(now) + 20);
+        cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            cx.background_executor().timer(wait).await;
+            let _ = this.update(cx, |s, cx| {
+                if s.scheduled_retry == Some(at) {
+                    s.send_again(cx);
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// No send at the limit's reset after all.
+    pub fn cancel_retry(&mut self, cx: &mut Context<Self>) {
+        self.scheduled_retry = None;
+        cx.notify();
+    }
+
+    /// Send the person's last message again (after signing in).
+    pub fn send_again(&mut self, cx: &mut Context<Self>) {
+        let last = self.chat.items.iter().rev().find_map(|i| match i {
+            keleuo_core::conversation::Item::User(t) => Some(t.clone()),
+            _ => None,
+        });
+        self.chat.refused_signed_out = false;
+        self.scheduled_retry = None;
+        if let Some(text) = last {
+            self.send(&text, cx);
+        }
     }
 
     /// Whether it runs on another machine.
@@ -1333,6 +1493,7 @@ impl AgentSession {
                 self.chat.status = None;
                 self.unseen = true;
                 if was_busy {
+                    self.idle_later(cx);
                     cx.emit(SessionEvent::TurnEnded);
                     self.summarize_turn(cx);
                 }
@@ -1504,7 +1665,11 @@ impl AgentSession {
                     Event::ToolResult { id, output, .. } if self.confined => keleuo_core::sandbox::refused(output).map(|p| (id.clone(), p)),
                     _ => None,
                 };
+                let signed_out = matches!(event, Event::SignedOut);
                 let applied = self.chat.apply(event);
+                if signed_out {
+                    self.watch_sign_in(cx);
+                }
                 if let Some((id, path)) = refused {
                     let issue = self.sandbox_issue(path);
                     self.chat.apply(Event::ToolIssue { id, issue });
@@ -1515,6 +1680,7 @@ impl AgentSession {
                 self.watch_turn(cx);
                 if applied.turn_ended {
                     self.find_command_changes(cx);
+                    self.idle_later(cx);
                     cx.emit(SessionEvent::TurnEnded);
                     self.summarize_turn(cx);
                 }
@@ -1645,6 +1811,8 @@ impl AgentSession {
     /// agent works it waits its turn (see [`keleuo_core::outbox`]), as it does behind others
     /// waiting; it shows in the chat when it goes.
     pub fn send_with(&mut self, text: &str, images: Vec<PathBuf>, cx: &mut Context<Self>) {
+        // In use: an idle timer set before does nothing.
+        self.idle_gen += 1;
         self.outbox_paused = false;
         if (self.chat.busy || !self.outbox.is_empty())
             && !(keleuo_core::paste::without_markers(text).trim().is_empty() && images.is_empty())
@@ -1861,11 +2029,11 @@ impl AgentSession {
             }
             self.view = view;
         } else if view == View::Terminal {
-            // Chat's agent is idle: it waits, in case Chat shows again before anything changes.
-            self.agent_parked_at = if self.agent.running() { self.session_len() } else { None };
-            if self.agent_parked_at.is_none() {
-                self.end_agent();
-            }
+            // Chat's agent ends: Claude Code opens a conversation in one process at a time, so
+            // the interface could not continue it while Chat's agent held it ("Session ID ...
+            // is already in use").
+            self.agent_parked_at = None;
+            self.end_agent();
             self.view = view;
             match self.parked.take() {
                 // Nothing new since the interface was hidden: it shows as it was.
@@ -1888,12 +2056,11 @@ impl AgentSession {
             self.park_timer(cx);
         } else {
             self.view = view;
-            // The interface waits, idle, in case Terminal shows again before anything changes.
+            // The interface ends, for the same reason: Chat's agent continues the conversation.
             if let Some(run) = self.terminal.take()
-                && !run.view.read(cx).exited
+                && let Some(pty) = run.view.read(cx).pty.clone()
             {
-                let pty = run.view.read(cx).pty.clone();
-                self.parked = Some(Parked { len: self.session_len(), ready: self.ready, run, pty });
+                crate::pty::end_for_certain(&pty);
             }
             self.following = None;
             self.ready = false;
@@ -1909,16 +2076,43 @@ impl AgentSession {
         cx.notify();
     }
 
-    /// The session file's length now.
-    fn session_len(&self) -> Option<u64> {
-        let id = self.chat.session_id.as_deref()?;
-        self.backend.session_len(self.host.as_ref(), &self.cwd, id)
-    }
-
     /// Whether the conversation has a turn past `len` of its file (an idle agent from then is
     /// out of date).
     fn moved_on(&self, len: u64) -> bool {
         self.chat.session_id.as_deref().is_none_or(|id| self.backend.session_moved_on(self.host.as_ref(), &self.cwd, id, len))
+    }
+
+    /// Set the idle timer: unused for the minutes in Settings, the agent's process ends (the
+    /// conversation stays; the next message starts it again). Any use since sets it again.
+    fn idle_later(&mut self, cx: &mut Context<Self>) {
+        self.idle_gen += 1;
+        let minutes = crate::prefs(cx).idle_minutes;
+        if minutes == 0 {
+            return;
+        }
+        let generation = self.idle_gen;
+        cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            cx.background_executor().timer(std::time::Duration::from_secs(u64::from(minutes) * 60)).await;
+            let _ = this.update(cx, |s, cx| {
+                if s.idle_gen == generation && s.can_rest() {
+                    s.end_agent();
+                    s.dormant = true;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Whether the agent may end for being idle: running, between turns, in Chat, with
+    /// nothing waiting on the person or to be sent.
+    fn can_rest(&self) -> bool {
+        self.agent.running() && !self.chat.busy && self.view == View::Chat && self.asking.is_none() && self.outbox.is_empty()
+    }
+
+    /// Whether Chat's agent process runs.
+    pub fn agent_running(&self) -> bool {
+        self.agent.running()
     }
 
     /// End Chat's headless agent.

@@ -483,6 +483,115 @@ impl ChatPanel {
             .into_any_element()
     }
 
+    /// An error, as the agent or Keleuo said it; the latest turn's, with Retry (the person's
+    /// last message sent again) and, when the usage limit refused it, when the limit resets and
+    /// a send set for then.
+    fn render_error(&self, text: &str, red: Hsla, cx: &mut Context<Self>) -> AnyElement {
+        use keleuo_core::conversation::Item;
+        let session = self.session.read(cx);
+        let chat = &session.chat;
+        // The latest turn's error: after the person's last message, with no sign-in card
+        // (which offers its own Send again) and nothing running.
+        let since_user = chat.items.iter().rposition(|i| matches!(i, Item::User(_))).map_or(&chat.items[..], |u| &chat.items[u..]);
+        let latest = !chat.busy
+            && since_user.iter().rev().find_map(|i| match i {
+                Item::Error(e) => Some(e.as_str()),
+                _ => None,
+            }) == Some(text)
+            && !since_user.iter().any(|i| matches!(i, Item::SignIn(_)))
+            && since_user.iter().any(|i| matches!(i, Item::User(_)));
+        let limit = chat.limit_reached;
+        let scheduled = session.scheduled_retry;
+        let el = div().flex().flex_col().gap_1().child(div().text_xs().text_color(red).child(text.to_string()));
+        if !latest {
+            return el.into_any_element();
+        }
+        let muted = cx.theme().muted_foreground;
+        let clock = |t: u64| {
+            use chrono::{Local, TimeZone};
+            Local.timestamp_opt(t as i64, 0).single().map(|d| d.format("%H:%M").to_string()).unwrap_or_default()
+        };
+        let (s1, s2, s3) = (self.session.clone(), self.session.clone(), self.session.clone());
+        let mut row = div().flex().flex_wrap().items_center().gap_2().child(
+            Button::new("turn-retry").xsmall().icon(IconName::Redo).label("Retry").on_click(move |_, _, cx| {
+                s1.update(cx, |s, cx| s.send_again(cx));
+            }),
+        );
+        if let Some(resets) = limit {
+            row = match (scheduled, resets) {
+                (Some(at), _) => row
+                    .child(div().text_xs().text_color(muted).child(format!("Sends again at {} when the limit resets", clock(at))))
+                    .child(Button::new("turn-retry-cancel").xsmall().ghost().label("Cancel").on_click(move |_, _, cx| {
+                        s2.update(cx, |s, cx| s.cancel_retry(cx));
+                    })),
+                (None, Some(at)) => row
+                    .child(Button::new("turn-retry-later").xsmall().label(format!("Send at {}", clock(at))).on_click(move |_, _, cx| {
+                        s3.update(cx, |s, cx| s.retry_at(at, cx));
+                    }))
+                    .child(div().text_xs().text_color(muted).child(format!("The usage limit resets at {}", clock(at)))),
+                (None, None) => row.child(div().text_xs().text_color(muted).child("The usage limit was reached")),
+            };
+        }
+        el.child(row).into_any_element()
+    }
+
+    /// The agent is not signed in: its own sign-in, run in a terminal, then the message sent
+    /// again once Keleuo sees it signed in.
+    pub(super) fn render_sign_in(&self, state: keleuo_core::conversation::SignIn, cx: &mut Context<Self>) -> AnyElement {
+        use keleuo_core::conversation::SignIn;
+        let theme = cx.theme();
+        let (fg, muted, border, warning, green) = (theme.foreground, theme.muted_foreground, theme.border, theme.warning, theme.green);
+        let agent = self.session.read(cx).backend.name();
+        let can = self.session.read(cx).backend.sign_in().is_some();
+        let resend = self.session.read(cx).chat.refused_signed_out;
+        let session = self.session.clone();
+        let (title, note, tone) = match state {
+            SignIn::Needed => (
+                format!("{agent} isn't signed in"),
+                format!("Sign in with its own sign-in, in a terminal here (it may open your browser){}. Signed in elsewhere, this card notices on its own.", if resend { ", then send your message again" } else { "" }),
+                warning,
+            ),
+            SignIn::Waiting => (format!("Signing in to {agent}…"), "Finish in the terminal (and the browser, if it opened). This card turns green once you're signed in.".to_string(), warning),
+            SignIn::Done => (
+                format!("Signed in to {agent}"),
+                if resend { "Send your last message again, or write a new one." } else { "You're all set." }.to_string(),
+                green,
+            ),
+        };
+        let (s1, s3) = (session.clone(), session);
+        let buttons = div()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap_2()
+            .when(state == SignIn::Needed && can, |d| {
+                d.child(Button::new("sign-in-start").xsmall().primary().label("Sign in").on_click(cx.listener(move |_, _, _, cx| {
+                    if let Some(line) = s1.update(cx, |s, cx| s.start_sign_in(cx)) {
+                        cx.emit(ChatPanelEvent::RunCommand(line));
+                    }
+                })))
+            })
+            .when(state == SignIn::Done && resend, |d| {
+                d.child(Button::new("sign-in-again").xsmall().primary().label("Send again").on_click(move |_, _, cx| {
+                    s3.update(cx, |s, cx| s.send_again(cx));
+                }))
+            });
+        div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .px_3()
+            .py_2()
+            .border_1()
+            .border_color(border)
+            .rounded_md()
+            .bg(tone.opacity(0.06))
+            .child(div().flex().items_center().gap_2().child(div().size(px(7.)).rounded_full().bg(tone)).child(div().font_weight(FontWeight::SEMIBOLD).text_color(fg).child(title)))
+            .child(div().text_xs().text_color(muted).child(note))
+            .child(buttons)
+            .into_any_element()
+    }
+
     /// A run of one of the person's tools the agent asked for: the command, and Allow, Always
     /// or Deny while it waits.
     pub(super) fn render_tool_run(&self, id: u64, tool: &str, command: &str, state: &keleuo_core::conversation::SendState, cx: &mut Context<Self>) -> AnyElement {
@@ -875,14 +984,11 @@ impl ChatPanel {
                 Item::Compacted { summary, trigger, tokens } => {
                     self.render_compacted(summary, trigger.as_deref(), *tokens, cx)
                 }
-                Item::Error(t) => div()
-                    .text_xs()
-                    .text_color(red)
-                    .child(t.clone())
-                    .into_any_element(),
+                Item::Error(t) => self.render_error(t, red, cx),
                 Item::AgentMessage { from, title, text, .. } => self.render_agent_message(from, title, text, cx),
                 Item::Outgoing { id, to, text, state } => self.render_outgoing(*id, to, text, state, cx),
                 Item::ToolRun { id, tool, command, state } => self.render_tool_run(*id, tool, command, state, cx),
+                Item::SignIn(state) => self.render_sign_in(*state, cx),
                 Item::TurnChanges(changes) => self.render_turn_changes(ix, changes, cx),
                 Item::Summary { state, .. } => self.render_summary(state, cx),
             };

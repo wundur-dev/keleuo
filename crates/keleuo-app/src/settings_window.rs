@@ -223,6 +223,14 @@ fn chat() -> SettingPage {
     SettingPage::new("Chat").icon(IconName::Bot).resettable(true).groups([
         SettingGroup::new().title("Conversation").items([
             choice(
+                "End idle agents after",
+                "A session's agent (its Claude Code process, a few hundred MB) ends when the session is unused this long, so many open sessions don't fill the memory. The conversation stays; your next message starts the agent again (a few seconds). Never while it works, waits on you or shows its Terminal.",
+                &[("5", "5 minutes"), ("15", "15 minutes"), ("30", "30 minutes"), ("60", "1 hour"), ("0", "Never")],
+                "15",
+                |s| s.prefs.idle_minutes.to_string(),
+                |s, v| s.prefs.idle_minutes = v.parse().unwrap_or(15),
+            ),
+            choice(
                 "Permission mode for new sessions",
                 "Auto lets Claude run what it judges safe and asks about the rest; Ask before acting asks about every change and command. Each session can switch on its own, and keeps its choice.",
                 &[("auto", "Auto"), ("default", "Ask before acting"), ("acceptEdits", "Accept edits"), ("plan", "Plan")],

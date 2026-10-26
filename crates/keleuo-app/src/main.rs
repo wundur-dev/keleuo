@@ -62,6 +62,7 @@ mod spelling;
 mod terminal_view;
 mod theme;
 mod tool_runs;
+mod voice;
 mod web_panel;
 mod workspace;
 
@@ -222,8 +223,15 @@ fn background() -> bool {
 }
 
 fn window_options(title: String, w: f32, h: f32, cx: &App) -> WindowOptions {
+    // Tests and screenshots: `KELEUO_WINDOW=x,y[,w,h]` places the window there (partly off
+    // the screen, a test copy still draws while a sliver of it shows).
+    let placed = keleuo_core::env_var("WINDOW").ok().and_then(|v| {
+        let n: Vec<f32> = v.split(',').filter_map(|p| p.trim().parse().ok()).collect();
+        let (w, h) = (n.get(2).copied().unwrap_or(w), n.get(3).copied().unwrap_or(h));
+        (n.len() >= 2).then(|| WindowBounds::Windowed(Bounds { origin: point(px(n[0]), px(n[1])), size: size(px(w), px(h)) }))
+    });
     WindowOptions {
-        window_bounds: Some(WindowBounds::centered(size(px(w), px(h)), cx)),
+        window_bounds: Some(placed.unwrap_or_else(|| WindowBounds::centered(size(px(w), px(h)), cx))),
         titlebar: Some(TitlebarOptions {
             title: Some(title.into()),
             appears_transparent: true,

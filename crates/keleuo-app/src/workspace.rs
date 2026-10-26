@@ -1424,6 +1424,26 @@ impl Workspace {
                 settings.borrow_mut().default_view = arg.to_string();
                 let _ = settings.borrow().save();
             }
+            "retry" => {
+                // Tests: what Retry does (the person's last message sent again).
+                self.session.update(cx, |s, cx| s.send_again(cx));
+            }
+            "agent-running" => {
+                // Tests: whether the session's agent process runs.
+                let s = self.session.read(cx);
+                return format!("running={} dormant={} busy={}", s.agent_running(), s.dormant, s.chat.busy);
+            }
+            "chat-head" => {
+                // Tests: how many items, and the first few, each as its start.
+                let chat = &self.session.read(cx).chat;
+                let first = chat.items.iter().take(6).map(|i| format!("{i:?}").chars().take(70).collect::<String>()).collect::<Vec<_>>().join(" | ");
+                return format!("{} items: {first}", chat.items.len());
+            }
+            "chat-items" => {
+                // Tests: the chat's last few items, each as its start.
+                let chat = &self.session.read(cx).chat;
+                return chat.items.iter().rev().take(6).rev().map(|i| format!("{i:?}").chars().take(90).collect::<String>()).collect::<Vec<_>>().join(" | ");
+            }
             "chat-last" => {
                 // The chat's last item: a preview or not, and the start of its text (tests).
                 let chat = &self.session.read(cx).chat;

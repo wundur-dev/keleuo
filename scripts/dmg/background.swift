@@ -82,8 +82,11 @@ for _ in 0..<260 {
     let alpha = 0.35 + bright * 0.6
     let tint: UInt32 = random() < 0.15 ? 0xffe9c4 : (random() < 0.2 ? 0xc9d6ff : 0xffffff)
     // None behind the icons, their names, or the words: the sky stays clear there.
-    let nearIcon = [APP_AT, APPLICATIONS_AT].contains { hypot($0.x - x, $0.y + 12 - y) < 78 }
-    let nearWords = abs(x - WIDTH / 2) < 120 && abs(y - (APP_AT.y - 49)) < 16
+    // In Double throughout (newer Swift will not guess between Double and CGFloat).
+    let nearIcon = [APP_AT, APPLICATIONS_AT].contains { (p: CGPoint) -> Bool in
+        hypot(Double(p.x) - x, Double(p.y) + 12.0 - y) < 78.0
+    }
+    let nearWords = abs(x - WIDTH / 2) < 120 && abs(y - (Double(APP_AT.y) - 49.0)) < 16
     if nearIcon || nearWords { continue }
     if bright > 0.93 {
         let glow = CGGradient(

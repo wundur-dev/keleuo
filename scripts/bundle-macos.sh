@@ -1,9 +1,9 @@
 #!/bin/sh
 # bundle-macos.sh <version> <out-dir> [build-number]
 #
-# Build the release binaries and assemble Keleuo.app in <out-dir>. `keleuo` is the window;
-# `keleuo-hook` and `keleuo-mcp` sit beside it because the window finds them next to its own
-# executable.
+# Build the release binaries for Apple silicon and Intel, join each pair into one universal
+# binary, and assemble Keleuo.app in <out-dir>. `keleuo` is the window; `keleuo-hook` and
+# `keleuo-mcp` sit beside it because the window finds them next to its own executable.
 # The build number (CFBundleVersion) defaults to 1; the release workflow passes its run number.
 # Not signed here: the release workflow signs and notarizes the bundle it produces.
 
@@ -16,12 +16,17 @@ REPO=$(cd "$(dirname "$0")/.." && pwd)
 APP="$OUT/Keleuo.app"
 
 cd "$REPO"
-cargo build -p keleuo-app --release --bins
+TARGET=${CARGO_TARGET_DIR:-target}
+for arch in aarch64-apple-darwin x86_64-apple-darwin; do
+    cargo build -p keleuo-app --release --bins --target "$arch"
+done
 
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-TARGET=${CARGO_TARGET_DIR:-target}
-cp "$TARGET/release/keleuo" "$TARGET/release/keleuo-hook" "$TARGET/release/keleuo-mcp" "$APP/Contents/MacOS/"
+for bin in keleuo keleuo-hook keleuo-mcp; do
+    lipo -create -output "$APP/Contents/MacOS/$bin" \
+        "$TARGET/aarch64-apple-darwin/release/$bin" "$TARGET/x86_64-apple-darwin/release/$bin"
+done
 cp crates/keleuo-app/assets/icon/Keleuo.icns "$APP/Contents/Resources/Keleuo.icns"
 
 cat > "$APP/Contents/Info.plist" <<EOF
@@ -51,6 +56,10 @@ cat > "$APP/Contents/Info.plist" <<EOF
     <string>public.app-category.developer-tools</string>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Keleuo listens when you press the microphone button, to type what you say into your message.</string>
+    <key>NSSpeechRecognitionUsageDescription</key>
+    <string>Keleuo turns what you say into text for your message, on this Mac where it can.</string>
 </dict>
 </plist>
 EOF

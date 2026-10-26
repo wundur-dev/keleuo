@@ -140,6 +140,46 @@ pub fn is_markdown(path: &Path) -> bool {
     language_for(path) == "markdown"
 }
 
+/// What a file is by its name, for opening it: an image (shown), something only another app
+/// opens (its kind, said; not read), or anything else (read: text, or found to be binary).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Kind {
+    Image,
+    Other(&'static str),
+    Text,
+}
+
+pub fn kind_of(path: &Path) -> Kind {
+    let ext = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+    match ext.as_str() {
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "tif" | "tiff" | "ico" | "svg" => Kind::Image,
+        "pdf" => Kind::Other("PDF document"),
+        "mp4" | "mov" | "m4v" | "webm" | "mkv" | "avi" => Kind::Other("Video"),
+        "mp3" | "wav" | "m4a" | "aac" | "flac" | "ogg" | "aiff" => Kind::Other("Audio"),
+        "zip" | "gz" | "tgz" | "tar" | "bz2" | "xz" | "7z" | "rar" | "zst" => Kind::Other("Archive"),
+        "dmg" | "pkg" | "iso" => Kind::Other("Disk image"),
+        "doc" | "docx" | "pages" | "rtf" | "odt" => Kind::Other("Document"),
+        "xls" | "xlsx" | "numbers" | "ods" => Kind::Other("Spreadsheet"),
+        "ppt" | "pptx" | "key" | "odp" => Kind::Other("Presentation"),
+        "psd" | "ai" | "sketch" | "fig" | "heic" | "avif" | "raw" | "cr2" | "nef" => Kind::Other("Image"),
+        "ttf" | "otf" | "woff" | "woff2" => Kind::Other("Font"),
+        "app" | "exe" | "dll" | "so" | "dylib" | "o" | "a" | "wasm" | "class" | "jar" => Kind::Other("Program"),
+        "sqlite" | "db" | "sqlite3" => Kind::Other("Database"),
+        _ => Kind::Text,
+    }
+}
+
+/// A size as people read it: 840 bytes, 12.4 KB, 3.1 MB.
+pub fn size_text(bytes: u64) -> String {
+    let b = bytes as f64;
+    match bytes {
+        0..1_000 => format!("{bytes} bytes"),
+        1_000..1_000_000 => format!("{:.1} KB", b / 1e3),
+        1_000_000..1_000_000_000 => format!("{:.1} MB", b / 1e6),
+        _ => format!("{:.1} GB", b / 1e9),
+    }
+}
+
 /// Make a new empty file (or a folder) named `name` in the folder `dir`. The name may hold
 /// folders (`src/util/x.rs`), made as needed, but cannot leave `dir`. The error is said to the
 /// person as it is.
@@ -197,6 +237,20 @@ pub fn discard(host: &dyn Host, path: &Path) -> Result<bool, String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn files_are_told_apart_by_name_and_sizes_said_plainly() {
+        use std::path::Path;
+        assert_eq!(super::kind_of(Path::new("a/Logo.PNG")), super::Kind::Image);
+        assert_eq!(super::kind_of(Path::new("icon.svg")), super::Kind::Image);
+        assert_eq!(super::kind_of(Path::new("report.pdf")), super::Kind::Other("PDF document"));
+        assert_eq!(super::kind_of(Path::new("clip.mov")), super::Kind::Other("Video"));
+        assert_eq!(super::kind_of(Path::new("main.rs")), super::Kind::Text);
+        assert_eq!(super::kind_of(Path::new("Makefile")), super::Kind::Text);
+        assert_eq!(super::size_text(840), "840 bytes");
+        assert_eq!(super::size_text(12_400), "12.4 KB");
+        assert_eq!(super::size_text(3_100_000), "3.1 MB");
+    }
+
     #[test]
     fn a_file_is_renamed_in_its_folder() {
         use crate::host::LocalHost;

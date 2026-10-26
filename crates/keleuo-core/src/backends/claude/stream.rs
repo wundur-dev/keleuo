@@ -57,6 +57,9 @@ pub enum Event {
         /// The tokens this message's request sent (input, cached or not): how full the
         /// context was. A turn's `result` adds up every request, which is no measure of that.
         context_tokens: Option<u64>,
+        /// Claude Code's code for a message it made up from an error (`authentication_failed`,
+        /// ...): the reason, in no language.
+        error: Option<String>,
     },
     /// The result of a tool call.
     ToolResult {
@@ -122,6 +125,9 @@ pub enum Event {
         total_tokens: Option<u64>,
         duration_ms: Option<u64>,
     },
+    /// Where the account's usage limit is (`rate_limit_event`): `status` `allowed`,
+    /// `allowed_warning` or `rejected`, `resets_at` when its window starts again (Unix time).
+    RateLimit { status: String, resets_at: Option<u64> },
     /// A line that is not JSON (Claude Code sometimes prints warnings on stdout).
     Unparsed(String),
     /// Valid JSON of a kind Keleuo does not show.
@@ -150,6 +156,10 @@ fn s(v: &Value, key: &str) -> String {
 pub fn parse_value(v: &Value) -> Event {
     let ty = v.get("type").and_then(Value::as_str).unwrap_or_default();
     match ty {
+        "rate_limit_event" => {
+            let info = v.get("rate_limit_info").unwrap_or(&Value::Null);
+            Event::RateLimit { status: s(info, "status"), resets_at: info.get("resetsAt").and_then(Value::as_u64) }
+        }
         "system" => match v.get("subtype").and_then(Value::as_str).unwrap_or_default() {
             "init" => Event::Init {
                 session_id: s(v, "session_id"),
@@ -231,6 +241,7 @@ pub fn parse_value(v: &Value) -> Event {
                     .and_then(Value::as_str)
                     .map(str::to_string),
                 context_tokens: usage.map(|_| n("input_tokens") + n("cache_read_input_tokens") + n("cache_creation_input_tokens")),
+                error: v.get("error").and_then(Value::as_str).map(str::to_string),
             }
         }
         "user" => parse_user(v),

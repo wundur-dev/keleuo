@@ -295,43 +295,99 @@ impl Shell {
         self.restoring = true;
         let backends = crate::backends::all(cx);
         let fallback = crate::backends::backend(None, cx);
+        // The shown session first, so the window has it at once; the others after it, one at a
+        // time off the window's thread, each put in its place in the list as it comes.
+        let mut order: Vec<(usize, SavedSession)> = saved.into_iter().enumerate().collect();
+        if let Some(first) = shown.and_then(|n| order.iter().position(|(_, s)| s.number == n)) {
+            let s = order.remove(first);
+            order.insert(0, s);
+        }
+        let shown_number = order.first().map(|(_, s)| s.number);
+        // The shown one's workspace at once (its files, terminals, its row), its chat showing
+        // its shape until its conversation is read.
+        let mut placed: Vec<usize> = Vec::new();
+        let mut first: Option<(SavedSession, Entity<AgentSession>)> = None;
+        if let Some((place, s)) = order.first().cloned().filter(|(_, s)| s.folder.is_dir()) {
+            order.remove(0);
+            let host: Arc<dyn Host> = Arc::new(LocalHost);
+            let backend = backends.iter().find(|b| b.id() == s.backend).cloned().unwrap_or_else(|| fallback.clone());
+            let mut session = AgentSession::new(host.clone(), backend, s.folder.clone());
+            session.dormant = true;
+            session.loading_chat = s.id.is_some();
+            session.chat.session_id = s.id.clone();
+            session.writes_anywhere = s.writes_anywhere;
+            session.writable = s.writable.clone();
+            let next = self.next;
+            self.next = s.number.max(1);
+            let ix = self.insert_session(host, s.folder.clone(), session, None, None, 0, window, cx);
+            self.next = next.max(s.number + 1);
+            self.activate(ix, window, cx);
+            placed.push(place);
+            first = Some((s, self.tabs[ix].ws.read(cx).session.clone()));
+        }
         cx.spawn_in(window, async move |this, cx| {
-            let loaded = cx
-                .background_spawn(async move {
-                    let host = LocalHost;
-                    saved
-                        .into_iter()
-                        .filter(|s| s.folder.is_dir())
-                        .filter_map(|s| {
-                            let backend = backends.iter().find(|b| b.id() == s.backend).cloned().unwrap_or_else(|| fallback.clone());
-                            let chat = match &s.id {
-                                Some(id) => Some(backend.load_session(&host, &s.folder, id).ok()?),
-                                None => None,
-                            };
-                            Some((s, backend, chat))
-                        })
-                        .collect::<Vec<_>>()
-                })
-                .await;
-            let _ = this.update_in(cx, |shell, window, cx| {
-                let host: Arc<dyn Host> = Arc::new(LocalHost);
-                let mut last = shell.next;
-                for (s, backend, chat) in loaded {
-                    let mut session = match chat {
-                        Some(chat) => AgentSession::resumed(host.clone(), backend, s.folder.clone(), chat, false),
-                        None => AgentSession::new(host.clone(), backend, s.folder.clone()),
-                    };
-                    session.dormant = true;
-                    session.writes_anywhere = s.writes_anywhere;
-                    session.writable = s.writable.clone();
-                    shell.next = s.number.max(1);
-                    shell.add_session(host.clone(), s.folder, session, None, None, window, cx);
-                    last = last.max(s.number + 1);
+            if let Some((s, session)) = first {
+                let backend = Some(session.read_with(cx, |s, _| s.backend.clone()));
+                let read = cx
+                    .background_spawn(async move {
+                        let (backend, id) = (backend?, s.id.clone()?);
+                        backend.load_session(&LocalHost, &s.folder, &id).ok()
+                    })
+                    .await;
+                session.update(cx, |s, cx| match read {
+                    Some(chat) => s.take_chat(chat, cx),
+                    None => {
+                        s.loading_chat = false;
+                        cx.notify();
+                    }
+                });
+            }
+            for (place, s) in order {
+                let (backends, fallback) = (backends.clone(), fallback.clone());
+                let loaded = cx
+                    .background_spawn(async move {
+                        if !s.folder.is_dir() {
+                            return None;
+                        }
+                        let backend = backends.iter().find(|b| b.id() == s.backend).cloned().unwrap_or_else(|| fallback.clone());
+                        let chat = match &s.id {
+                            Some(id) => Some(backend.load_session(&LocalHost, &s.folder, id).ok()?),
+                            None => None,
+                        };
+                        Some((s, backend, chat))
+                    })
+                    .await;
+                let Some((s, backend, chat)) = loaded else { continue };
+                let at = placed.iter().filter(|p| **p < place).count();
+                placed.push(place);
+                let gone = this
+                    .update_in(cx, |shell, window, cx| {
+                        let host: Arc<dyn Host> = Arc::new(LocalHost);
+                        let mut session = match chat {
+                            Some(chat) => AgentSession::resumed(host.clone(), backend, s.folder.clone(), chat, false),
+                            None => AgentSession::new(host.clone(), backend, s.folder.clone()),
+                        };
+                        session.dormant = true;
+                        session.writes_anywhere = s.writes_anywhere;
+                        session.writable = s.writable.clone();
+                        let next = shell.next;
+                        shell.next = s.number.max(1);
+                        let ix = shell.insert_session(host, s.folder, session, None, None, at, window, cx);
+                        shell.next = next.max(s.number + 1);
+                        if Some(s.number) == shown_number {
+                            shell.activate(ix, window, cx);
+                        }
+                        cx.notify();
+                    })
+                    .is_err();
+                if gone {
+                    return;
                 }
-                shell.next = last.max(shell.next);
+            }
+            let _ = this.update_in(cx, |shell, window, cx| {
                 shell.restoring = false;
-                if let Some(ix) = shown.and_then(|n| shell.tabs.iter().position(|t| t.number == n)) {
-                    shell.activate(ix, window, cx);
+                if shell.tabs.is_empty() || shell.active >= shell.tabs.len() {
+                    shell.active = 0;
                 }
                 shell.handle_start(start, window, cx);
                 shell.save_open(cx);
@@ -995,6 +1051,24 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let ix = self.insert_session(host, root, session, worktree, wait_for, self.tabs.len(), window, cx);
+        self.activate(ix, window, cx);
+        self.save_open(cx);
+    }
+
+    /// Add a session's tab at `at` (in the list), without showing it; its index.
+    #[allow(clippy::too_many_arguments)]
+    fn insert_session(
+        &mut self,
+        host: Arc<dyn Host>,
+        root: PathBuf,
+        session: AgentSession,
+        worktree: Option<String>,
+        wait_for: Option<u32>,
+        at: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> usize {
         if !host.is_remote() {
             let settings = cx.global::<AppSettings>().0.clone();
             settings.borrow_mut().add_recent(&root);
@@ -1041,9 +1115,12 @@ impl Shell {
         self.next += 1;
         self.subs.insert(ws.entity_id(), subs);
         let row = Row::of(ws.read(cx), cx);
-        self.tabs.push(Tab { number, ws, row });
-        self.activate(self.tabs.len() - 1, window, cx);
-        self.save_open(cx);
+        let at = at.min(self.tabs.len());
+        self.tabs.insert(at, Tab { number, ws, row });
+        if at <= self.active && self.tabs.len() > 1 {
+            self.active += 1;
+        }
+        at
     }
 
     pub fn activate(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
@@ -1058,17 +1135,21 @@ impl Shell {
         self.browser = None;
         self._browser_sub = None;
         let ws = self.tabs[ix].ws.clone();
+        crate::perf::switch_begin("session");
         ws.update(cx, |w, cx| {
             w.session.update(cx, |s, cx| {
                 s.unseen = false;
                 // Reopened from the last run with its Terminal showing: start it now.
                 s.wake(cx);
             });
+            crate::perf::switch_step("woken");
             w.focus_main(window, cx);
         });
+        crate::perf::switch_step("focused");
         // Seen now: its row loses the mark.
         self.refresh_row(&ws, cx);
         self.save_open(cx);
+        crate::perf::switch_step("saved");
         let title = format!("{} - Keleuo", self.name(ix, cx));
         window.set_window_title(&title);
         self.attend(window, cx);
@@ -1285,6 +1366,20 @@ impl Shell {
                     _ => (Arc::new(LocalHost) as Arc<dyn Host>, PathBuf::from(arg)),
                 };
                 let b = crate::backends::backend(None, cx);
+                self.new_session_in(host, root, b, window, cx);
+                "ok".into()
+            }
+            "browse-off" => {
+                // Tests: close the New session screen (the session under it shows).
+                self.close_browser(window, cx);
+                "ok".into()
+            }
+            "new-agent" => {
+                // Tests: `new-agent <backend id>`: a session on that agent, in the shown folder.
+                let Some((host, root)) = self.active_workspace().map(|w| (w.read(cx).host(), w.read(cx).root().to_path_buf())) else {
+                    return Some("no session".into());
+                };
+                let b = crate::backends::backend(Some(arg), cx);
                 self.new_session_in(host, root, b, window, cx);
                 "ok".into()
             }
@@ -2269,7 +2364,10 @@ impl Render for Shell {
         let main = match (&self.settings, &self.browser) {
             (Some((page, _)), _) => page.clone().into_any_element(),
             (None, Some(b)) => b.clone().into_any_element(),
-            (None, None) => self.active_workspace().map(|w| w.into_any_element()).unwrap_or_else(|| div().into_any_element()),
+            (None, None) => match self.active_workspace() {
+                Some(w) => w.into_any_element(),
+                None => div().into_any_element(),
+            },
         };
         let list = if self.tabs.is_empty() {
             None
@@ -2481,4 +2579,38 @@ pub fn open_settings(cx: &mut App) {
             let _ = shell.update(cx, |s, cx| s.show_settings(window, cx));
         });
     });
+}
+
+/// What shows while a conversation is being read: a few message shapes, pulsing.
+pub fn loading_skeleton(cx: &App) -> AnyElement {
+    let shade = cx.theme().muted_foreground.opacity(0.14);
+    let bar = |w: f32, h: f32| div().w(relative(w)).h(px(h)).rounded(px(6.)).bg(shade);
+    div()
+        .size_full()
+        .flex()
+        .justify_center()
+        .child(
+            div()
+                .w_full()
+                .max_w(px(760.))
+                .px_6()
+                .pt_6()
+                .flex()
+                .flex_col()
+                .gap_3()
+                .child(div().flex().justify_end().child(bar(0.4, 34.)))
+                .child(bar(0.92, 14.))
+                .child(bar(0.86, 14.))
+                .child(bar(0.6, 14.))
+                .child(div().h(px(10.)))
+                .child(div().flex().justify_end().child(bar(0.3, 34.)))
+                .child(bar(0.9, 14.))
+                .child(bar(0.74, 14.))
+                .with_animation(
+                    "restoring",
+                    Animation::new(std::time::Duration::from_millis(1100)).repeat().with_easing(pulsating_between(0.45, 1.0)),
+                    |d, t| d.opacity(t),
+                ),
+        )
+        .into_any_element()
 }

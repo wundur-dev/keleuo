@@ -49,6 +49,11 @@ icon_assets!(
         GitBranch,
         GitFork,
         CornerDownLeft,
+        // Paste in the Files menu, the message box's 🎤, Settings > Tools, Retry.
+        Clipboard,
+        Mic,
+        Toolbox,
+        Redo,
     ]
 );
 

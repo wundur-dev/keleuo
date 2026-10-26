@@ -99,6 +99,12 @@ pub enum Event {
     },
     /// A quiet note (warnings the agent printed).
     Notice(String),
+    /// The agent is not signed in (or its sign-in ran out), as it says in its own terms (a
+    /// code, never its words, which may be in any language).
+    SignedOut,
+    /// The account's usage limit: `reached` (messages are refused until `resets_at`, Unix
+    /// time) or not any more.
+    Limit { reached: bool, resets_at: Option<u64> },
     /// Spend worked out from token counts and published prices (the agent reported none).
     CostEstimate { usd: f64 },
     /// Images the person sent with their last message (stored files).
@@ -367,6 +373,16 @@ pub trait Backend: Send + Sync {
     /// folder, or a file (with its siblings sharing the name, for writes renamed into place).
     fn state_paths(&self) -> Vec<std::path::PathBuf> {
         Vec::new()
+    }
+
+    /// The agent's own sign-in, run in a terminal (it may open a browser, or ask for a code).
+    fn sign_in(&self) -> Option<crate::host::ProgramSpec> {
+        None
+    }
+
+    /// Whether the agent is signed in, by its own status command (`None`: it cannot say).
+    fn signed_in(&self, _host: &dyn Host) -> Option<bool> {
+        None
     }
 
     /// Skills and similar files relevant to `project`.
