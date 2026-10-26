@@ -2324,7 +2324,12 @@ impl Render for Shell {
         let main = match (&self.settings, &self.browser) {
             (Some((page, _)), _) => page.clone().into_any_element(),
             (None, Some(b)) => b.clone().into_any_element(),
-            (None, None) => self.active_workspace().map(|w| w.into_any_element()).unwrap_or_else(|| div().into_any_element()),
+            (None, None) => match self.active_workspace() {
+                Some(w) => w.into_any_element(),
+                // The last run's sessions are being read: a chat's shape, pulsing, in its place.
+                None if self.restoring => loading_skeleton(cx),
+                None => div().into_any_element(),
+            },
         };
         let list = if self.tabs.is_empty() {
             None
@@ -2536,4 +2541,38 @@ pub fn open_settings(cx: &mut App) {
             let _ = shell.update(cx, |s, cx| s.show_settings(window, cx));
         });
     });
+}
+
+/// What shows while the last run's sessions are being read: a few message shapes, pulsing.
+fn loading_skeleton(cx: &App) -> AnyElement {
+    let shade = cx.theme().muted_foreground.opacity(0.14);
+    let bar = |w: f32, h: f32| div().w(relative(w)).h(px(h)).rounded(px(6.)).bg(shade);
+    div()
+        .size_full()
+        .flex()
+        .justify_center()
+        .child(
+            div()
+                .w_full()
+                .max_w(px(760.))
+                .px_6()
+                .pt_6()
+                .flex()
+                .flex_col()
+                .gap_3()
+                .child(div().flex().justify_end().child(bar(0.4, 34.)))
+                .child(bar(0.92, 14.))
+                .child(bar(0.86, 14.))
+                .child(bar(0.6, 14.))
+                .child(div().h(px(10.)))
+                .child(div().flex().justify_end().child(bar(0.3, 34.)))
+                .child(bar(0.9, 14.))
+                .child(bar(0.74, 14.))
+                .with_animation(
+                    "restoring",
+                    Animation::new(std::time::Duration::from_millis(1100)).repeat().with_easing(pulsating_between(0.45, 1.0)),
+                    |d, t| d.opacity(t),
+                ),
+        )
+        .into_any_element()
 }

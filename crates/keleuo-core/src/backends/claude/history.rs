@@ -341,24 +341,6 @@ struct LightMessage {
     usage: Option<Value>,
 }
 
-/// How many of the person's last prompts (and what followed each) a session opens with; the
-/// rest shows as [`Item::Earlier`] placeholders, read when scrolled to.
-const OPEN_WITH: usize = 30;
-
-/// Whether `v` is a prompt the person wrote (not a tool's result, a note or a summary).
-fn is_prompt(v: &Value) -> bool {
-    v.get("type").and_then(Value::as_str) == Some("user")
-        && v.get("isSidechain").and_then(Value::as_bool) != Some(true)
-        && v.get("isMeta").and_then(Value::as_bool) != Some(true)
-        && v.get("isCompactSummary").and_then(Value::as_bool) != Some(true)
-        && !v
-            .get("message")
-            .and_then(|m| m.get("content"))
-            .and_then(Value::as_array)
-            .is_some_and(|b| b.iter().any(|b| b.get("type").and_then(Value::as_str) == Some("tool_result")))
-        && user_text(v).is_some()
-}
-
 /// What reading a session file up to `upto` gave (the head: stretches, dividers, counts,
 /// cost), kept so the next opening reads only what came after (session files only grow).
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -423,38 +405,8 @@ fn last_compaction(host: &dyn Host, path: &Path, len: u64) -> std::io::Result<u6
     }
 }
 
-/// At most this much of the file's end opens as items (long tool outputs make few prompts a
-/// lot of file); more when the last prompt starts further back.
-const OPEN_BYTES: u64 = 8 << 20;
-
-/// Where the session opens: the start of the person's prompt `OPEN_WITH` from the end, or the
-/// first one in the last `OPEN_BYTES`, whichever is later (never before `live_from`, always
-/// with the last prompt); looked for from the end.
-fn open_from(host: &dyn Host, path: &Path, len: u64, live_from: u64) -> std::io::Result<u64> {
-    let mut window = OPEN_BYTES;
-    loop {
-        let from = len.saturating_sub(window).max(live_from);
-        let mut prompts: Vec<u64> = Vec::new();
-        host.for_each_line(path, from, None, &mut |offset, line| {
-            let head = &line[..line.find("\"message\":").unwrap_or(line.len())];
-            if head.contains("\"type\":\"user\"") && !line.contains("\"tool_result\"") && serde_json::from_str::<Value>(line).is_ok_and(|v| is_prompt(&v)) {
-                prompts.push(offset);
-            }
-            true
-        })?;
-        if !prompts.is_empty() {
-            return Ok(prompts[prompts.len().saturating_sub(OPEN_WITH)]);
-        }
-        if from == live_from {
-            return Ok(live_from);
-        }
-        window *= 4;
-    }
-}
-
-/// Rebuild a session's chat reading its file as a stream, never whole. Only its last
-/// `OPEN_WITH` prompts and what followed them become items now; before them, each stretch up
-/// to a compaction, and the part of the live context before those prompts, becomes an
+/// Rebuild a session's chat reading its file as a stream, never whole. Only the live context
+/// (after the last compaction) becomes items now; each stretch before a compaction becomes an
 /// [`Item::Earlier`] placeholder (read by [`load_segment`] when it is scrolled to), each
 /// compaction an [`Item::Compacted`] divider with the summary. The counts and the cost come
 /// from the whole file: what was read before is kept (see [`Index`]), so a session opened again
@@ -478,7 +430,8 @@ pub fn load_streaming(host: &dyn Host, path: &Path, cwd: &str) -> std::io::Resul
         }
         None => last_compaction(host, path, len)?,
     };
-    let tail_from = open_from(host, path, len, live_from)?;
+    // The items are the live context's.
+    let tail_from = live_from;
     // Used when it reaches no further than where the items start.
     let mut ix = known.filter(|i| i.upto <= tail_from).unwrap_or_default();
     let mut tally = Tally::resume(ix.last_message.take());
@@ -1304,15 +1257,19 @@ mod tests {
     }
 
     #[test]
-    fn a_long_session_opens_on_its_last_prompts_and_again_from_what_it_kept() {
+    fn a_session_opened_again_reads_only_what_came_after_and_makes_the_same_chat() {
         use crate::conversation::Item;
         let dir = std::env::temp_dir().join(format!("wb-open-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("open-test.jsonl");
         let user = |t: &str| format!("{{\"type\":\"user\",\"sessionId\":\"s\",\"message\":{{\"role\":\"user\",\"content\":\"{t}\"}}}}");
         let said = |id: &str, t: &str| format!("{{\"type\":\"assistant\",\"message\":{{\"id\":\"{id}\",\"model\":\"claude-haiku-4-5\",\"role\":\"assistant\",\"stop_reason\":\"end_turn\",\"content\":[{{\"type\":\"text\",\"text\":\"{t}\"}}],\"usage\":{{\"input_tokens\":1000,\"output_tokens\":10}}}}}}");
+        let boundary = "{\"type\":\"system\",\"subtype\":\"compact_boundary\",\"content\":\"Conversation compacted\",\"compactMetadata\":{\"trigger\":\"auto\",\"preTokens\":150000}}".to_string();
         let turns = |range: std::ops::Range<usize>| range.flat_map(|n| [user(&format!("ask {n}")), said(&format!("m{n}"), &format!("answer {n}"))]).collect::<Vec<_>>();
-        std::fs::write(&path, turns(0..35).join("\n") + "\n").unwrap();
+        let mut lines = turns(0..10);
+        lines.push(boundary);
+        lines.extend(turns(10..15));
+        std::fs::write(&path, lines.join("\n") + "\n").unwrap();
         let fresh = |path: &Path| {
             if let Some(p) = index_path(&crate::host::LocalHost, path) {
                 let _ = std::fs::remove_file(p);
@@ -1320,22 +1277,22 @@ mod tests {
             load_streaming(&crate::host::LocalHost, path, "/p").unwrap()
         };
         let first = fresh(&path);
-        // The 5 prompts before the last 30, and their answers, wait as one earlier part.
-        assert!(matches!(&first.items[0], Item::Earlier { messages: 10, .. }), "{:?}", first.items[0]);
-        assert!(matches!(&first.items[1], Item::User(t) if t == "ask 5"));
-        assert_eq!(first.items.len(), 1 + 60);
+        // The stretch before the compaction waits; the live context is all there.
+        assert!(matches!(&first.items[0], Item::Earlier { messages: 20, .. }), "{:?}", first.items[0]);
+        assert!(matches!(&first.items[2], Item::User(t) if t == "ask 10"));
+        assert_eq!(first.items.len(), 2 + 10);
         // Opened again: from what was kept, the same.
         let again = load_streaming(&crate::host::LocalHost, &path, "/p").unwrap();
-        assert_eq!((again.items.len(), again.total_cost_usd), (first.items.len(), first.total_cost_usd));
+        assert_eq!(again.items, first.items);
+        assert!((again.total_cost_usd - first.total_cost_usd).abs() < 1e-9);
         // The file grows: what was kept and what came after make what a fresh read makes.
         let mut text = std::fs::read_to_string(&path).unwrap();
-        text.push_str(&(turns(35..40).join("\n") + "\n"));
+        text.push_str(&(turns(15..20).join("\n") + "\n"));
         std::fs::write(&path, text).unwrap();
         let grown = load_streaming(&crate::host::LocalHost, &path, "/p").unwrap();
         let reread = fresh(&path);
         assert_eq!(grown.items, reread.items);
         assert!((grown.total_cost_usd - reread.total_cost_usd).abs() < 1e-9);
-        assert!(matches!(&grown.items[0], Item::Earlier { messages: 20, .. }));
         if let Some(p) = index_path(&crate::host::LocalHost, &path) {
             let _ = std::fs::remove_file(p);
         }
