@@ -79,6 +79,9 @@ impl Default for Notify {
 pub struct Prefs {
     /// Open again the sessions that were open when Keleuo quit.
     pub reopen_sessions: bool,
+    /// A session's agent (its Claude Code process) ends after this many minutes unused; its
+    /// next message starts it again. 0: never.
+    pub idle_minutes: u32,
     /// Light Markdown highlighting in the message box.
     pub markdown_marks: bool,
     /// Misspelled words in the message box are underlined as they are typed.
@@ -122,6 +125,7 @@ impl Default for Prefs {
             reopen_sessions: true,
             markdown_marks: true,
             spell_check: true,
+            idle_minutes: 15,
             inset_text: true,
             paste_pills: true,
             turn_card: true,

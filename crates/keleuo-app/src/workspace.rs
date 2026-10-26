@@ -1428,6 +1428,11 @@ impl Workspace {
                 // Tests: what Retry does (the person's last message sent again).
                 self.session.update(cx, |s, cx| s.send_again(cx));
             }
+            "agent-running" => {
+                // Tests: whether the session's agent process runs.
+                let s = self.session.read(cx);
+                return format!("running={} dormant={} busy={}", s.agent_running(), s.dormant, s.chat.busy);
+            }
             "chat-head" => {
                 // Tests: how many items, and the first few, each as its start.
                 let chat = &self.session.read(cx).chat;

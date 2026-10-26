@@ -239,6 +239,8 @@ pub struct AgentSession {
     /// The person's last message is set to go again at this time (Unix), when the usage
     /// limit resets.
     pub scheduled_retry: Option<u64>,
+    /// Counts uses of the session: an idle timer set before the last one does nothing.
+    idle_gen: u64,
     /// Why the interface is starting again, while it does (for the composer).
     pub restarting: Option<String>,
     /// The current turn (where it starts in the chat) and the git working tree when it started,
@@ -345,6 +347,7 @@ impl AgentSession {
             sign_in_watching: false,
             loading_chat: false,
             scheduled_retry: None,
+            idle_gen: 0,
             restarting: None,
             git_turn: None,
             hybrid: false,
@@ -1490,6 +1493,7 @@ impl AgentSession {
                 self.chat.status = None;
                 self.unseen = true;
                 if was_busy {
+                    self.idle_later(cx);
                     cx.emit(SessionEvent::TurnEnded);
                     self.summarize_turn(cx);
                 }
@@ -1676,6 +1680,7 @@ impl AgentSession {
                 self.watch_turn(cx);
                 if applied.turn_ended {
                     self.find_command_changes(cx);
+                    self.idle_later(cx);
                     cx.emit(SessionEvent::TurnEnded);
                     self.summarize_turn(cx);
                 }
@@ -1806,6 +1811,8 @@ impl AgentSession {
     /// agent works it waits its turn (see [`keleuo_core::outbox`]), as it does behind others
     /// waiting; it shows in the chat when it goes.
     pub fn send_with(&mut self, text: &str, images: Vec<PathBuf>, cx: &mut Context<Self>) {
+        // In use: an idle timer set before does nothing.
+        self.idle_gen += 1;
         self.outbox_paused = false;
         if (self.chat.busy || !self.outbox.is_empty())
             && !(keleuo_core::paste::without_markers(text).trim().is_empty() && images.is_empty())
@@ -2073,6 +2080,39 @@ impl AgentSession {
     /// out of date).
     fn moved_on(&self, len: u64) -> bool {
         self.chat.session_id.as_deref().is_none_or(|id| self.backend.session_moved_on(self.host.as_ref(), &self.cwd, id, len))
+    }
+
+    /// Set the idle timer: unused for the minutes in Settings, the agent's process ends (the
+    /// conversation stays; the next message starts it again). Any use since sets it again.
+    fn idle_later(&mut self, cx: &mut Context<Self>) {
+        self.idle_gen += 1;
+        let minutes = crate::prefs(cx).idle_minutes;
+        if minutes == 0 {
+            return;
+        }
+        let generation = self.idle_gen;
+        cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            cx.background_executor().timer(std::time::Duration::from_secs(u64::from(minutes) * 60)).await;
+            let _ = this.update(cx, |s, cx| {
+                if s.idle_gen == generation && s.can_rest() {
+                    s.end_agent();
+                    s.dormant = true;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Whether the agent may end for being idle: running, between turns, in Chat, with
+    /// nothing waiting on the person or to be sent.
+    fn can_rest(&self) -> bool {
+        self.agent.running() && !self.chat.busy && self.view == View::Chat && self.asking.is_none() && self.outbox.is_empty()
+    }
+
+    /// Whether Chat's agent process runs.
+    pub fn agent_running(&self) -> bool {
+        self.agent.running()
     }
 
     /// End Chat's headless agent.
