@@ -78,8 +78,6 @@ pub struct ChatPanel {
     pieces: rows::PieceCache,
     /// Earlier parts being read (by their start in the session file).
     loading: HashSet<u64>,
-    /// Every earlier part of the chat is read in (see `read_ahead`).
-    backfilled: bool,
     /// Images to send with the next message.
     attachments: Vec<PathBuf>,
     /// Long pastes in the message box, shown there as tokens (`[Pasted text #1 · …]`, see
@@ -300,7 +298,6 @@ impl ChatPanel {
             synced_items: 0,
             pieces: Default::default(),
             loading: HashSet::new(),
-            backfilled: false,
             attachments: Vec::new(),
             pastes: Vec::new(),
             model_input: None,
@@ -434,24 +431,23 @@ impl ChatPanel {
         self.sync_latest(from, cx);
     }
 
-    /// Fill in the earlier parts of the shown chat in the background, the nearest above the
-    /// view first, one after another, so scrolling up never stops at one (a part comes into
-    /// view, or is read ahead, as it always was). Only the chat on screen does it.
+    /// Read the nearest earlier part above the view before it is reached: once the view is
+    /// within `READ_AHEAD` rows of it (one part at a time, as when one comes into view).
     fn read_ahead(&mut self, cx: &mut Context<Self>) {
-        if self.agent.is_some() || self.backfilled || !self.loading.is_empty() || self.rows.is_empty() {
+        const READ_AHEAD: usize = 200;
+        if self.agent.is_some() || !self.loading.is_empty() || self.rows.is_empty() {
             return;
         }
         let top = self.list.logical_scroll_top().item_ix.min(self.rows.len() - 1);
-        let items = &self.session.read(cx).chat.items;
-        let earlier = |row: usize| match items.get(self.rows[row].item) {
-            Some(Item::Earlier { from, to, .. }) => Some((*from, *to)),
-            _ => None,
+        let near = {
+            let items = &self.session.read(cx).chat.items;
+            (top.saturating_sub(READ_AHEAD)..=top).rev().find_map(|row| match items.get(self.rows[row].item) {
+                Some(Item::Earlier { from, to, .. }) => Some((*from, *to)),
+                _ => None,
+            })
         };
-        // Above the view first, nearest first; then any below it (a part the view went past).
-        let next = (0..=top).rev().find_map(earlier).or_else(|| (top..self.rows.len()).find_map(earlier));
-        match next {
-            Some((from, to)) => self.load_earlier(from, to, cx),
-            None => self.backfilled = true,
+        if let Some((from, to)) = near {
+            self.load_earlier(from, to, cx);
         }
     }
 
