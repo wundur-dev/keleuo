@@ -321,6 +321,26 @@ fn is_boundary(v: &Value) -> bool {
     v.get("type").and_then(Value::as_str) == Some("system") && v.get("subtype").and_then(Value::as_str) == Some("compact_boundary")
 }
 
+/// The fields of a session file's line that counts and cost use (its message's contents are
+/// skipped unread).
+#[derive(serde::Deserialize)]
+struct Light {
+    #[serde(rename = "type")]
+    ty: Option<String>,
+    #[serde(rename = "isSidechain")]
+    sidechain: Option<bool>,
+    #[serde(rename = "sessionId")]
+    session_id: Option<String>,
+    message: Option<LightMessage>,
+}
+
+#[derive(serde::Deserialize)]
+struct LightMessage {
+    id: Option<String>,
+    model: Option<String>,
+    usage: Option<Value>,
+}
+
 /// A stretch of the file before a compaction, and the compaction that ended it.
 struct Segment {
     from: u64,
@@ -350,7 +370,53 @@ pub fn load_streaming(host: &dyn Host, path: &Path, cwd: &str) -> std::io::Resul
     let mut segments: Vec<Segment> = Vec::new();
     let mut dividers: Vec<Item> = Vec::new();
     let (mut seg_from, mut seg_messages) = (0u64, 0usize);
+    // Where the last compaction starts: the chat is built from there only (what comes before
+    // is replaced at each compaction anyway). A quick look for the words first; a line that
+    // only quotes them is told apart when it is read below.
+    // It is near the end: looked for in the last 32 MB, then four times as much, and so on.
+    let len = host.len(path)?;
+    let mut window = 32u64 << 20;
+    let live_from = loop {
+        let from = len.saturating_sub(window);
+        let mut found = None;
+        host.for_each_line(path, from, None, &mut |offset, line| {
+            if line.contains("\"compact_boundary\"") && serde_json::from_str::<Value>(line).is_ok_and(|v| is_boundary(&v)) {
+                found = Some(offset);
+            }
+            true
+        })?;
+        if found.is_some() || from == 0 {
+            break found.unwrap_or(0);
+        }
+        window *= 4;
+    };
     host.for_each_line(path, 0, None, &mut |offset, line| {
+        // Before the last compaction only the counts and the cost are needed: the few fields
+        // they use are read, not the messages (most of a long session's file).
+        if offset < live_from && !line.contains("compact_boundary") && !line.contains("isCompactSummary") {
+            // The person's lines (with the tools' output, the bulk of the file) say what they
+            // are before their message: counted from that, not read at all.
+            let head = &line[..line.find("\"message\":").unwrap_or(line.len())];
+            if head.contains("\"type\":\"user\"") {
+                if !head.contains("\"isSidechain\":true") {
+                    seg_messages += 1;
+                }
+                return true;
+            }
+            let Ok(l) = serde_json::from_str::<Light>(line) else { return true };
+            if session_id.is_none() {
+                session_id = l.session_id;
+            }
+            if l.sidechain != Some(true) {
+                if matches!(l.ty.as_deref(), Some("user" | "assistant")) {
+                    seg_messages += 1;
+                }
+                if let (Some("assistant"), Some(m)) = (l.ty.as_deref(), l.message) {
+                    cost += tally.add(&serde_json::json!({"type": "assistant", "message": {"id": m.id, "model": m.model, "usage": m.usage}}));
+                }
+            }
+            return true;
+        }
         let Ok(v) = serde_json::from_str::<Value>(line) else { return true };
         if session_id.is_none() {
             session_id = v.get("sessionId").and_then(Value::as_str).map(str::to_string);
@@ -381,10 +447,14 @@ pub fn load_streaming(host: &dyn Host, path: &Path, cwd: &str) -> std::io::Resul
         if !sidechain && matches!(v.get("type").and_then(Value::as_str), Some("user" | "assistant")) {
             seg_messages += 1;
         }
-        chat.apply_all(line_events(&v, &mut mapper));
         if let Some(end) = turn_end(&v) {
             last_turn = Some(end.clone());
-            chat.apply(end);
+        }
+        if offset >= live_from {
+            chat.apply_all(line_events(&v, &mut mapper));
+            if let Some(end) = turn_end(&v) {
+                chat.apply(end);
+            }
         }
         if !sidechain {
             cost += tally.add(&v);
