@@ -431,26 +431,6 @@ impl ChatPanel {
         self.sync_latest(from, cx);
     }
 
-    /// Read the nearest earlier part above the view before it is reached: once the view is
-    /// within `READ_AHEAD` rows of it (one part at a time, as when one comes into view).
-    fn read_ahead(&mut self, cx: &mut Context<Self>) {
-        const READ_AHEAD: usize = 200;
-        if self.agent.is_some() || !self.loading.is_empty() || self.rows.is_empty() {
-            return;
-        }
-        let top = self.list.logical_scroll_top().item_ix.min(self.rows.len() - 1);
-        let near = {
-            let items = &self.session.read(cx).chat.items;
-            (top.saturating_sub(READ_AHEAD)..=top).rev().find_map(|row| match items.get(self.rows[row].item) {
-                Some(Item::Earlier { from, to, .. }) => Some((*from, *to)),
-                _ => None,
-            })
-        };
-        if let Some((from, to)) = near {
-            self.load_earlier(from, to, cx);
-        }
-    }
-
     /// An earlier part came into view: read it off the UI thread, then put its items in its
     /// place, keeping the view where it was (on the part's last item).
     fn load_earlier(&mut self, from: u64, to: u64, cx: &mut Context<Self>) {
@@ -1079,7 +1059,6 @@ impl Render for ChatPanel {
         if self.item_count(cx) != self.synced_items {
             self.sync_rows(cx);
         }
-        self.read_ahead(cx);
         let empty = self.list_len == 0;
         let _ = (fg, red, user_bg);
         let terminal = {
