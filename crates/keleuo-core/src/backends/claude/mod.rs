@@ -60,6 +60,19 @@ impl Backend for ClaudeBackend {
         ID
     }
 
+    /// `claude auth login`: it opens the browser, and may ask for the code shown there.
+    fn sign_in(&self) -> Option<crate::host::ProgramSpec> {
+        Some(crate::host::ProgramSpec { program: self.program_name(), args: vec!["auth".into(), "login".into()], ..Default::default() })
+    }
+
+    /// `claude auth status`, which answers in JSON (`loggedIn`).
+    fn signed_in(&self, host: &dyn Host) -> Option<bool> {
+        let cwd = host.home_dir().unwrap_or_else(|| std::path::PathBuf::from("/"));
+        let spec = crate::host::ProgramSpec { program: self.program_name(), args: vec!["auth".into(), "status".into()], cwd, ..Default::default() };
+        let out = host.program_command(&spec).to_command().stdin(std::process::Stdio::null()).output().ok()?;
+        serde_json::from_slice::<serde_json::Value>(&out.stdout).ok()?.get("loggedIn")?.as_bool()
+    }
+
     /// `~/.claude` (sessions, settings, todos) and `~/.claude.json` (its state, written beside
     /// and renamed into place).
     fn state_paths(&self) -> Vec<PathBuf> {

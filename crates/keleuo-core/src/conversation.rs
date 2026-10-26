@@ -119,6 +119,19 @@ pub enum Item {
     /// A run of one of the person's tools (see [`crate::cli_tools`]) the agent asked for:
     /// `command` as it runs, `state` whether the person allowed it.
     ToolRun { id: u64, tool: String, command: String, state: SendState },
+    /// The agent is not signed in: the card offering its own sign-in, and where that is.
+    SignIn(SignIn),
+}
+
+/// Where signing the agent in is (see [`Item::SignIn`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SignIn {
+    /// Not signed in; nothing done yet.
+    Needed,
+    /// The sign-in runs in a terminal; Keleuo watches for it to finish.
+    Waiting,
+    /// Signed in: the message can be sent again.
+    Done,
 }
 
 /// Where a message to another session is.
@@ -988,6 +1001,16 @@ impl Conversation {
                     self.items.push(Item::Notice(one_line(&line, 300)));
                 }
             }
+            // One card at a time: a second refusal while one waits adds nothing.
+            Event::SignedOut => {
+                let open = self.items.iter().rev().find_map(|i| match i {
+                    Item::SignIn(s) => Some(*s != SignIn::Done),
+                    _ => None,
+                });
+                if open != Some(true) {
+                    self.items.push(Item::SignIn(SignIn::Needed));
+                }
+            }
         }
         applied
     }
@@ -1064,6 +1087,8 @@ pub fn to_markdown(items: &[Item], agent: &str) -> String {
             Item::Earlier { messages, .. } => format!("*[{} earlier not loaded]*", plural(*messages, "message")),
             Item::Outgoing { to, text, .. } => format!("**To {to}:** {}", text.trim()),
             Item::ToolRun { tool, command, .. } => format!("**Tool {tool}:** `{command}`"),
+            // Keleuo's own card, not part of the conversation.
+            Item::SignIn(_) => continue,
             Item::Compacted { trigger, tokens, .. } => {
                 let mut facts: Vec<String> = trigger.iter().cloned().collect();
                 if let Some(t) = tokens {

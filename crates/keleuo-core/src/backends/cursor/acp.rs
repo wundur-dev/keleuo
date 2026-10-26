@@ -92,6 +92,9 @@ impl Agent for CursorAcpAgent {
         // The handshake waits on the agent: off the window's thread.
         std::thread::spawn(move || {
             if let Err(e) = open_session(&conn, &state, &options, host.as_ref(), &sink2) {
+                if acp::needs_sign_in(&e) {
+                    sink2(Message::Event(Event::SignedOut));
+                }
                 sink2(Message::Event(Event::TurnEnded {
                     error: Some(format!("Cursor could not open the session: {e}")),
                     cost_total_usd: None,
@@ -267,6 +270,8 @@ fn open_session(conn: &Connection, state: &Shared, options: &StartOptions, host:
         state.lock().unwrap().loading = false;
         match loaded {
             Ok(r) => opened = Some((id.clone(), r)),
+            // Not signed in: no new chat in its place (the chat goes on once signed in).
+            Err(e) if e.code == acp::AUTH_REQUIRED => return Err(e.into()),
             Err(e) => sink(Message::Event(Event::Notice(format!("Cursor could not continue this chat ({e}); a new one starts.")))),
         }
     }
@@ -374,6 +379,9 @@ fn prompt(state: &Shared, sink: &Sink, text: String, images: Vec<PathBuf>) {
         };
         let reply = conn.call("session/prompt", json!({"sessionId": session, "prompt": blocks}));
         let mut events = state.lock().unwrap().mapper.finish();
+        if reply.as_ref().err().is_some_and(|e| e.code == acp::AUTH_REQUIRED) {
+            events.push(Event::SignedOut);
+        }
         events.push(acp::map::turn_ended(&reply, &session));
         for e in events {
             sink(Message::Event(e));

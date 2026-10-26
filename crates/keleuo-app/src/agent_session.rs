@@ -751,6 +751,79 @@ impl AgentSession {
         cx.notify();
     }
 
+    /// Where the sign-in card is now (the last one).
+    fn set_sign_in(&mut self, state: keleuo_core::conversation::SignIn, cx: &mut Context<Self>) {
+        if let Some(keleuo_core::conversation::Item::SignIn(s)) =
+            self.chat.items.iter_mut().rev().find(|i| matches!(i, keleuo_core::conversation::Item::SignIn(_)))
+        {
+            *s = state;
+        }
+        self.chat.revision += 1;
+        cx.notify();
+    }
+
+    /// Start the agent's own sign-in: the command line to run in a terminal (the chat runs
+    /// it), while Keleuo asks the agent every few seconds whether it is signed in yet.
+    pub fn start_sign_in(&mut self, cx: &mut Context<Self>) -> Option<String> {
+        use keleuo_core::conversation::{Item, SignIn};
+        let spec = self.backend.sign_in()?;
+        let line = std::iter::once(&spec.program).chain(&spec.args).map(|w| keleuo_core::host::shell_quote(w)).collect::<Vec<_>>().join(" ");
+        // From the menu, before anything was refused: a card of its own to follow it on.
+        let open = self.chat.items.iter().rev().find_map(|i| match i {
+            Item::SignIn(s) => Some(*s != SignIn::Done),
+            _ => None,
+        });
+        if open != Some(true) {
+            self.chat.items.push(Item::SignIn(SignIn::Needed));
+        }
+        self.set_sign_in(SignIn::Waiting, cx);
+        self.watch_sign_in(cx);
+        Some(line)
+    }
+
+    /// Ask the agent whether it is signed in, now and then every few seconds for a quarter of an
+    /// hour while the card waits; once it is, the card says so and the agent starts afresh
+    /// with its next message (a running one keeps the sign-in it started with).
+    pub fn watch_sign_in(&mut self, cx: &mut Context<Self>) {
+        let (backend, host) = (self.backend.clone(), self.host.clone());
+        cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            for _ in 0..300 {
+                let (backend, host) = (backend.clone(), host.clone());
+                let signed = cx.background_spawn(async move { backend.signed_in(host.as_ref()) }).await;
+                let waiting = this
+                    .update(cx, |s, cx| {
+                        if signed == Some(true) {
+                            s.stop(cx);
+                            s.set_sign_in(keleuo_core::conversation::SignIn::Done, cx);
+                            return false;
+                        }
+                        s.chat.items.iter().rev().find_map(|i| match i {
+                            keleuo_core::conversation::Item::SignIn(st) => Some(*st == keleuo_core::conversation::SignIn::Waiting),
+                            _ => None,
+                        }) == Some(true)
+                    })
+                    .unwrap_or(false);
+                if !waiting {
+                    return;
+                }
+                cx.background_executor().timer(std::time::Duration::from_secs(3)).await;
+            }
+            let _ = this.update(cx, |s, cx| s.set_sign_in(keleuo_core::conversation::SignIn::Needed, cx));
+        })
+        .detach();
+    }
+
+    /// Send the person's last message again (after signing in).
+    pub fn send_again(&mut self, cx: &mut Context<Self>) {
+        let last = self.chat.items.iter().rev().find_map(|i| match i {
+            keleuo_core::conversation::Item::User(t) => Some(t.clone()),
+            _ => None,
+        });
+        if let Some(text) = last {
+            self.send(&text, cx);
+        }
+    }
+
     /// Whether it runs on another machine.
     pub fn host_is_remote(&self) -> bool {
         self.host.is_remote()

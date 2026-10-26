@@ -47,6 +47,19 @@ impl Backend for CursorBackend {
         ID
     }
 
+    /// `cursor-agent login`: it opens the browser.
+    fn sign_in(&self) -> Option<ProgramSpec> {
+        Some(ProgramSpec { program: "cursor-agent".into(), args: vec!["login".into()], ..Default::default() })
+    }
+
+    /// `cursor-agent status --format json` (`isAuthenticated`).
+    fn signed_in(&self, host: &dyn Host) -> Option<bool> {
+        let cwd = host.home_dir().unwrap_or_else(|| PathBuf::from("/"));
+        let spec = ProgramSpec { program: "cursor-agent".into(), args: vec!["status".into(), "--format".into(), "json".into()], cwd, ..Default::default() };
+        let out = host.program_command(&spec).to_command().stdin(Stdio::null()).output().ok()?;
+        serde_json::from_slice::<Value>(&out.stdout).ok()?.get("isAuthenticated")?.as_bool()
+    }
+
     /// `~/.cursor` (chats, settings) and its install folder (it updates itself).
     fn state_paths(&self) -> Vec<PathBuf> {
         dirs::home_dir().map(|h| vec![h.join(".cursor"), h.join(".local/share/cursor-agent")]).unwrap_or_default()

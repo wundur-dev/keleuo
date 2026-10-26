@@ -1288,6 +1288,15 @@ impl Shell {
                 self.new_session_in(host, root, b, window, cx);
                 "ok".into()
             }
+            "new-agent" => {
+                // Tests: `new-agent <backend id>`: a session on that agent, in the shown folder.
+                let Some((host, root)) = self.active_workspace().map(|w| (w.read(cx).host(), w.read(cx).root().to_path_buf())) else {
+                    return Some("no session".into());
+                };
+                let b = crate::backends::backend(Some(arg), cx);
+                self.new_session_in(host, root, b, window, cx);
+                "ok".into()
+            }
             "font-search" | "font-pick" => {
                 // Tests: `font-search app|chat|terminal [text]` opens a font's search in the
                 // shown Settings and types `text`; `font-pick <which> <family>` picks a Google

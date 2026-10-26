@@ -1424,6 +1424,11 @@ impl Workspace {
                 settings.borrow_mut().default_view = arg.to_string();
                 let _ = settings.borrow().save();
             }
+            "chat-items" => {
+                // Tests: the chat's last few items, each as its start.
+                let chat = &self.session.read(cx).chat;
+                return chat.items.iter().rev().take(6).rev().map(|i| format!("{i:?}").chars().take(90).collect::<String>()).collect::<Vec<_>>().join(" | ");
+            }
             "chat-last" => {
                 // The chat's last item: a preview or not, and the start of its text (tests).
                 let chat = &self.session.read(cx).chat;

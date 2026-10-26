@@ -57,6 +57,9 @@ pub enum Event {
         /// The tokens this message's request sent (input, cached or not): how full the
         /// context was. A turn's `result` adds up every request, which is no measure of that.
         context_tokens: Option<u64>,
+        /// Claude Code's code for a message it made up from an error (`authentication_failed`,
+        /// ...): the reason, in no language.
+        error: Option<String>,
     },
     /// The result of a tool call.
     ToolResult {
@@ -231,6 +234,7 @@ pub fn parse_value(v: &Value) -> Event {
                     .and_then(Value::as_str)
                     .map(str::to_string),
                 context_tokens: usage.map(|_| n("input_tokens") + n("cache_read_input_tokens") + n("cache_creation_input_tokens")),
+                error: v.get("error").and_then(Value::as_str).map(str::to_string),
             }
         }
         "user" => parse_user(v),
