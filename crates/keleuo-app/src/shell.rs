@@ -1135,17 +1135,21 @@ impl Shell {
         self.browser = None;
         self._browser_sub = None;
         let ws = self.tabs[ix].ws.clone();
+        crate::perf::switch_begin("session");
         ws.update(cx, |w, cx| {
             w.session.update(cx, |s, cx| {
                 s.unseen = false;
                 // Reopened from the last run with its Terminal showing: start it now.
                 s.wake(cx);
             });
+            crate::perf::switch_step("woken");
             w.focus_main(window, cx);
         });
+        crate::perf::switch_step("focused");
         // Seen now: its row loses the mark.
         self.refresh_row(&ws, cx);
         self.save_open(cx);
+        crate::perf::switch_step("saved");
         let title = format!("{} - Keleuo", self.name(ix, cx));
         window.set_window_title(&title);
         self.attend(window, cx);
