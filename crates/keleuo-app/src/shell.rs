@@ -1288,6 +1288,11 @@ impl Shell {
                 self.new_session_in(host, root, b, window, cx);
                 "ok".into()
             }
+            "browse-off" => {
+                // Tests: close the New session screen (the session under it shows).
+                self.close_browser(window, cx);
+                "ok".into()
+            }
             "new-agent" => {
                 // Tests: `new-agent <backend id>`: a session on that agent, in the shown folder.
                 let Some((host, root)) = self.active_workspace().map(|w| (w.read(cx).host(), w.read(cx).root().to_path_buf())) else {
