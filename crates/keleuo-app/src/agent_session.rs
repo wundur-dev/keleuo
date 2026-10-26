@@ -2022,11 +2022,11 @@ impl AgentSession {
             }
             self.view = view;
         } else if view == View::Terminal {
-            // Chat's agent is idle: it waits, in case Chat shows again before anything changes.
-            self.agent_parked_at = if self.agent.running() { self.session_len() } else { None };
-            if self.agent_parked_at.is_none() {
-                self.end_agent();
-            }
+            // Chat's agent ends: Claude Code opens a conversation in one process at a time, so
+            // the interface could not continue it while Chat's agent held it ("Session ID ...
+            // is already in use").
+            self.agent_parked_at = None;
+            self.end_agent();
             self.view = view;
             match self.parked.take() {
                 // Nothing new since the interface was hidden: it shows as it was.
@@ -2049,12 +2049,11 @@ impl AgentSession {
             self.park_timer(cx);
         } else {
             self.view = view;
-            // The interface waits, idle, in case Terminal shows again before anything changes.
+            // The interface ends, for the same reason: Chat's agent continues the conversation.
             if let Some(run) = self.terminal.take()
-                && !run.view.read(cx).exited
+                && let Some(pty) = run.view.read(cx).pty.clone()
             {
-                let pty = run.view.read(cx).pty.clone();
-                self.parked = Some(Parked { len: self.session_len(), ready: self.ready, run, pty });
+                crate::pty::end_for_certain(&pty);
             }
             self.following = None;
             self.ready = false;
@@ -2068,12 +2067,6 @@ impl AgentSession {
         }
         self.remember_view(cx);
         cx.notify();
-    }
-
-    /// The session file's length now.
-    fn session_len(&self) -> Option<u64> {
-        let id = self.chat.session_id.as_deref()?;
-        self.backend.session_len(self.host.as_ref(), &self.cwd, id)
     }
 
     /// Whether the conversation has a turn past `len` of its file (an idle agent from then is
