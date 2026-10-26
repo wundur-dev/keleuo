@@ -232,6 +232,8 @@ pub struct AgentSession {
     pasted_images: Vec<PathBuf>,
     /// Restart the interface when the turn ends (a new model).
     restart_after_turn: bool,
+    /// A watch for the agent's sign-in runs (see `watch_sign_in`).
+    sign_in_watching: bool,
     /// Why the interface is starting again, while it does (for the composer).
     pub restarting: Option<String>,
     /// The current turn (where it starts in the chat) and the git working tree when it started,
@@ -335,6 +337,7 @@ impl AgentSession {
             skip_images: 0,
             pasted_images: Vec::new(),
             restart_after_turn: false,
+            sign_in_watching: false,
             restarting: None,
             git_turn: None,
             hybrid: false,
@@ -781,34 +784,51 @@ impl AgentSession {
         Some(line)
     }
 
-    /// Ask the agent whether it is signed in, now and then every few seconds for a quarter of an
-    /// hour while the card waits; once it is, the card says so and the agent starts afresh
-    /// with its next message (a running one keeps the sign-in it started with).
+    /// While the sign-in card shows, ask the agent whether it is signed in (its status
+    /// command): every few seconds once its sign-in runs, less often while the card only waits,
+    /// for up to an hour. Signed in, however it was done, the card says so and the agent starts
+    /// afresh with its next message (a running one keeps the sign-in it started with).
     pub fn watch_sign_in(&mut self, cx: &mut Context<Self>) {
+        use keleuo_core::conversation::{Item, SignIn};
+        if self.sign_in_watching {
+            return;
+        }
+        self.sign_in_watching = true;
         let (backend, host) = (self.backend.clone(), self.host.clone());
         cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
-            for _ in 0..300 {
+            let until = std::time::Instant::now() + std::time::Duration::from_secs(3600);
+            while std::time::Instant::now() < until {
                 let (backend, host) = (backend.clone(), host.clone());
                 let signed = cx.background_spawn(async move { backend.signed_in(host.as_ref()) }).await;
-                let waiting = this
+                let card = this
                     .update(cx, |s, cx| {
-                        if signed == Some(true) {
-                            s.stop(cx);
-                            s.set_sign_in(keleuo_core::conversation::SignIn::Done, cx);
-                            return false;
-                        }
-                        s.chat.items.iter().rev().find_map(|i| match i {
-                            keleuo_core::conversation::Item::SignIn(st) => Some(*st == keleuo_core::conversation::SignIn::Waiting),
+                        let card = s.chat.items.iter().rev().find_map(|i| match i {
+                            Item::SignIn(st) => Some(*st),
                             _ => None,
-                        }) == Some(true)
+                        });
+                        if signed == Some(true) && card.is_some_and(|c| c != SignIn::Done) {
+                            s.stop(cx);
+                            s.set_sign_in(SignIn::Done, cx);
+                            return None;
+                        }
+                        card.filter(|c| *c != SignIn::Done)
                     })
-                    .unwrap_or(false);
-                if !waiting {
-                    return;
-                }
-                cx.background_executor().timer(std::time::Duration::from_secs(3)).await;
+                    .ok()
+                    .flatten();
+                let Some(card) = card else { break };
+                let pause = if card == SignIn::Waiting { 3 } else { 15 };
+                cx.background_executor().timer(std::time::Duration::from_secs(pause)).await;
             }
-            let _ = this.update(cx, |s, cx| s.set_sign_in(keleuo_core::conversation::SignIn::Needed, cx));
+            let _ = this.update(cx, |s, cx| {
+                s.sign_in_watching = false;
+                let waiting = s.chat.items.iter().rev().find_map(|i| match i {
+                    Item::SignIn(st) => Some(*st == SignIn::Waiting),
+                    _ => None,
+                });
+                if waiting == Some(true) {
+                    s.set_sign_in(SignIn::Needed, cx);
+                }
+            });
         })
         .detach();
     }
@@ -823,6 +843,7 @@ impl AgentSession {
                 let _ = this.update(cx, |s, cx| {
                     s.chat.apply(keleuo_core::agent::Event::SignedOut);
                     s.chat.revision += 1;
+                    s.watch_sign_in(cx);
                     cx.notify();
                 });
             }
@@ -1595,7 +1616,11 @@ impl AgentSession {
                     Event::ToolResult { id, output, .. } if self.confined => keleuo_core::sandbox::refused(output).map(|p| (id.clone(), p)),
                     _ => None,
                 };
+                let signed_out = matches!(event, Event::SignedOut);
                 let applied = self.chat.apply(event);
+                if signed_out {
+                    self.watch_sign_in(cx);
+                }
                 if let Some((id, path)) = refused {
                     let issue = self.sandbox_issue(path);
                     self.chat.apply(Event::ToolIssue { id, issue });

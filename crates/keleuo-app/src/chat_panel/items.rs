@@ -496,17 +496,17 @@ impl ChatPanel {
         let (title, note, tone) = match state {
             SignIn::Needed => (
                 format!("{agent} isn't signed in"),
-                format!("Sign in with its own sign-in, in a terminal here (it may open your browser){}.", if resend { ", then send your message again" } else { "" }),
+                format!("Sign in with its own sign-in, in a terminal here (it may open your browser){}. Signed in elsewhere, this card notices on its own.", if resend { ", then send your message again" } else { "" }),
                 warning,
             ),
-            SignIn::Waiting => (format!("Signing in to {agent}…"), "Finish in the terminal (and the browser, if it opened). This card notices when you're signed in.".to_string(), warning),
+            SignIn::Waiting => (format!("Signing in to {agent}…"), "Finish in the terminal (and the browser, if it opened). This card turns green once you're signed in.".to_string(), warning),
             SignIn::Done => (
                 format!("Signed in to {agent}"),
                 if resend { "Send your last message again, or write a new one." } else { "You're all set." }.to_string(),
                 green,
             ),
         };
-        let (s1, s2, s3) = (session.clone(), session.clone(), session);
+        let (s1, s3) = (session.clone(), session);
         let buttons = div()
             .flex()
             .flex_wrap()
@@ -518,11 +518,6 @@ impl ChatPanel {
                         cx.emit(ChatPanelEvent::RunCommand(line));
                     }
                 })))
-            })
-            .when(state != SignIn::Done, |d| {
-                d.child(Button::new("sign-in-check").xsmall().label(if state == SignIn::Waiting { "Check now" } else { "I've signed in" }).on_click(move |_, _, cx| {
-                    s2.update(cx, |s, cx| s.watch_sign_in(cx));
-                }))
             })
             .when(state == SignIn::Done && resend, |d| {
                 d.child(Button::new("sign-in-again").xsmall().primary().label("Send again").on_click(move |_, _, cx| {
