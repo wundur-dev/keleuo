@@ -106,6 +106,8 @@ pub struct ChatPanel {
     spelling: Option<crate::spelling::Spelling>,
     /// Its marks under misspelled words.
     spell_marks: Option<gpui_kit::base::input::RangeDecorationCollection<TextareaMode>>,
+    /// Speaking a message (see `composer::toggle_voice`).
+    voice: composer::Voice,
     /// The next check, a moment after the last change.
     spell_check: Option<Task<()>>,
     /// The word left unchecked by the last check as being typed, and the length of the text
@@ -311,6 +313,7 @@ impl ChatPanel {
             md_highlighters: HashMap::new(),
             spelling: None,
             spell_marks: None,
+            voice: composer::Voice::default(),
             spell_check: None,
             spell_held: None,
             spelled_as: None,

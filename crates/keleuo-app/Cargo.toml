@@ -51,6 +51,10 @@ gpui-kit = { version = "=0.7.1", features = ["tree-sitter-languages", "test-supp
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSDockTile", "NSImage", "NSResponder"] }
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSData", "NSString", "NSGeometry", "NSRange"] }
+# Speaking a message (src/voice.rs): Apple's speech recognition on the microphone's audio.
+objc2-speech = "0.3"
+objc2-avf-audio = "0.3"
+block2 = "0.6"
 raw-window-handle = "0.6"
 
 # Spelling in the message box: the system's Spell Checking API (see src/spelling.rs).

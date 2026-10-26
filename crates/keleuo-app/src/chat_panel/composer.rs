@@ -1152,29 +1152,129 @@ impl ChatPanel {
         attach.into_any_element()
     }
 
-    /// The 🎤: the system's own dictation into the message box (see `voice`); none where the
-    /// system has none.
+    /// The 🎤: listening, what is said typed into the message box as it is heard (see
+    /// `voice`); red and pulsing while it listens. None where the system cannot listen.
     fn render_dictate(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         if !crate::voice::available() {
             return None;
         }
-        let tip = if cfg!(windows) { "Speak your message (voice typing, Win+H)" } else { "Speak your message (Dictation)" };
-        let button = Button::new("dictate").xsmall().ghost().icon(gpui_kit::assets::IconName::Mic).tooltip(tip).on_click(cx.listener(|p, _, window, cx| {
-            // Into the message box: focused first, then the system is asked (once the focus is in).
-            p.focus_input(window, cx);
-            let panel = cx.entity().downgrade();
-            window.defer(cx, move |_, cx| {
-                if let Err(why) = crate::voice::start() {
-                    let _ = panel.update(cx, |p, cx| {
-                        p.session.update(cx, |s, cx| {
-                            s.chat.push_notice(why);
+        let on = self.voice.listening.is_some() || self.voice.asking;
+        let red = cx.theme().red;
+        let tip = if on { "Listening: click to finish" } else { "Speak your message" };
+        let button = Button::new("dictate")
+            .xsmall()
+            .ghost()
+            .icon(gpui_kit::component::Icon::new(gpui_kit::assets::IconName::Mic).when(on, |i| i.text_color(red)))
+            .tooltip(tip)
+            .on_click(cx.listener(|p, _, window, cx| p.toggle_voice(window, cx)));
+        Some(if on {
+            div()
+                .child(button)
+                .with_animation("listening", Animation::new(std::time::Duration::from_millis(900)).repeat().with_easing(pulsating_between(0.4, 1.0)), |d, t| d.opacity(t))
+                .into_any_element()
+        } else {
+            button.into_any_element()
+        })
+    }
+
+    /// The 🎤 clicked: listen (speech recognition asked for first), or finish listening.
+    pub(super) fn toggle_voice(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        use crate::voice::{self, Heard};
+        if let Some(l) = self.voice.listening.as_ref() {
+            l.finish();
+            return;
+        }
+        if self.voice.asking {
+            return;
+        }
+        self.focus_input(window, cx);
+        let value = self.input.read(cx).value().to_string();
+        // Typed after what is there, a space between.
+        self.voice.base = if value.is_empty() || value.ends_with(char::is_whitespace) { value } else { format!("{value} ") };
+        self.voice.asking = true;
+        cx.notify();
+        let (tx, rx) = std::sync::mpsc::channel::<Heard>();
+        voice::ask(tx.clone());
+        cx.spawn_in(window, async move |this, cx| {
+            let mut last_change = std::time::Instant::now();
+            let mut heard_any = false;
+            loop {
+                cx.background_executor().timer(std::time::Duration::from_millis(60)).await;
+                let mut done = false;
+                while let Ok(h) = rx.try_recv() {
+                    let r = this.update_in(cx, |p, window, cx| match h {
+                        Heard::Allowed(true) => {
+                            p.voice.asking = false;
+                            match voice::listen(tx.clone()) {
+                                Ok(l) => p.voice.listening = Some(l),
+                                Err(why) => {
+                                    p.voice_note(why, cx);
+                                    return true;
+                                }
+                            }
                             cx.notify();
-                        })
+                            false
+                        }
+                        Heard::Allowed(false) => {
+                            p.voice_note("Keleuo may not use speech recognition: allow it in System Settings > Privacy & Security > Speech Recognition".into(), cx);
+                            true
+                        }
+                        Heard::Text { text, done } => {
+                            let value = format!("{}{text}", p.voice.base);
+                            p.input.update(cx, |i, cx| i.set_value(value, window, cx));
+                            done
+                        }
+                        Heard::Failed(why) => {
+                            // Stopped with nothing heard: said in the chat; after words, it simply ends.
+                            if p.input.read(cx).value() == p.voice.base.as_str() {
+                                p.voice_note(format!("Nothing was heard: {why}"), cx);
+                            }
+                            true
+                        }
                     });
+                    match r {
+                        Ok(stop) => {
+                            if !stop {
+                                last_change = std::time::Instant::now();
+                                heard_any = true;
+                            }
+                            done |= stop;
+                        }
+                        Err(_) => return,
+                    }
                 }
-            });
-        }));
-        Some(button.into_any_element())
+                // A pause ends it: two seconds after the last words, eight with none at all.
+                let quiet = last_change.elapsed() > std::time::Duration::from_secs(if heard_any { 2 } else { 8 });
+                let stop = this
+                    .update(cx, |p, cx| {
+                        if done {
+                            p.voice = Voice::default();
+                            cx.notify();
+                            return true;
+                        }
+                        if quiet && let Some(l) = p.voice.listening.as_ref() {
+                            l.finish();
+                        }
+                        false
+                    })
+                    .unwrap_or(true);
+                if stop {
+                    return;
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// Why speaking a message stopped, in the chat; the 🎤 is off again.
+    fn voice_note(&mut self, why: String, cx: &mut Context<Self>) {
+        self.voice = Voice::default();
+        self.session.update(cx, |s, cx| {
+            s.chat.push_notice(why);
+            s.chat.revision += 1;
+            cx.notify();
+        });
+        cx.notify();
     }
 
 }
@@ -1433,4 +1533,12 @@ mod list_tests {
         cx.simulate_keystrokes(handle, "cmd-z");
         assert_eq!(value(cx), "- eggs and ham", "Undo takes the new item back");
     }
+}
+
+/// Speaking a message: listening (or asking to), and the message box's text before it.
+#[derive(Default)]
+pub struct Voice {
+    pub listening: Option<crate::voice::Listening>,
+    pub asking: bool,
+    pub base: String,
 }

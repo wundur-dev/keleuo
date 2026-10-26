@@ -51,6 +51,10 @@ cat > "$APP/Contents/Info.plist" <<EOF
     <string>public.app-category.developer-tools</string>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Keleuo listens when you press the microphone button, to type what you say into your message.</string>
+    <key>NSSpeechRecognitionUsageDescription</key>
+    <string>Keleuo turns what you say into text for your message, on this Mac where it can.</string>
 </dict>
 </plist>
 EOF
