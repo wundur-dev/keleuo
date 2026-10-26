@@ -10,7 +10,9 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 
+use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Editor, EditorState, InputEvent, Position};
+use gpui_kit::component::Sizable;
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::text::TextView;
 use gpui_kit::component::{ActiveTheme, WindowExt};
@@ -35,6 +37,28 @@ enum Body {
     Loading,
     Text(Entity<EditorState>),
     Message(String),
+    /// An image, shown; the file's size.
+    Image(Arc<Image>, u64),
+    /// A file only another app opens: its kind and size.
+    File { kind: &'static str, size: u64 },
+}
+
+/// Images bigger than this are not drawn (their card offers the default app).
+const MAX_IMAGE: u64 = 64 << 20;
+
+fn image_format(path: &Path) -> Option<ImageFormat> {
+    let ext = path.extension()?.to_string_lossy().to_lowercase();
+    Some(match ext.as_str() {
+        "png" => ImageFormat::Png,
+        "jpg" | "jpeg" => ImageFormat::Jpeg,
+        "gif" => ImageFormat::Gif,
+        "webp" => ImageFormat::Webp,
+        "bmp" => ImageFormat::Bmp,
+        "tif" | "tiff" => ImageFormat::Tiff,
+        "ico" => ImageFormat::Ico,
+        "svg" => ImageFormat::Svg,
+        _ => return None,
+    })
 }
 
 pub enum DocEvent {
@@ -55,6 +79,8 @@ pub struct DocPanel {
     pub path: PathBuf,
     body: Body,
     markdown: bool,
+    /// An SVG shown as its source (in the editor) rather than drawn.
+    svg_source: bool,
     /// Markdown shown rendered (else the editor).
     preview: bool,
     pub dirty: bool,
@@ -106,6 +132,7 @@ impl DocPanel {
             body: Body::Loading,
             markdown,
             preview: markdown && line.is_none(),
+            svg_source: false,
             dirty: false,
             read_only,
             saved: String::new(),
@@ -168,6 +195,49 @@ impl DocPanel {
     pub fn load(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let host = self.ctx.host.clone();
         let path = self.path.clone();
+        // Images are drawn (an SVG, unless its source is asked for); what only another app
+        // opens is not read at all, only measured.
+        match files::kind_of(&path) {
+            files::Kind::Other(kind) => {
+                cx.spawn_in(window, async move |this, cx| {
+                    let size = cx.background_spawn(async move { host.len(&path) }).await;
+                    let _ = this.update(cx, |doc, cx| {
+                        doc.body = match size {
+                            Ok(size) => Body::File { kind, size },
+                            Err(e) => Body::Message(format!("Could not read the file: {e}")),
+                        };
+                        cx.notify();
+                    });
+                })
+                .detach();
+                return;
+            }
+            files::Kind::Image if !self.svg_source => {
+                let format = image_format(&path);
+                cx.spawn_in(window, async move |this, cx| {
+                    let read = cx
+                        .background_spawn(async move {
+                            let size = host.len(&path)?;
+                            if size > MAX_IMAGE {
+                                return Ok((None, size));
+                            }
+                            host.read(&path).map(|b| (Some(b), size))
+                        })
+                        .await;
+                    let _ = this.update(cx, |doc, cx| {
+                        doc.body = match (read, format) {
+                            (Ok((Some(bytes), size)), Some(format)) => Body::Image(Arc::new(Image::from_bytes(format, bytes)), size),
+                            (Ok((_, size)), _) => Body::File { kind: "Image", size },
+                            (Err(e), _) => Body::Message(format!("Could not read the file: {e}")),
+                        };
+                        cx.notify();
+                    });
+                })
+                .detach();
+                return;
+            }
+            _ => {}
+        }
         cx.spawn_in(window, async move |this, cx| {
             let read = cx.background_spawn(async move { host.read(&path) }).await;
             let _ = this.update_in(cx, |doc, window, cx| doc.loaded(read, window, cx));
@@ -188,8 +258,7 @@ impl DocPanel {
                 return;
             }
             Ok(bytes) if !files::looks_like_text(&bytes) => {
-                self.body =
-                    Body::Message(format!("Binary file, {} bytes. Not shown.", bytes.len()));
+                self.body = Body::File { kind: "File", size: bytes.len() as u64 };
                 cx.notify();
                 return;
             }
@@ -451,6 +520,93 @@ impl DocPanel {
         }
     }
 
+    /// Open in the default app and show in Finder (not for a file on another machine).
+    fn file_actions(&self) -> Option<Div> {
+        if self.ctx.host.is_remote() {
+            return None;
+        }
+        let (p1, p2) = (self.path.clone(), self.path.clone());
+        let reveal = if cfg!(target_os = "macos") { "Show in Finder" } else { "Show in folder" };
+        Some(
+            div()
+                .flex()
+                .gap_2()
+                .child(Button::new("doc-open-with").xsmall().outline().label("Open in default app").on_click(move |_, _, cx| cx.open_with_system(&p1)))
+                .child(Button::new("doc-reveal").xsmall().ghost().label(reveal).on_click(move |_, _, cx| cx.reveal_path(&p2))),
+        )
+    }
+
+    /// An image: fitted to the panel on a quiet ground; its kind and size above, with the
+    /// default app, Finder and (an SVG) its source. Clicked: shown full size.
+    fn render_image(&self, image: Arc<Image>, size: u64, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let (muted, ground) = (theme.muted_foreground, theme.secondary);
+        let ext = self.path.extension().map(|e| e.to_string_lossy().to_uppercase()).unwrap_or_default();
+        let svg = ext == "SVG";
+        let local = !self.ctx.host.is_remote();
+        let path = self.path.clone();
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .flex_none()
+                    .px_2()
+                    .py_1()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(div().flex_1().text_xs().text_color(muted).child(format!("{ext} image · {}", files::size_text(size))))
+                    .when(svg, |d| {
+                        d.child(Button::new("doc-svg-source").xsmall().ghost().label("Source").on_click(cx.listener(|doc, _, window, cx| {
+                            doc.svg_source = true;
+                            doc.body = Body::Loading;
+                            doc.load(window, cx);
+                        })))
+                    })
+                    .children(self.file_actions()),
+            )
+            .child(
+                div()
+                    .id("doc-image")
+                    .flex_1()
+                    .min_h_0()
+                    .p_4()
+                    .bg(ground)
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .when(local, |d| d.cursor_pointer().on_click(move |_, _, cx| crate::image_view::show(path.clone(), cx)))
+                    .child(img(image).max_w_full().max_h_full().object_fit(ObjectFit::Contain)),
+            )
+            .into_any_element()
+    }
+
+    /// A file only another app opens: what it is and how big, and that app.
+    fn render_file(&self, kind: &str, size: u64, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let (fg, muted) = (theme.foreground, theme.muted_foreground);
+        let name = self.path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        div()
+            .size_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap_2()
+                    .child(crate::icons::file(&name, cx))
+                    .child(div().text_sm().text_color(fg).child(name))
+                    .child(div().text_xs().text_color(muted).child(format!("{kind} · {}", files::size_text(size))))
+                    .children(self.file_actions()),
+            )
+            .into_any_element()
+    }
+
     fn render_body(&self, cx: &mut Context<Self>) -> AnyElement {
         let muted = cx.theme().muted_foreground;
         if self.diff_mode && matches!(self.body, Body::Text(_)) {
@@ -469,6 +625,8 @@ impl DocPanel {
                 .text_color(muted)
                 .child(m.clone())
                 .into_any_element(),
+            Body::Image(image, size) => self.render_image(image.clone(), *size, cx),
+            Body::File { kind, size } => self.render_file(kind, *size, cx),
             Body::Text(editor) if self.markdown && self.preview => {
                 let text = editor.read(cx).value();
                 // Frontmatter shows as a YAML block rather than being misread as markdown.
