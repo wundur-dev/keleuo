@@ -813,12 +813,30 @@ impl AgentSession {
         .detach();
     }
 
+    /// Ask the agent (its status command, off the window's thread) whether it is signed in;
+    /// signed out, the chat shows the sign-in card at once.
+    pub fn check_sign_in(&mut self, cx: &mut Context<Self>) {
+        let (backend, host) = (self.backend.clone(), self.host.clone());
+        cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let signed = cx.background_spawn(async move { backend.signed_in(host.as_ref()) }).await;
+            if signed == Some(false) {
+                let _ = this.update(cx, |s, cx| {
+                    s.chat.apply(keleuo_core::agent::Event::SignedOut);
+                    s.chat.revision += 1;
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
     /// Send the person's last message again (after signing in).
     pub fn send_again(&mut self, cx: &mut Context<Self>) {
         let last = self.chat.items.iter().rev().find_map(|i| match i {
             keleuo_core::conversation::Item::User(t) => Some(t.clone()),
             _ => None,
         });
+        self.chat.refused_signed_out = false;
         if let Some(text) = last {
             self.send(&text, cx);
         }

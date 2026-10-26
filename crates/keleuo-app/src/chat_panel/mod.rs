@@ -183,6 +183,8 @@ impl ChatPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        // Signed out: the card shows as the chat opens, before anything is sent.
+        session.update(cx, |s, cx| s.check_sign_in(cx));
         let placeholder = format!(
             "Message {} (Enter sends, Shift+Enter new line)",
             session.read(cx).backend.name()

@@ -231,6 +231,8 @@ pub struct Conversation {
     pub cwd: String,
     /// A turn is in flight.
     pub busy: bool,
+    /// A message was refused for want of a sign-in: once signed in it can be sent again.
+    pub refused_signed_out: bool,
     /// Process total so far, as reported by the last result.
     pub total_cost_usd: f64,
     /// What the last finished turn cost.
@@ -1003,6 +1005,10 @@ impl Conversation {
             }
             // One card at a time: a second refusal while one waits adds nothing.
             Event::SignedOut => {
+                // During a turn it is that turn's message refused; idle, only a status found.
+                if self.busy {
+                    self.refused_signed_out = true;
+                }
                 let open = self.items.iter().rev().find_map(|i| match i {
                     Item::SignIn(s) => Some(*s != SignIn::Done),
                     _ => None,
