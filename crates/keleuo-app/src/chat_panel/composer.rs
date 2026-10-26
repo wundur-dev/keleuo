@@ -1178,9 +1178,13 @@ impl ChatPanel {
     }
 
     /// The 🎤 clicked: listen (speech recognition asked for first), or finish listening.
+    /// It listens until the person stops it (a click, or a pause): when the recognition ends
+    /// on its own (a result it calls final, or an error, after a phrase), a new one carries on
+    /// after what was heard.
     pub(super) fn toggle_voice(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         use crate::voice::{self, Heard};
         if let Some(l) = self.voice.listening.as_ref() {
+            self.voice.finishing = Some(std::time::Instant::now());
             l.finish();
             return;
         }
@@ -1190,18 +1194,20 @@ impl ChatPanel {
         self.focus_input(window, cx);
         let value = self.input.read(cx).value().to_string();
         // Typed after what is there, a space between.
-        self.voice.base = if value.is_empty() || value.ends_with(char::is_whitespace) { value } else { format!("{value} ") };
+        self.voice.base = with_space(value);
         self.voice.asking = true;
         cx.notify();
         let (tx, rx) = std::sync::mpsc::channel::<Heard>();
+        self.voice.tx = Some(tx.clone());
         voice::ask(tx.clone());
         cx.spawn_in(window, async move |this, cx| {
-            let mut last_change = std::time::Instant::now();
+            let mut last_words = std::time::Instant::now();
             let mut heard_any = false;
             loop {
                 cx.background_executor().timer(std::time::Duration::from_millis(60)).await;
-                let mut done = false;
+                let mut stop = false;
                 while let Ok(h) = rx.try_recv() {
+                    eprintln!("keleuo: voice: {h:?}");
                     let r = this.update_in(cx, |p, window, cx| match h {
                         Heard::Allowed(true) => {
                             p.voice.asking = false;
@@ -1209,61 +1215,100 @@ impl ChatPanel {
                                 Ok(l) => p.voice.listening = Some(l),
                                 Err(why) => {
                                     p.voice_note(why, cx);
-                                    return true;
+                                    return (true, false);
                                 }
                             }
                             cx.notify();
-                            false
+                            (false, false)
                         }
                         Heard::Allowed(false) => {
                             p.voice_note("Keleuo may not use speech recognition: allow it in System Settings > Privacy & Security > Speech Recognition".into(), cx);
-                            true
+                            (true, false)
                         }
                         Heard::Text { text, done } => {
                             let value = format!("{}{text}", p.voice.base);
                             p.input.update(cx, |i, cx| i.set_value(value, window, cx));
-                            done
+                            if !done {
+                                return (false, true);
+                            }
+                            // Final: the end when the person stopped it; else carry on listening.
+                            if p.voice.finishing.is_some() {
+                                return (true, true);
+                            }
+                            (p.voice_again(window, cx), true)
                         }
                         Heard::Failed(why) => {
-                            // Stopped with nothing heard: said in the chat; after words, it simply ends.
-                            if p.input.read(cx).value() == p.voice.base.as_str() {
-                                p.voice_note(format!("Nothing was heard: {why}"), cx);
+                            let nothing = p.input.read(cx).value() == p.voice.base.as_str();
+                            if p.voice.finishing.is_some() {
+                                return (true, false);
                             }
-                            true
+                            if nothing && p.voice.restarts == 0 {
+                                p.voice_note(format!("Nothing was heard: {why}"), cx);
+                                return (true, false);
+                            }
+                            (p.voice_again(window, cx), false)
                         }
                     });
                     match r {
-                        Ok(stop) => {
-                            if !stop {
-                                last_change = std::time::Instant::now();
+                        Ok((done, words)) => {
+                            if words {
+                                last_words = std::time::Instant::now();
                                 heard_any = true;
                             }
-                            done |= stop;
+                            stop |= done;
                         }
                         Err(_) => return,
                     }
                 }
-                // A pause ends it: two seconds after the last words, eight with none at all.
-                let quiet = last_change.elapsed() > std::time::Duration::from_secs(if heard_any { 2 } else { 8 });
-                let stop = this
+                // A pause ends it: three seconds after the last words, ten with none at all;
+                // finishing, what was said is recognised to the end (two seconds at most).
+                let quiet = last_words.elapsed() > std::time::Duration::from_secs(if heard_any { 3 } else { 10 });
+                let end = this
                     .update(cx, |p, cx| {
-                        if done {
+                        let overdue = p.voice.finishing.is_some_and(|t| t.elapsed() > std::time::Duration::from_secs(2));
+                        if stop || overdue {
                             p.voice = Voice::default();
                             cx.notify();
                             return true;
                         }
-                        if quiet && let Some(l) = p.voice.listening.as_ref() {
+                        if quiet && p.voice.finishing.is_none() && let Some(l) = p.voice.listening.as_ref() {
+                            p.voice.finishing = Some(std::time::Instant::now());
                             l.finish();
                         }
                         false
                     })
                     .unwrap_or(true);
-                if stop {
+                if end {
                     return;
                 }
             }
         })
         .detach();
+    }
+
+    /// Recognition ended before the person stopped: a new one carries on after the text now
+    /// in the box. Whether it gave up instead (too many in a row).
+    fn voice_again(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        self.voice.restarts += 1;
+        if self.voice.restarts > 20 {
+            return true;
+        }
+        let _ = window;
+        let value = self.input.read(cx).value().to_string();
+        self.voice.base = with_space(value);
+        let Some(tx) = self.voice.tx.clone() else { return true };
+        self.voice.listening = None;
+        match crate::voice::listen(tx) {
+            Ok(l) => {
+                self.voice.listening = Some(l);
+                cx.notify();
+                false
+            }
+            Err(why) => {
+                self.voice_note(why, cx);
+                true
+            }
+        }
     }
 
     /// Why speaking a message stopped, in the chat; the 🎤 is off again.
@@ -1541,4 +1586,15 @@ pub struct Voice {
     pub listening: Option<crate::voice::Listening>,
     pub asking: bool,
     pub base: String,
+    /// Where results go (a new recognition sends there too).
+    pub tx: Option<std::sync::mpsc::Sender<crate::voice::Heard>>,
+    /// The person (or a pause) stopped it, at this time: the next final result is the end.
+    pub finishing: Option<std::time::Instant>,
+    /// Recognitions started again after ending on their own.
+    pub restarts: u8,
+}
+
+/// `text` with a space after it, unless empty or ending in one: what is said goes after.
+fn with_space(text: String) -> String {
+    if text.is_empty() || text.ends_with(char::is_whitespace) { text } else { format!("{text} ") }
 }

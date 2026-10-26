@@ -1,6 +1,6 @@
 //! Speaking a message: the 🎤 in the message box listens, and what is said is typed into the
-//! box as it is heard, with Apple's speech recognition (on the Mac itself where it can) on
-//! the microphone's audio. macOS asks once for the microphone and for speech recognition.
+//! box as it is heard, with Apple's speech recognition (as macOS dictation: on the Mac or
+//! Apple's servers, as Apple decides) on the microphone's audio. macOS asks once for the microphone and for speech recognition.
 //! Results come on the system's threads; they reach the chat through a channel ([`Heard`]).
 //! Not on Windows or Linux yet (a local Whisper may come; see the open queue).
 
@@ -77,9 +77,6 @@ mod mac {
             let request = SFSpeechAudioBufferRecognitionRequest::new();
             request.setShouldReportPartialResults(true);
             request.setAddsPunctuation(true);
-            if recognizer.supportsOnDeviceRecognition() {
-                request.setRequiresOnDeviceRecognition(true);
-            }
             let engine = AVAudioEngine::new();
             let input = engine.inputNode();
             let format = input.outputFormatForBus(0);
