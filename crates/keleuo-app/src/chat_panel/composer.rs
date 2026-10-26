@@ -562,6 +562,7 @@ impl ChatPanel {
         let chips = self.render_chips(cx);
         let waiting = self.render_waiting(cx);
         let attach = self.render_attach(cx);
+        let dictate = self.render_dictate(cx);
         let model_control = self.render_model_control(cx);
         let effort_control = self.render_effort_control(cx);
         let mode_button = permission_prompts.then(|| self.render_mode_button(cx));
@@ -670,6 +671,7 @@ impl ChatPanel {
                             .gap_1()
                             .text_color(muted)
                             .child(attach)
+                            .children(dictate)
                             .child(model_control)
                             .children(effort_control)
                             .children(mode_button)
@@ -1148,6 +1150,31 @@ impl ChatPanel {
                 .detach();
             }));
         attach.into_any_element()
+    }
+
+    /// The 🎤: the system's own dictation into the message box (see `voice`); none where the
+    /// system has none.
+    fn render_dictate(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !crate::voice::available() {
+            return None;
+        }
+        let tip = if cfg!(windows) { "Speak your message (voice typing, Win+H)" } else { "Speak your message (Dictation)" };
+        let button = Button::new("dictate").xsmall().ghost().icon(gpui_kit::assets::IconName::Mic).tooltip(tip).on_click(cx.listener(|p, _, window, cx| {
+            // Into the message box: focused first, then the system is asked (once the focus is in).
+            p.focus_input(window, cx);
+            let panel = cx.entity().downgrade();
+            window.defer(cx, move |_, cx| {
+                if let Err(why) = crate::voice::start() {
+                    let _ = panel.update(cx, |p, cx| {
+                        p.session.update(cx, |s, cx| {
+                            s.chat.push_notice(why);
+                            cx.notify();
+                        })
+                    });
+                }
+            });
+        }));
+        Some(button.into_any_element())
     }
 
 }

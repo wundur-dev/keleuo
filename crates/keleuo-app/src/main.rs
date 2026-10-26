@@ -62,6 +62,7 @@ mod spelling;
 mod terminal_view;
 mod theme;
 mod tool_runs;
+mod voice;
 mod web_panel;
 mod workspace;
 

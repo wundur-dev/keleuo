@@ -55,4 +55,4 @@ raw-window-handle = "0.6"
 
 # Spelling in the message box: the system's Spell Checking API (see src/spelling.rs).
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.62", features = ["Win32_Globalization", "Win32_System_Com"] }
+windows = { version = "0.62", features = ["Win32_Globalization", "Win32_System_Com", "Win32_UI_Input_KeyboardAndMouse"] }
