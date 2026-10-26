@@ -233,6 +233,8 @@ pub struct Conversation {
     pub busy: bool,
     /// A message was refused for want of a sign-in: once signed in it can be sent again.
     pub refused_signed_out: bool,
+    /// The usage limit is reached: when it resets (Unix time; `Some(None)`: not said).
+    pub limit_reached: Option<Option<u64>>,
     /// Process total so far, as reported by the last result.
     pub total_cost_usd: f64,
     /// What the last finished turn cost.
@@ -1002,6 +1004,9 @@ impl Conversation {
                 if !line.trim().is_empty() {
                     self.items.push(Item::Notice(one_line(&line, 300)));
                 }
+            }
+            Event::Limit { reached, resets_at } => {
+                self.limit_reached = if reached { Some(resets_at.or(self.limit_reached.flatten())) } else { None };
             }
             // One card at a time: a second refusal while one waits adds nothing.
             Event::SignedOut => {

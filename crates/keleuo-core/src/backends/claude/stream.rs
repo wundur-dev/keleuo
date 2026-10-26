@@ -125,6 +125,9 @@ pub enum Event {
         total_tokens: Option<u64>,
         duration_ms: Option<u64>,
     },
+    /// Where the account's usage limit is (`rate_limit_event`): `status` `allowed`,
+    /// `allowed_warning` or `rejected`, `resets_at` when its window starts again (Unix time).
+    RateLimit { status: String, resets_at: Option<u64> },
     /// A line that is not JSON (Claude Code sometimes prints warnings on stdout).
     Unparsed(String),
     /// Valid JSON of a kind Keleuo does not show.
@@ -153,6 +156,10 @@ fn s(v: &Value, key: &str) -> String {
 pub fn parse_value(v: &Value) -> Event {
     let ty = v.get("type").and_then(Value::as_str).unwrap_or_default();
     match ty {
+        "rate_limit_event" => {
+            let info = v.get("rate_limit_info").unwrap_or(&Value::Null);
+            Event::RateLimit { status: s(info, "status"), resets_at: info.get("resetsAt").and_then(Value::as_u64) }
+        }
         "system" => match v.get("subtype").and_then(Value::as_str).unwrap_or_default() {
             "init" => Event::Init {
                 session_id: s(v, "session_id"),

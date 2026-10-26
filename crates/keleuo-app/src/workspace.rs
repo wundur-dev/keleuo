@@ -1424,6 +1424,10 @@ impl Workspace {
                 settings.borrow_mut().default_view = arg.to_string();
                 let _ = settings.borrow().save();
             }
+            "retry" => {
+                // Tests: what Retry does (the person's last message sent again).
+                self.session.update(cx, |s, cx| s.send_again(cx));
+            }
             "chat-items" => {
                 // Tests: the chat's last few items, each as its start.
                 let chat = &self.session.read(cx).chat;

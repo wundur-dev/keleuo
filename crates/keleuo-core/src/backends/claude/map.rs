@@ -23,6 +23,8 @@ pub const WORKFLOW: &str = "Workflow";
 /// tool call's name and input (for the diff of its result), task ids to tool calls.
 #[derive(Default)]
 pub struct Mapper {
+    /// When the usage limit's window starts again, as the last limit event said.
+    limit_resets: Option<u64>,
     cwd: String,
     tools: HashMap<String, (String, Value)>,
     tasks: HashMap<String, String>,
@@ -129,8 +131,11 @@ impl Mapper {
                     }
                 }
                 // After its words: the card offering the sign-in follows them.
-                if error.as_deref() == Some("authentication_failed") {
-                    out.push(Event::SignedOut);
+                match error.as_deref() {
+                    Some("authentication_failed") => out.push(Event::SignedOut),
+                    // The limit refused it: when it resets, from the last limit event.
+                    Some("rate_limit") => out.push(Event::Limit { reached: true, resets_at: self.limit_resets }),
+                    _ => {}
                 }
                 out
             }
@@ -243,6 +248,12 @@ impl Mapper {
                 .collect()
             }
             Raw::Unparsed(line) => vec![Event::Notice(line)],
+            Raw::RateLimit { status, resets_at } => {
+                if resets_at.is_some() {
+                    self.limit_resets = resets_at;
+                }
+                vec![Event::Limit { reached: status == "rejected", resets_at }]
+            }
             Raw::Other(_) => Vec::new(),
         }
     }
@@ -321,6 +332,23 @@ mod sign_in_tests {
         chat.apply_all(events);
         let cards = chat.items.iter().filter(|i| matches!(i, Item::SignIn(SignIn::Needed))).count();
         assert_eq!(cards, 1, "a second refusal adds no second card");
+    }
+}
+
+#[cfg(test)]
+mod limit_tests {
+    use super::*;
+    use crate::conversation::Conversation;
+
+    #[test]
+    fn a_refusal_by_the_usage_limit_carries_when_it_resets() {
+        let lines = r#"{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":1793031600,"rateLimitType":"five_hour"}}
+{"type":"assistant","message":{"id":"x","model":"<synthetic>","role":"assistant","content":[{"type":"text","text":"Limite atteinte"}]},"parent_tool_use_id":null,"session_id":"s","error":"rate_limit","is_api_error_message":true}"#;
+        let mut chat = Conversation::default();
+        chat.apply_all(Mapper::new("/p").map_lines(lines));
+        assert_eq!(chat.limit_reached, Some(Some(1793031600)), "from the codes, whatever the words");
+        chat.apply_all(Mapper::new("/p").map_lines(r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","resetsAt":1793050000}}"#));
+        assert_eq!(chat.limit_reached, None, "allowed again");
     }
 }
 

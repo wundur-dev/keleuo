@@ -102,6 +102,9 @@ pub enum Event {
     /// The agent is not signed in (or its sign-in ran out), as it says in its own terms (a
     /// code, never its words, which may be in any language).
     SignedOut,
+    /// The account's usage limit: `reached` (messages are refused until `resets_at`, Unix
+    /// time) or not any more.
+    Limit { reached: bool, resets_at: Option<u64> },
     /// Spend worked out from token counts and published prices (the agent reported none).
     CostEstimate { usd: f64 },
     /// Images the person sent with their last message (stored files).

@@ -234,6 +234,9 @@ pub struct AgentSession {
     restart_after_turn: bool,
     /// A watch for the agent's sign-in runs (see `watch_sign_in`).
     sign_in_watching: bool,
+    /// The person's last message is set to go again at this time (Unix), when the usage
+    /// limit resets.
+    pub scheduled_retry: Option<u64>,
     /// Why the interface is starting again, while it does (for the composer).
     pub restarting: Option<String>,
     /// The current turn (where it starts in the chat) and the git working tree when it started,
@@ -338,6 +341,7 @@ impl AgentSession {
             pasted_images: Vec::new(),
             restart_after_turn: false,
             sign_in_watching: false,
+            scheduled_retry: None,
             restarting: None,
             git_turn: None,
             hybrid: false,
@@ -851,6 +855,30 @@ impl AgentSession {
         .detach();
     }
 
+    /// Send the person's last message again at `at` (Unix time: when the usage limit resets),
+    /// a little after it, unless sent or cancelled before.
+    pub fn retry_at(&mut self, at: u64, cx: &mut Context<Self>) {
+        self.scheduled_retry = Some(at);
+        cx.notify();
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(at);
+        let wait = std::time::Duration::from_secs(at.saturating_sub(now) + 20);
+        cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            cx.background_executor().timer(wait).await;
+            let _ = this.update(cx, |s, cx| {
+                if s.scheduled_retry == Some(at) {
+                    s.send_again(cx);
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// No send at the limit's reset after all.
+    pub fn cancel_retry(&mut self, cx: &mut Context<Self>) {
+        self.scheduled_retry = None;
+        cx.notify();
+    }
+
     /// Send the person's last message again (after signing in).
     pub fn send_again(&mut self, cx: &mut Context<Self>) {
         let last = self.chat.items.iter().rev().find_map(|i| match i {
@@ -858,6 +886,7 @@ impl AgentSession {
             _ => None,
         });
         self.chat.refused_signed_out = false;
+        self.scheduled_retry = None;
         if let Some(text) = last {
             self.send(&text, cx);
         }
