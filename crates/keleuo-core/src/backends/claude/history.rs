@@ -341,42 +341,73 @@ struct LightMessage {
     usage: Option<Value>,
 }
 
-/// A stretch of the file before a compaction, and the compaction that ended it.
-struct Segment {
-    from: u64,
-    to: u64,
-    messages: usize,
+/// How many of the person's last prompts (and what followed each) a session opens with; the
+/// rest shows as [`Item::Earlier`] placeholders, read when scrolled to.
+const OPEN_WITH: usize = 30;
+
+/// Whether `v` is a prompt the person wrote (not a tool's result, a note or a summary).
+fn is_prompt(v: &Value) -> bool {
+    v.get("type").and_then(Value::as_str) == Some("user")
+        && v.get("isSidechain").and_then(Value::as_bool) != Some(true)
+        && v.get("isMeta").and_then(Value::as_bool) != Some(true)
+        && v.get("isCompactSummary").and_then(Value::as_bool) != Some(true)
+        && !v
+            .get("message")
+            .and_then(|m| m.get("content"))
+            .and_then(Value::as_array)
+            .is_some_and(|b| b.iter().any(|b| b.get("type").and_then(Value::as_str) == Some("tool_result")))
+        && user_text(v).is_some()
 }
 
-/// Rebuild a session's chat reading its file as a stream, never whole. Only the live context
-/// (after the last compaction) becomes items now; each stretch before a compaction becomes an
-/// [`Item::Earlier`] placeholder (read by [`load_segment`] when it is scrolled to) followed by
-/// an [`Item::Compacted`] divider with the summary. The cost estimate and the token counts
-/// come from the whole file.
-pub fn load_streaming(host: &dyn Host, path: &Path, cwd: &str) -> std::io::Result<Conversation> {
-    use crate::conversation::Item;
-    let fresh = || {
-        let mut c = Conversation::new(cwd);
-        c.replaying = true;
-        c
-    };
-    let mut chat = fresh();
-    let mut mapper = Mapper::new(cwd);
-    mapper.history = true;
-    let mut tally = Tally::default();
-    let mut cost = 0.0;
-    let mut session_id: Option<String> = None;
-    let mut last_turn: Option<Event> = None;
-    let mut segments: Vec<Segment> = Vec::new();
-    let mut dividers: Vec<Item> = Vec::new();
-    let (mut seg_from, mut seg_messages) = (0u64, 0usize);
-    // Where the last compaction starts: the chat is built from there only (what comes before
-    // is replaced at each compaction anyway). A quick look for the words first; a line that
-    // only quotes them is told apart when it is read below.
-    // It is near the end: looked for in the last 32 MB, then four times as much, and so on.
-    let len = host.len(path)?;
+/// What reading a session file up to `upto` gave (the head: stretches, dividers, counts,
+/// cost), kept so the next opening reads only what came after (session files only grow).
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+struct Index {
+    upto: u64,
+    /// The file's bytes just before `upto`: the same file, not one rewritten.
+    fingerprint: String,
+    segments: Vec<(u64, u64, usize)>,
+    /// Each compaction's summary, trigger and tokens.
+    dividers: Vec<(String, Option<String>, Option<u64>)>,
+    seg_from: u64,
+    seg_messages: usize,
+    cost: f64,
+    last_message: Option<(String, f64)>,
+    session_id: Option<String>,
+}
+
+fn fingerprint(host: &dyn Host, path: &Path, upto: u64) -> String {
+    let mut out = String::new();
+    let from = upto.saturating_sub(256);
+    let _ = host.for_each_line(path, from, Some(upto), &mut |_, line| {
+        out.push_str(line);
+        true
+    });
+    format!("{:x}", out.len() as u64 ^ out.bytes().fold(0xcbf29ce484222325u64, |h, b| (h ^ b as u64).wrapping_mul(0x100000001b3)))
+}
+
+/// Where a session file's index is kept (its own folder under the caches; none over SSH).
+fn index_path(host: &dyn Host, path: &Path) -> Option<PathBuf> {
+    if host.is_remote() {
+        return None;
+    }
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    path.hash(&mut h);
+    let name = path.file_stem()?.to_string_lossy().to_string();
+    Some(dirs::cache_dir()?.join("keleuo").join("session-index").join(format!("{name}-{:016x}.json", h.finish())))
+}
+
+fn read_index(host: &dyn Host, path: &Path, len: u64) -> Option<Index> {
+    let index: Index = serde_json::from_str(&std::fs::read_to_string(index_path(host, path)?).ok()?).ok()?;
+    (index.upto <= len && index.fingerprint == fingerprint(host, path, index.upto)).then_some(index)
+}
+
+/// Where the last compaction starts, looked for from the end (it is near it): in the last
+/// 32 MB, then four times as much, and so on. 0 when there is none.
+fn last_compaction(host: &dyn Host, path: &Path, len: u64) -> std::io::Result<u64> {
     let mut window = 32u64 << 20;
-    let live_from = loop {
+    loop {
         let from = len.saturating_sub(window);
         let mut found = None;
         host.for_each_line(path, from, None, &mut |offset, line| {
@@ -386,87 +417,185 @@ pub fn load_streaming(host: &dyn Host, path: &Path, cwd: &str) -> std::io::Resul
             true
         })?;
         if found.is_some() || from == 0 {
-            break found.unwrap_or(0);
+            return Ok(found.unwrap_or(0));
         }
         window *= 4;
+    }
+}
+
+/// At most this much of the file's end opens as items (long tool outputs make few prompts a
+/// lot of file); more when the last prompt starts further back.
+const OPEN_BYTES: u64 = 8 << 20;
+
+/// Where the session opens: the start of the person's prompt `OPEN_WITH` from the end, or the
+/// first one in the last `OPEN_BYTES`, whichever is later (never before `live_from`, always
+/// with the last prompt); looked for from the end.
+fn open_from(host: &dyn Host, path: &Path, len: u64, live_from: u64) -> std::io::Result<u64> {
+    let mut window = OPEN_BYTES;
+    loop {
+        let from = len.saturating_sub(window).max(live_from);
+        let mut prompts: Vec<u64> = Vec::new();
+        host.for_each_line(path, from, None, &mut |offset, line| {
+            let head = &line[..line.find("\"message\":").unwrap_or(line.len())];
+            if head.contains("\"type\":\"user\"") && !line.contains("\"tool_result\"") && serde_json::from_str::<Value>(line).is_ok_and(|v| is_prompt(&v)) {
+                prompts.push(offset);
+            }
+            true
+        })?;
+        if !prompts.is_empty() {
+            return Ok(prompts[prompts.len().saturating_sub(OPEN_WITH)]);
+        }
+        if from == live_from {
+            return Ok(live_from);
+        }
+        window *= 4;
+    }
+}
+
+/// Rebuild a session's chat reading its file as a stream, never whole. Only its last
+/// `OPEN_WITH` prompts and what followed them become items now; before them, each stretch up
+/// to a compaction, and the part of the live context before those prompts, becomes an
+/// [`Item::Earlier`] placeholder (read by [`load_segment`] when it is scrolled to), each
+/// compaction an [`Item::Compacted`] divider with the summary. The counts and the cost come
+/// from the whole file: what was read before is kept (see [`Index`]), so a session opened again
+/// reads only what came after.
+pub fn load_streaming(host: &dyn Host, path: &Path, cwd: &str) -> std::io::Result<Conversation> {
+    use crate::conversation::Item;
+    let len = host.len(path)?;
+    // What was read before: it knows the compactions up to where it stops, so only the rest
+    // is looked through for a later one.
+    let known = read_index(host, path, len);
+    let live_from = match &known {
+        Some(k) => {
+            let mut last = k.seg_from;
+            host.for_each_line(path, k.upto, None, &mut |offset, line| {
+                if line.contains("\"compact_boundary\"") && serde_json::from_str::<Value>(line).is_ok_and(|v| is_boundary(&v)) {
+                    last = offset;
+                }
+                true
+            })?;
+            last
+        }
+        None => last_compaction(host, path, len)?,
     };
-    host.for_each_line(path, 0, None, &mut |offset, line| {
-        // Before the last compaction only the counts and the cost are needed: the few fields
+    let tail_from = open_from(host, path, len, live_from)?;
+    // Used when it reaches no further than where the items start.
+    let mut ix = known.filter(|i| i.upto <= tail_from).unwrap_or_default();
+    let mut tally = Tally::resume(ix.last_message.take());
+    let mut chat = Conversation::new(cwd);
+    chat.replaying = true;
+    let mut mapper = Mapper::new(cwd);
+    mapper.history = true;
+    let mut last_turn: Option<Event> = None;
+    // The head as it is where the items start: kept for the next opening.
+    let mut at_tail: Option<Index> = None;
+    let start = ix.upto;
+    host.for_each_line(path, start, None, &mut |offset, line| {
+        if offset >= tail_from && at_tail.is_none() {
+            at_tail = Some(Index { upto: tail_from, last_message: tally.last(), ..ix.clone() });
+        }
+        // Before the items start only the counts and the cost are needed: the few fields
         // they use are read, not the messages (most of a long session's file).
-        if offset < live_from && !line.contains("compact_boundary") && !line.contains("isCompactSummary") {
+        if offset < tail_from && !line.contains("compact_boundary") && !line.contains("isCompactSummary") {
             // The person's lines (with the tools' output, the bulk of the file) say what they
             // are before their message: counted from that, not read at all.
             let head = &line[..line.find("\"message\":").unwrap_or(line.len())];
             if head.contains("\"type\":\"user\"") {
                 if !head.contains("\"isSidechain\":true") {
-                    seg_messages += 1;
+                    ix.seg_messages += 1;
                 }
                 return true;
             }
             let Ok(l) = serde_json::from_str::<Light>(line) else { return true };
-            if session_id.is_none() {
-                session_id = l.session_id;
+            if ix.session_id.is_none() {
+                ix.session_id = l.session_id;
             }
             if l.sidechain != Some(true) {
                 if matches!(l.ty.as_deref(), Some("user" | "assistant")) {
-                    seg_messages += 1;
+                    ix.seg_messages += 1;
                 }
                 if let (Some("assistant"), Some(m)) = (l.ty.as_deref(), l.message) {
-                    cost += tally.add(&serde_json::json!({"type": "assistant", "message": {"id": m.id, "model": m.model, "usage": m.usage}}));
+                    ix.cost += tally.add(&serde_json::json!({"type": "assistant", "message": {"id": m.id, "model": m.model, "usage": m.usage}}));
                 }
             }
             return true;
         }
         let Ok(v) = serde_json::from_str::<Value>(line) else { return true };
-        if session_id.is_none() {
-            session_id = v.get("sessionId").and_then(Value::as_str).map(str::to_string);
+        if ix.session_id.is_none() {
+            ix.session_id = v.get("sessionId").and_then(Value::as_str).map(str::to_string);
         }
         if is_boundary(&v) {
-            segments.push(Segment { from: seg_from, to: offset, messages: seg_messages });
+            ix.segments.push((ix.seg_from, offset, ix.seg_messages));
             let meta = v.get("compactMetadata");
-            dividers.push(Item::Compacted {
-                summary: String::new(),
-                trigger: meta.and_then(|m| m.get("trigger")).and_then(Value::as_str).map(str::to_string),
-                tokens: meta.and_then(|m| m.get("preTokens")).and_then(Value::as_u64),
-            });
-            seg_from = offset;
-            seg_messages = 0;
-            // What came before is not kept: only the live context is built now.
-            chat = fresh();
+            ix.dividers.push((
+                String::new(),
+                meta.and_then(|m| m.get("trigger")).and_then(Value::as_str).map(str::to_string),
+                meta.and_then(|m| m.get("preTokens")).and_then(Value::as_u64),
+            ));
+            ix.seg_from = offset;
+            ix.seg_messages = 0;
+            // What came before is not kept: only the live context is built.
+            chat = Conversation::new(cwd);
+            chat.replaying = true;
             mapper = Mapper::new(cwd);
             mapper.history = true;
             return true;
         }
         if v.get("isCompactSummary").and_then(Value::as_bool) == Some(true)
-            && let Some(Item::Compacted { summary, .. }) = dividers.last_mut()
+            && let Some((summary, ..)) = ix.dividers.last_mut()
             && summary.is_empty()
         {
             *summary = user_text(&v).unwrap_or_default();
         }
         let sidechain = v.get("isSidechain").and_then(Value::as_bool) == Some(true);
-        if !sidechain && matches!(v.get("type").and_then(Value::as_str), Some("user" | "assistant")) {
-            seg_messages += 1;
+        if offset < tail_from {
+            // The compaction's summary shows on its divider: not a message of the part.
+            let summary = v.get("isCompactSummary").and_then(Value::as_bool) == Some(true);
+            if !sidechain && !summary && matches!(v.get("type").and_then(Value::as_str), Some("user" | "assistant")) {
+                ix.seg_messages += 1;
+            }
+            if !sidechain {
+                ix.cost += tally.add(&v);
+            }
+            return true;
         }
         if let Some(end) = turn_end(&v) {
             last_turn = Some(end.clone());
         }
-        if offset >= live_from {
-            chat.apply_all(line_events(&v, &mut mapper));
-            if let Some(end) = turn_end(&v) {
-                chat.apply(end);
-            }
+        chat.apply_all(line_events(&v, &mut mapper));
+        if let Some(end) = turn_end(&v) {
+            chat.apply(end);
         }
         if !sidechain {
-            cost += tally.add(&v);
+            ix.cost += tally.add(&v);
         }
         true
     })?;
-    let mut head: Vec<Item> = Vec::new();
-    for (seg, divider) in segments.into_iter().zip(dividers) {
-        if seg.messages > 0 {
-            head.push(Item::Earlier { from: seg.from, to: seg.to, messages: seg.messages });
+    let saved = at_tail.unwrap_or_else(|| Index { upto: tail_from.min(len), last_message: tally.last(), ..ix.clone() });
+    if saved.upto > start
+        && let Some(p) = index_path(host, path)
+    {
+        let saved = Index { fingerprint: fingerprint(host, path, saved.upto), ..saved };
+        if let Some(dir) = p.parent() {
+            let _ = std::fs::create_dir_all(dir);
         }
-        head.push(divider);
+        if let Ok(text) = serde_json::to_string(&saved) {
+            let _ = std::fs::write(&p, text);
+        }
+    }
+    // The head: each stretch before a compaction and its divider, then the live context's
+    // part before the items.
+    let mut head: Vec<Item> = Vec::new();
+    for ((from, to, messages), (summary, trigger, tokens)) in ix.segments.iter().cloned().zip(ix.dividers.iter().cloned()) {
+        if messages > 0 {
+            head.push(Item::Earlier { from, to, messages });
+        }
+        head.push(Item::Compacted { summary, trigger, tokens });
+    }
+    // No compaction comes after where the items start: the live context's count up to there.
+    let before_items = saved.seg_messages;
+    if tail_from > ix.seg_from && before_items > 0 {
+        head.push(Item::Earlier { from: ix.seg_from, to: tail_from, messages: before_items });
     }
     if !head.is_empty() {
         head.append(&mut chat.items);
@@ -477,10 +606,10 @@ pub fn load_streaming(host: &dyn Host, path: &Path, cwd: &str) -> std::io::Resul
     {
         chat.apply(end);
     }
-    if cost > 0.0 {
-        chat.apply(Event::CostEstimate { usd: cost - chat.total_cost_usd.min(cost) });
+    if ix.cost > 0.0 {
+        chat.apply(Event::CostEstimate { usd: ix.cost - chat.total_cost_usd.min(ix.cost) });
     }
-    chat.session_id = session_id;
+    chat.session_id = ix.session_id;
     chat.busy = false;
     chat.status = None;
     chat.replaying = false;
@@ -1172,6 +1301,45 @@ mod tests {
     fn reads_a_process_folder_without_lsof() {
         let here = std::env::current_dir().unwrap().canonicalize().unwrap();
         assert_eq!(macos_cwd(std::process::id()).map(|p| p.canonicalize().unwrap()), Some(here));
+    }
+
+    #[test]
+    fn a_long_session_opens_on_its_last_prompts_and_again_from_what_it_kept() {
+        use crate::conversation::Item;
+        let dir = std::env::temp_dir().join(format!("wb-open-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("open-test.jsonl");
+        let user = |t: &str| format!("{{\"type\":\"user\",\"sessionId\":\"s\",\"message\":{{\"role\":\"user\",\"content\":\"{t}\"}}}}");
+        let said = |id: &str, t: &str| format!("{{\"type\":\"assistant\",\"message\":{{\"id\":\"{id}\",\"model\":\"claude-haiku-4-5\",\"role\":\"assistant\",\"stop_reason\":\"end_turn\",\"content\":[{{\"type\":\"text\",\"text\":\"{t}\"}}],\"usage\":{{\"input_tokens\":1000,\"output_tokens\":10}}}}}}");
+        let turns = |range: std::ops::Range<usize>| range.flat_map(|n| [user(&format!("ask {n}")), said(&format!("m{n}"), &format!("answer {n}"))]).collect::<Vec<_>>();
+        std::fs::write(&path, turns(0..35).join("\n") + "\n").unwrap();
+        let fresh = |path: &Path| {
+            if let Some(p) = index_path(&crate::host::LocalHost, path) {
+                let _ = std::fs::remove_file(p);
+            }
+            load_streaming(&crate::host::LocalHost, path, "/p").unwrap()
+        };
+        let first = fresh(&path);
+        // The 5 prompts before the last 30, and their answers, wait as one earlier part.
+        assert!(matches!(&first.items[0], Item::Earlier { messages: 10, .. }), "{:?}", first.items[0]);
+        assert!(matches!(&first.items[1], Item::User(t) if t == "ask 5"));
+        assert_eq!(first.items.len(), 1 + 60);
+        // Opened again: from what was kept, the same.
+        let again = load_streaming(&crate::host::LocalHost, &path, "/p").unwrap();
+        assert_eq!((again.items.len(), again.total_cost_usd), (first.items.len(), first.total_cost_usd));
+        // The file grows: what was kept and what came after make what a fresh read makes.
+        let mut text = std::fs::read_to_string(&path).unwrap();
+        text.push_str(&(turns(35..40).join("\n") + "\n"));
+        std::fs::write(&path, text).unwrap();
+        let grown = load_streaming(&crate::host::LocalHost, &path, "/p").unwrap();
+        let reread = fresh(&path);
+        assert_eq!(grown.items, reread.items);
+        assert!((grown.total_cost_usd - reread.total_cost_usd).abs() < 1e-9);
+        assert!(matches!(&grown.items[0], Item::Earlier { messages: 20, .. }));
+        if let Some(p) = index_path(&crate::host::LocalHost, &path) {
+            let _ = std::fs::remove_file(p);
+        }
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

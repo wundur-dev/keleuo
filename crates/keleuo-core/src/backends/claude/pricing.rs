@@ -57,9 +57,26 @@ pub fn cost(model: &str, usage: &Value) -> Option<f64> {
 #[derive(Default)]
 pub struct Tally {
     seen: HashMap<String, f64>,
+    last: Option<(String, f64)>,
 }
 
 impl Tally {
+    /// What the next lines need of it, to go on from here later: the last message's id and
+    /// cost (a message's lines follow each other, so only the last can go on).
+    pub fn last(&self) -> Option<(String, f64)> {
+        self.last.clone()
+    }
+
+    /// Go on from [`Tally::last`].
+    pub fn resume(last: Option<(String, f64)>) -> Self {
+        let mut t = Self::default();
+        if let Some((id, c)) = last {
+            t.seen.insert(id.clone(), c);
+            t.last = Some((id, c));
+        }
+        t
+    }
+
     /// What this line adds to the total (zero for lines without usage, or seen already).
     pub fn add(&mut self, line: &Value) -> f64 {
         if line.get("type").and_then(Value::as_str) != Some("assistant") {
@@ -75,7 +92,8 @@ impl Tally {
         if c <= before {
             return 0.0;
         }
-        self.seen.insert(id, c);
+        self.seen.insert(id.clone(), c);
+        self.last = Some((id, c));
         c - before
     }
 }
