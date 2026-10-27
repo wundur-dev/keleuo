@@ -1074,6 +1074,11 @@ impl Workspace {
                 ws.schedule_save(window, cx);
                 cx.notify();
             }
+            WebEvent::SendToChat { title, url, text } => {
+                let chat = ws.claude.clone();
+                ws.show_panel(PanelId::from(chat.entity_id()), window, cx);
+                chat.update(cx, |p, cx| p.take_page(title, url, text, window, cx));
+            }
             WebEvent::Closed => {
                 ws.webs.retain(|w| w != view);
                 ws.panel_subs.remove(&view.entity_id());
@@ -1432,6 +1437,15 @@ impl Workspace {
                 // Tests: whether the session's agent process runs.
                 let s = self.session.read(cx);
                 return format!("running={} dormant={} busy={}", s.agent_running(), s.dormant, s.chat.busy);
+            }
+            "web-send" => {
+                // Tests: Send page to chat, on the last web page opened.
+                let Some(web) = self.webs.last().cloned() else { return "no web page".into() };
+                web.update(cx, |w, _| w.send_to_chat());
+            }
+            "composer" => {
+                // Tests: the message box's text (a token as its marker), and what it would send.
+                return self.claude.read(cx).test_composer(cx);
             }
             "chat-head" => {
                 // Tests: how many items, and the first few, each as its start.

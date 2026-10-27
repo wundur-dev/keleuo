@@ -46,7 +46,7 @@ impl ChatPanel {
                                     .cursor_pointer()
                                     .hover(|d| d.bg(hover))
                                     .child(Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight }).xsmall())
-                                    .child(format!("Pasted text · {}", paste::size(p)))
+                                    .child(format!("{} · {}", super::composer::paste_name(p), paste::size(p)))
                                     .on_click(cx.listener(move |panel, _, _, cx| {
                                         if !panel.toggled.remove(&toggle) {
                                             panel.toggled.insert(toggle.clone());
