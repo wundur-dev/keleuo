@@ -687,6 +687,22 @@ impl ChatPanel {
         }
     }
 
+    /// Tests: the message box's text and its kept pastes' starts.
+    pub fn test_composer(&self, cx: &App) -> String {
+        let pastes: Vec<String> = self.pastes.iter().map(|p| p.chars().take(80).collect::<String>().replace('\n', " / ")).collect();
+        format!("box: {:?} | pastes: {:?}", self.input.read(cx).value().to_string(), pastes)
+    }
+
+    /// A web page sent from the web panel: its text into the message box as a token named for
+    /// the page (sent with the message, as a long paste is), the box focused to write about it.
+    pub fn take_page(&mut self, title: &str, url: &str, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let name = if title.trim().is_empty() { url } else { title.trim() };
+        let block = format!("[Web page: {name}]\n[{url}]\n\n{}", text.trim());
+        let label = composer::paste_name(&block);
+        self.paste_as(block, &label, window, cx);
+        self.focus_input(window, cx);
+    }
+
     pub fn focus_input(&self, window: &mut Window, cx: &mut App) {
         self.input.update(cx, |s, cx| s.focus(window, cx));
     }

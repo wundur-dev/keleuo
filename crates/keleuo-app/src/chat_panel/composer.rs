@@ -468,9 +468,15 @@ impl ChatPanel {
     /// in the box (the cursor steps over it, Backspace takes it whole), drawn as a pill; its
     /// text is the `[Pasted text #n · …]` that sending expands.
     pub(super) fn paste_long(&mut self, text: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.paste_as(text, "Pasted text", window, cx);
+    }
+
+    /// Text into the message box as a token named `what` (its size after), the text kept aside
+    /// and sent with the message.
+    pub(super) fn paste_as(&mut self, text: String, what: &str, window: &mut Window, cx: &mut Context<Self>) {
         let n = self.pastes.len() + 1;
         let typed = paste::token(n, &text);
-        let token = InlineToken::new(format!("paste-{n}"), typed.clone()).with_label(format!("Pasted text · {}", paste::size(&text)));
+        let token = InlineToken::new(format!("paste-{n}"), typed.clone()).with_label(format!("{what} · {}", paste::size(&text)));
         self.pastes.push(text);
         self.input.update(cx, |s, cx| {
             if s.replace_with_token(token, window, cx).is_err() {
@@ -856,7 +862,7 @@ impl ChatPanel {
                     .justify_center()
                     .text_xs()
                     .text_color(muted)
-                    .child(div().text_color(fg).truncate().child(format!("Pasted text · {}", paste::size(text))))
+                    .child(div().text_color(fg).truncate().child(format!("{} · {}", paste_name(text), paste::size(text))))
                     .child(div().truncate().font_family(crate::fonts::code(cx)).child(first))
                     .child(
                         div()
@@ -1597,4 +1603,29 @@ pub struct Voice {
 /// `text` with a space after it, unless empty or ending in one: what is said goes after.
 fn with_space(text: String) -> String {
     if text.is_empty() || text.ends_with(char::is_whitespace) { text } else { format!("{text} ") }
+}
+
+/// What a kept paste is called: a web page sent from the web panel by its title (see
+/// `ChatPanel::take_page`), anything else "Pasted text".
+pub(super) fn paste_name(text: &str) -> String {
+    match text.strip_prefix("[Web page: ").and_then(|t| t.split_once("]\n")) {
+        Some((title, _)) => {
+            let short: String = title.chars().take(40).collect();
+            if short.len() < title.len() { format!("Page · {short}…") } else { format!("Page · {short}") }
+        }
+        None => "Pasted text".into(),
+    }
+}
+
+#[cfg(test)]
+mod paste_name_tests {
+    use super::paste_name;
+
+    #[::core::prelude::v1::test]
+    fn a_sent_page_is_named_by_its_title() {
+        assert_eq!(paste_name("[Web page: Example Domain]\n[https://example.com/]\n\ntext"), "Page · Example Domain");
+        assert_eq!(paste_name("fn main() {}\n"), "Pasted text");
+        let long = format!("[Web page: {}]\n[u]\n\nx", "a".repeat(60));
+        assert!(paste_name(&long).ends_with('…'));
+    }
 }

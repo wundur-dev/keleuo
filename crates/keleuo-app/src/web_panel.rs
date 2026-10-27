@@ -34,7 +34,15 @@ pub enum WebEvent {
     Closed,
     /// Its tab became the shown one.
     Activated,
+    /// Send the page to the chat: its title, address and visible text.
+    SendToChat { title: String, url: String, text: String },
 }
+
+/// The page's visible text, as the person sees it (not its markup).
+const TEXT_SCRIPT: &str = "document.body ? document.body.innerText : ''";
+
+/// Pages longer than this are cut (with a note), to keep a message reasonable.
+const MAX_PAGE_TEXT: usize = 120_000;
 
 /// What the web view reports, from its own callbacks into the panel.
 enum PageEvent {
@@ -43,6 +51,8 @@ enum PageEvent {
     Title(String),
     /// A link that asked for a new window: opened here instead.
     NewWindow(String),
+    /// The page's text, asked for to send it to the chat (as the script returns it: JSON).
+    Text(String),
 }
 
 pub struct WebPanel {
@@ -197,7 +207,26 @@ impl WebPanel {
                 cx.notify();
             }
             PageEvent::NewWindow(url) => self.load(url, window, cx),
+            PageEvent::Text(raw) => {
+                let mut text = serde_json::from_str::<String>(&raw).unwrap_or(raw);
+                if text.len() > MAX_PAGE_TEXT {
+                    let cut = (0..=MAX_PAGE_TEXT).rev().find(|i| text.is_char_boundary(*i)).unwrap_or(0);
+                    text.truncate(cut);
+                    text.push_str("\n\n[The page goes on; cut here.]");
+                }
+                let title = self.title.clone().unwrap_or_default();
+                cx.emit(WebEvent::SendToChat { title, url: self.url.clone(), text });
+            }
         }
+    }
+
+    /// Ask the page for its text; it goes to the chat when it comes (see `PageEvent::Text`).
+    pub fn send_to_chat(&mut self) {
+        let Some(n) = &self.native else { return };
+        let tx = self.events.clone();
+        let _ = n.view.evaluate_script_with_callback(TEXT_SCRIPT, move |result| {
+            let _ = tx.try_send(PageEvent::Text(result));
+        });
     }
 
     fn back(&mut self) {
@@ -299,6 +328,15 @@ impl WebPanel {
                     .on_click(cx.listener(|p, _, window, cx| p.reload(window, cx))),
             )
             .child(div().flex_1().min_w_0().child(Input::new(&self.address).small()))
+            .child(
+                Button::new("web-send")
+                    .ghost()
+                    .xsmall()
+                    .icon(gpui_kit::assets::IconName::MessageSquareShare)
+                    .tooltip("Send page to chat")
+                    .disabled(!has_page)
+                    .on_click(cx.listener(|p, _, _, _| p.send_to_chat())),
+            )
             .child(
                 Button::new("web-open")
                     .ghost()

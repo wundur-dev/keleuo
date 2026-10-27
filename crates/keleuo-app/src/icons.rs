@@ -54,6 +54,8 @@ icon_assets!(
         Mic,
         Toolbox,
         Redo,
+        // Send page to chat, in the web panel.
+        MessageSquareShare,
     ]
 );
 
