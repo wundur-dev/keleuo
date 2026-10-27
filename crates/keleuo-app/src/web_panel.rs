@@ -191,6 +191,13 @@ impl WebPanel {
                 window.focus(&self.focus, cx);
             }
             PageEvent::Loaded(url) => {
+                // A page that focuses its own field as it loads takes the window's keys: they
+                // come back unless the person clicked into the page.
+                if let Some(n) = &self.native
+                    && !n.keyboard.get()
+                {
+                    n.take_keys_back();
+                }
                 if url != self.url && !url.is_empty() {
                     self.url = url.clone();
                     // Not under someone typing an address.
@@ -479,11 +486,13 @@ impl Native {
     fn paint(self: &Rc<Self>, bounds: Bounds<Pixels>, window: &mut Window) {
         let presence = Presence::new(self);
         window.on_mouse_event(move |_: &MouseDownEvent, phase, _, _| {
-            // The window got a click, so it was not on the page: the page gives up the keys.
+            // The window got a click, so it was not on the page: the page gives up the keys,
+            // also when it took them itself (a page focusing its own field) rather than by a
+            // click on it.
             if phase == DispatchPhase::Capture
                 && let Some(n) = presence.0.upgrade()
             {
-                n.release_keyboard();
+                n.take_keys_back();
             }
         });
         self.bounds.set(Some(bounds));
@@ -522,6 +531,12 @@ impl Native {
         if self.keyboard.replace(false) {
             let _ = self.view.focus_parent();
         }
+    }
+
+    /// The window's own view takes the keys, whether or not the page was known to have them.
+    fn take_keys_back(&self) {
+        self.keyboard.set(false);
+        let _ = self.view.focus_parent();
     }
 
     /// An editing command (`copy:`, `paste:`…) sent to the page, when it has one by that name.
