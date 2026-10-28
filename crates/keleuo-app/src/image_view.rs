@@ -27,10 +27,11 @@ pub fn is_open(cx: &App) -> bool {
     cx.try_global::<Shown>().is_some_and(|s| s.0.is_some())
 }
 
-/// The overlay, over everything (the window's last child).
+/// The overlay, over everything: the window's last child, and painted after the parts that
+/// are themselves painted late (the chat's working line, menus), with its dimmed backdrop.
 pub fn render(cx: &App) -> Option<AnyElement> {
     let path = cx.try_global::<Shown>()?.0.clone()?;
-    Some(
+    Some(deferred(
         div()
             .id("image-view")
             .absolute()
@@ -80,7 +81,9 @@ pub fn render(cx: &App) -> Option<AnyElement> {
                     .text_size(px(12.))
                     .text_color(gpui_kit::white().opacity(0.7))
                     .child("Esc, or a click anywhere, closes it"),
-            )
-            .into_any_element(),
+            ),
     )
+    // Above every other late part (menus use 1 and 2).
+    .with_priority(100)
+    .into_any_element())
 }
