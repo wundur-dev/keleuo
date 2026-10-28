@@ -1,0 +1,37 @@
+{
+  "id": "wundur/game-assets",
+  "name": "Game assets",
+  "version": "0.1.0",
+  "description": "Images for games (sprites, icons, textures, concept art) with OpenAI's gpt-image, directly or through Azure OpenAI, with your own key. Sound and 3D models come next.",
+  "homepage": "https://github.com/wundur-dev/keleuo",
+  "secrets": [
+    { "name": "OPENAI_API_KEY", "label": "OpenAI API key", "help": "https://platform.openai.com/api-keys", "optional": true },
+    { "name": "AZURE_OPENAI_KEY", "label": "Azure OpenAI key", "optional": true }
+  ],
+  "settings": [
+    { "name": "image_provider", "label": "Images from", "choices": ["openai", "azure"], "default": "openai" },
+    { "name": "image_model", "label": "Image model", "default": "gpt-image-1" },
+    { "name": "azure_endpoint", "label": "Azure endpoint", "placeholder": "https://<name>.openai.azure.com" },
+    { "name": "azure_deployment", "label": "Azure deployment", "placeholder": "your gpt-image deployment's name" },
+    { "name": "azure_api_version", "label": "Azure API version", "default": "2025-04-01-preview" },
+    { "name": "output_folder", "label": "Save to", "default": "assets/generated" }
+  ],
+  "network": ["api.openai.com", "*.openai.azure.com", "*.cognitiveservices.azure.com"],
+  "tools": [
+    {
+      "name": "make_image",
+      "description": "Make an image with gpt-image and save it as a PNG in the project. Use for game sprites, icons, textures and concept art: describe subject, style, colours and framing in detail. Returns the image so you can check it and try again.",
+      "script": "image.js",
+      "params": [
+        { "name": "prompt", "kind": "text", "required": true, "description": "What to draw, in detail: subject, style, colours, framing." },
+        { "name": "size", "kind": "choice", "choices": ["1024x1024", "1536x1024", "1024x1536", "auto"], "description": "Pixel size (square, landscape, portrait). Default square." },
+        { "name": "quality", "kind": "choice", "choices": ["low", "medium", "high", "auto"], "description": "Higher costs more. Default medium." },
+        { "name": "transparent", "kind": "flag", "description": "A transparent background, for sprites and icons." },
+        { "name": "name", "kind": "text", "description": "File name to save as, without extension (default: from the prompt)." }
+      ],
+      "needs": ["OPENAI_API_KEY|AZURE_OPENAI_KEY"],
+      "cost": "about $0.01 to $0.25 an image, by size and quality",
+      "timeout_secs": 180
+    }
+  ]
+}

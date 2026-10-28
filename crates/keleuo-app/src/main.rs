@@ -54,6 +54,7 @@ mod sheet_tabs;
 mod skill_installer;
 mod settings_fonts;
 mod settings_mcp;
+mod settings_packs;
 mod settings_tools;
 mod settings_window;
 mod shell;

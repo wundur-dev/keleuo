@@ -234,6 +234,9 @@ pub struct Settings {
     pub folder_mcp: std::collections::BTreeMap<PathBuf, crate::mcp::FolderServers>,
     /// Tools made from command-line programs ([`crate::cli_tools`]); and each folder's own.
     pub cli_tools: Vec<crate::cli_tools::Tool>,
+    /// Tool packs' settings ([`crate::packs`]), by pack id; and the packs turned off.
+    pub pack_settings: std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>,
+    pub packs_off: Vec<String>,
     pub folder_tools: std::collections::BTreeMap<PathBuf, crate::cli_tools::FolderTools>,
     /// Settings this build does not know (written by a newer one), kept as they are so
     /// saving does not drop them.

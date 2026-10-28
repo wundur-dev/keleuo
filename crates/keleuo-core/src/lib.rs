@@ -40,6 +40,7 @@ pub mod links;
 pub mod markdown_marks;
 pub mod mcp;
 pub mod outbox;
+pub mod packs;
 pub mod paste;
 pub mod platform;
 pub mod questions;

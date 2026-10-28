@@ -13,6 +13,7 @@ use std::process::Stdio;
 use base64::Engine as _;
 use gpui_kit::*;
 use keleuo_core::cli_tools::{self, Output, Tool};
+use keleuo_core::packs::{self, Pack, PackTool};
 use keleuo_core::conversation::SendState;
 use serde_json::{Value, json};
 
@@ -26,11 +27,17 @@ const MAX_OUTPUT: usize = 100_000;
 const MAX_IMAGES: usize = 4;
 const MAX_IMAGE_BYTES: u64 = 5 * 1024 * 1024;
 
+/// What a run runs: a command (the person's own tool), or a pack's script.
+enum Job {
+    Command(Vec<String>),
+    Pack(Box<(Pack, PackTool)>, Value),
+}
+
 /// A run waiting for the person.
 struct Pending {
     session: WeakEntity<AgentSession>,
     tool: Tool,
-    argv: Vec<String>,
+    job: Job,
     reply: Option<Reply>,
 }
 
@@ -44,14 +51,36 @@ struct Runs {
 
 impl Global for Runs {}
 
-/// The tools the session's agent gets.
+/// The tools the session's agent gets: the person's own, then the packs' (those with the keys
+/// they need; a name the person's own tools have already is theirs).
 fn tools_here(session: &Entity<AgentSession>, cx: &App) -> Vec<Tool> {
     let s = session.read(cx);
     if s.host_is_remote() {
         return Vec::new();
     }
     let settings = cx.global::<crate::AppSettings>().0.borrow();
-    cli_tools::tools_for(&settings.cli_tools, &settings.folder_tools, s.cwd())
+    let mut tools = cli_tools::tools_for(&settings.cli_tools, &settings.folder_tools, s.cwd());
+    for (pack, tool) in pack_tools(cx) {
+        if !tools.iter().any(|t| t.name == tool.name) {
+            tools.push(pack.as_tool(&tool));
+        }
+    }
+    tools
+}
+
+/// The installed, switched-on packs' tools that have the keys they need.
+fn pack_tools(cx: &App) -> Vec<(Pack, PackTool)> {
+    let Some(dir) = packs::dir() else { return Vec::new() };
+    let off = cx.global::<crate::AppSettings>().0.borrow().packs_off.clone();
+    packs::installed(&dir)
+        .into_iter()
+        .filter(|p| !off.contains(&p.manifest.id))
+        .flat_map(|p| {
+            let has = |name: &str| keleuo_core::secrets::get(&p.secret_account(name)).is_some();
+            let ready: Vec<PackTool> = p.manifest.tools.iter().filter(|t| Pack::ready(t, &has)).cloned().collect();
+            ready.into_iter().map(move |t| (p.clone(), t))
+        })
+        .collect()
 }
 
 /// The tools, as `keleuo-mcp` lists them.
@@ -70,21 +99,36 @@ pub fn call(session: Entity<AgentSession>, name: &str, args: Value, reply: Optio
     let Some(tool) = tools_here(&session, cx).into_iter().find(|t| t.name == name) else {
         return answer(reply, format!("Keleuo has no tool {name}."), true, Vec::new());
     };
-    let argv = match cli_tools::argv(&tool, &args) {
-        Ok(a) => a,
-        Err(why) => return answer(reply, format!("Not run: {why}."), true, Vec::new()),
+    // The person's own tool of that name, else a pack's.
+    let own = {
+        let settings = cx.global::<crate::AppSettings>().0.borrow();
+        cli_tools::tools_for(&settings.cli_tools, &settings.folder_tools, session.read(cx).cwd()).iter().any(|t| t.name == name)
+    };
+    let (job, shown) = if own {
+        match cli_tools::argv(&tool, &args) {
+            Ok(argv) => {
+                let shown = argv.iter().map(|a| keleuo_core::host::shell_quote(a)).collect::<Vec<_>>().join(" ");
+                (Job::Command(argv), shown)
+            }
+            Err(why) => return answer(reply, format!("Not run: {why}."), true, Vec::new()),
+        }
+    } else {
+        let Some(found) = pack_tools(cx).into_iter().find(|(_, t)| t.name == name) else {
+            return answer(reply, format!("Keleuo has no tool {name}."), true, Vec::new());
+        };
+        let shown = format!("{} ({}) {}{}", found.1.name, found.0.manifest.name, args, if found.1.cost.is_empty() { String::new() } else { format!(" · costs {}", found.1.cost) });
+        (Job::Pack(Box::new(found), args), shown)
     };
     let key = (session.entity_id(), tool.name.clone());
     if tool.ask && !cx.try_global::<Runs>().is_some_and(|r| r.always.contains(&key)) {
         let runs = cx.default_global::<Runs>();
         runs.next += 1;
         let id = runs.next;
-        let shown = argv.iter().map(|a| keleuo_core::host::shell_quote(a)).collect::<Vec<_>>().join(" ");
-        runs.pending.insert(id, Pending { session: session.downgrade(), tool: tool.clone(), argv, reply });
+        runs.pending.insert(id, Pending { session: session.downgrade(), tool: tool.clone(), job, reply });
         session.update(cx, |s, cx| s.note_tool_run(id, &tool.name, &shown, SendState::Asking, cx));
         return;
     }
-    start(&session, tool, argv, reply, cx);
+    start(&session, tool, job, reply, cx);
 }
 
 /// The person's answer to run `id`.
@@ -99,12 +143,31 @@ pub fn decide(id: u64, decision: Decision, cx: &mut App) {
         cx.default_global::<Runs>().always.insert((session.entity_id(), p.tool.name.clone()));
     }
     session.update(cx, |s, cx| s.set_tool_run(id, SendState::Sent, cx));
-    start(&session, p.tool, p.argv, p.reply, cx);
+    start(&session, p.tool, p.job, p.reply, cx);
 }
 
 /// Run it off the UI thread and answer when it ends.
-fn start(session: &Entity<AgentSession>, tool: Tool, argv: Vec<String>, reply: Option<Reply>, cx: &mut App) {
+fn start(session: &Entity<AgentSession>, tool: Tool, job: Job, reply: Option<Reply>, cx: &mut App) {
     let cwd = session.read(cx).cwd().to_path_buf();
+    let argv = match job {
+        Job::Command(argv) => argv,
+        Job::Pack(found, args) => {
+            let (pack, ptool) = *found;
+            let settings = cx.global::<crate::AppSettings>().0.borrow().pack_settings.get(&pack.manifest.id).cloned().unwrap_or_default();
+            std::thread::spawn(move || {
+                let secret = |name: &str| keleuo_core::secrets::get(&pack.secret_account(name));
+                let grant = packs::Grant { cwd: &cwd, secret: &secret, settings: &settings, extra_hosts: Vec::new(), allow_http: false };
+                let out = packs::run(&pack, &ptool, &args, &grant);
+                let mut text = out.text;
+                if !out.files.is_empty() {
+                    let names: Vec<String> = out.files.iter().map(|f| f.strip_prefix(&cwd).unwrap_or(f).display().to_string()).collect();
+                    text.push_str(&format!("\nFiles: {}", names.join(", ")));
+                }
+                answer(reply, text, out.failed, images_as_content(&out.images));
+            });
+            return;
+        }
+    };
     let env: Vec<(String, String)> = tool
         .secrets
         .iter()
@@ -115,6 +178,25 @@ fn start(session: &Entity<AgentSession>, tool: Tool, argv: Vec<String>, reply: O
         let (text, error, images) = run(&tool, argv, &cwd, env, policy.as_ref());
         answer(reply, text, error, images);
     });
+}
+
+/// Images as MCP image content (the first few, each not too big).
+fn images_as_content(paths: &[PathBuf]) -> Vec<Value> {
+    paths
+        .iter()
+        .filter(|p| p.metadata().is_ok_and(|m| m.len() <= MAX_IMAGE_BYTES))
+        .take(MAX_IMAGES)
+        .filter_map(|p| {
+            let bytes = std::fs::read(p).ok()?;
+            let mime = match p.extension().and_then(|e| e.to_str()).map(str::to_lowercase).as_deref() {
+                Some("jpg" | "jpeg") => "image/jpeg",
+                Some("webp") => "image/webp",
+                Some("gif") => "image/gif",
+                _ => "image/png",
+            };
+            Some(json!({ "data": base64::engine::general_purpose::STANDARD.encode(bytes), "mimeType": mime }))
+        })
+        .collect()
 }
 
 /// `~/` at a word's start as the home folder (no shell does it).
@@ -172,25 +254,7 @@ fn run(tool: &Tool, argv: Vec<String>, cwd: &Path, env: Vec<(String, String)>, p
             text = format!("{text}\n(exit status {})", status.code().map_or("killed".into(), |c| c.to_string())).trim().to_string();
         }
     }
-    let images = if tool.output == Output::Images && !failed {
-        cli_tools::images_in(&stdout, cwd)
-            .into_iter()
-            .filter(|p| p.metadata().is_ok_and(|m| m.len() <= MAX_IMAGE_BYTES))
-            .take(MAX_IMAGES)
-            .filter_map(|p| {
-                let bytes = std::fs::read(&p).ok()?;
-                let mime = match p.extension().and_then(|e| e.to_str()).map(str::to_lowercase).as_deref() {
-                    Some("jpg" | "jpeg") => "image/jpeg",
-                    Some("webp") => "image/webp",
-                    Some("gif") => "image/gif",
-                    _ => "image/png",
-                };
-                Some(json!({ "data": base64::engine::general_purpose::STANDARD.encode(bytes), "mimeType": mime }))
-            })
-            .collect()
-    } else {
-        Vec::new()
-    };
+    let images = if tool.output == Output::Images && !failed { images_as_content(&cli_tools::images_in(&stdout, cwd)) } else { Vec::new() };
     (if text.is_empty() { "(no output)".into() } else { text }, failed, images)
 }
 
