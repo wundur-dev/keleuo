@@ -1,7 +1,7 @@
 {
   "id": "wundur/game-assets",
   "name": "Game assets",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Images, sound, music, voices and 3D models for games, with your own keys.",
   "homepage": "https://github.com/wundur-dev/keleuo",
   "services": [
@@ -588,6 +588,36 @@
       ],
       "cost": "uses Tripo credits: a rig check, the rig, and the animations",
       "timeout_secs": 600,
+      "service": "models"
+    },
+    {
+      "name": "view_model",
+      "description": "Show a 3D model (a GLB in the project) to the person: writes a viewer page next to it (one HTML file holding the model, nothing to install, opens in any browser) and opens it in Keleuo's web panel. A studio shot: backdrop, floor and shadow, lights; drag to turn, scroll to zoom; its animations to pick, play, scrub and slow down, with the camera following the body. Use after model_from_* or rig_model so the person sees the result.",
+      "script": "view.js",
+      "params": [
+        {
+          "name": "model",
+          "kind": "text",
+          "required": true,
+          "description": "The GLB to show, a path in the project."
+        },
+        {
+          "name": "animation",
+          "kind": "text",
+          "description": "The animation to start with (part of its name, e.g. walk). Default: the first."
+        },
+        {
+          "name": "title",
+          "kind": "text",
+          "description": "What the page is called (default: the file's name)."
+        },
+        {
+          "name": "name",
+          "kind": "text",
+          "description": "File name for the page, without extension (default: the model's, with -viewer)."
+        }
+      ],
+      "needs": [],
       "service": "models"
     }
   ]

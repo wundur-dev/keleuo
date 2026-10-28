@@ -18,6 +18,7 @@ appear once its key is set in Settings > Tools > Packs; everything is saved in
 **3D models: Tripo**
 
 - `model_from_text`, `model_from_image`: a textured GLB, with a preview image the agent can look at. A job of a minute or a few.
+- `view_model`: a page to look at a model in (one HTML file next to it, the model inside), opened in Keleuo's web panel: turn and zoom, play its animations with the camera following.
 - `rig_model`: a skeleton for a model (from one of the above, by its Tripo task, or a GLB or FBX in the project), and optionally Tripo's preset animations (idle, walk, run…). GLB or FBX, with Mixamo, Unity or Unreal bone layouts.
 
 Tools that cost money ask before they run; "Always for this session" stops asking.

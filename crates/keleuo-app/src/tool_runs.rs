@@ -154,6 +154,15 @@ fn start(session: &Entity<AgentSession>, tool: Tool, job: Job, reply: Option<Rep
         Job::Pack(found, args) => {
             let (pack, ptool) = *found;
             let settings = cx.global::<crate::AppSettings>().0.borrow().pack_settings.get(&pack.manifest.id).cloned().unwrap_or_default();
+            // A page it made (a model viewer) opens in the session's web panel once it is done.
+            let (shown, show_rx) = async_channel::bounded::<std::path::PathBuf>(1);
+            let weak = session.downgrade();
+            cx.spawn(async move |cx: &mut AsyncApp| {
+                if let Ok(path) = show_rx.recv().await {
+                    let _ = weak.update(cx, |_, cx| cx.emit(crate::agent_session::SessionEvent::ShowPage(path)));
+                }
+            })
+            .detach();
             std::thread::spawn(move || {
                 let secret = |name: &str| keleuo_core::secrets::get(&pack.secret_account(name));
                 let grant = packs::Grant { cwd: &cwd, secret: &secret, settings: &settings, extra_hosts: Vec::new(), allow_http: false };
@@ -162,6 +171,9 @@ fn start(session: &Entity<AgentSession>, tool: Tool, job: Job, reply: Option<Rep
                 if !out.files.is_empty() {
                     let names: Vec<String> = out.files.iter().map(|f| f.strip_prefix(&cwd).unwrap_or(f).display().to_string()).collect();
                     text.push_str(&format!("\nFiles: {}", names.join(", ")));
+                }
+                if let Some(page) = out.show.filter(|_| !out.failed) {
+                    let _ = shown.try_send(page);
                 }
                 answer(reply, text, out.failed, images_as_content(&out.images));
             });

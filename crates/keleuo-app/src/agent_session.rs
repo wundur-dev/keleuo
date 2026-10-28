@@ -124,6 +124,8 @@ pub enum SessionEvent {
     TurnEnded,
     /// Cmd+click in the agent's terminal interface: the row's text and the column clicked.
     TerminalLink { line: String, column: usize, browser: bool },
+    /// A tool made a page to look at (a pack's model viewer): open it in the web panel.
+    ShowPage(PathBuf),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
