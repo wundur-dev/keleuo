@@ -1598,6 +1598,19 @@ impl Shell {
                 crate::about::open_tab(arg, cx);
                 "ok".into()
             }
+            "pack-unfold" => {
+                // Tests: unfold a part of a pack's card in Settings > Tools (`wundur/game-assets/svc/images`).
+                match &self.settings {
+                    Some((page, _)) => {
+                        page.update(cx, |p, cx| {
+                            p.packs.unfold(arg);
+                            cx.notify();
+                        });
+                        "ok".into()
+                    }
+                    None => "settings are not open".into(),
+                }
+            }
             "settings" => {
                 // Tests: `settings`, `settings off`, `settings <page>` (`mcp here`: on this
                 // session's folder).

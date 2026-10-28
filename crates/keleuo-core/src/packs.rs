@@ -27,6 +27,23 @@ pub struct Secret {
     pub optional: bool,
     /// Shown only when these settings have these values ([`shown`]).
     pub when: BTreeMap<String, String>,
+    /// The [`Service`] it belongs to (empty: the pack's own).
+    pub service: String,
+}
+
+/// One service a pack uses (images, audio): its keys, settings and tools go together in
+/// Settings, and it is set up or not on its own.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Service {
+    pub id: String,
+    pub name: String,
+    /// What it does, and from whom ("ElevenLabs · Sound effects, voices and music").
+    pub description: String,
+    /// `image`, `audio`, `model` or `box`: the icon beside it.
+    pub icon: String,
+    /// A setting picking among providers, shown on the service's row (OpenAI or Azure).
+    pub choose: String,
 }
 
 /// A setting the person gives a pack (an endpoint, a folder).
@@ -38,10 +55,16 @@ pub struct Setting {
     pub placeholder: String,
     /// One of these (a dropdown in Settings), when given.
     pub choices: Vec<String>,
+    /// How choices are shown ({"azure": "Azure OpenAI"}); missing ones show as they are.
+    pub labels: BTreeMap<String, String>,
     pub default: String,
     /// Shown only when these settings have these values ([`shown`]): an Azure endpoint only
     /// when images come from Azure.
     pub when: BTreeMap<String, String>,
+    /// The [`Service`] it belongs to (empty: the pack's own).
+    pub service: String,
+    /// Folded away under Advanced (models, API versions).
+    pub advanced: bool,
 }
 
 /// Whether something with `when` is shown, given the pack's settings' `values`: each named
@@ -68,6 +91,8 @@ pub struct PackTool {
     pub ask: Option<bool>,
     /// Seconds before it is stopped (0: two minutes; at most ten).
     pub timeout_secs: u64,
+    /// The [`Service`] it belongs to (empty: the pack's own).
+    pub service: String,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -78,6 +103,8 @@ pub struct Manifest {
     pub version: String,
     pub description: String,
     pub homepage: String,
+    /// The services it uses, in the order Settings shows them (none: one list).
+    pub services: Vec<Service>,
     pub secrets: Vec<Secret>,
     pub settings: Vec<Setting>,
     /// Hosts its scripts may reach (`*.example.com`: any under it). HTTPS only.
@@ -102,6 +129,21 @@ impl Pack {
             }
         }
         values
+    }
+
+    /// What service `service` still needs before its tools work, given its settings' `values`
+    /// and which secrets `has` says are kept: the labels of the keys and settings missing
+    /// (none: ready). Only what applies counts (no Azure endpoint for OpenAI).
+    pub fn missing(&self, service: &str, values: &BTreeMap<String, String>, has: &dyn Fn(&str) -> bool) -> Vec<String> {
+        let m = &self.manifest;
+        let label = |label: &str, name: &str| if label.is_empty() { name.to_string() } else { label.to_string() };
+        let keys = m.secrets.iter().filter(|s| s.service == service && shown(&s.when, values) && !has(&s.name)).map(|s| label(&s.label, &s.name));
+        let settings = m
+            .settings
+            .iter()
+            .filter(|s| s.service == service && shown(&s.when, values) && values.get(&s.name).is_none_or(|v| v.is_empty()))
+            .map(|s| label(&s.label, &s.name));
+        keys.chain(settings).collect()
     }
 
     /// The key store's name for its secret `name`.
@@ -648,6 +690,18 @@ mod tests {
         assert!(azure.contains(&"AZURE_OPENAI_KEY".into()) && azure.contains(&"azure_endpoint".into()), "{azure:?}");
         assert!(!azure.contains(&"OPENAI_API_KEY".into()) && !azure.contains(&"image_model".into()), "{azure:?}");
         assert!(azure.contains(&"ELEVENLABS_API_KEY".into()) && azure.contains(&"output_folder".into()));
+    }
+
+    #[test]
+    fn a_service_says_what_it_still_needs() {
+        let pack = game_assets();
+        let azure: BTreeMap<String, String> = [("image_provider".to_string(), "azure".to_string())].into();
+        let none = |_: &str| false;
+        assert_eq!(pack.missing("images", &pack.values(None), &none), ["OpenAI API key"]);
+        assert_eq!(pack.missing("images", &pack.values(Some(&azure)), &none), ["Azure OpenAI key", "Endpoint", "Deployment"]);
+        let audio = |n: &str| n == "ELEVENLABS_API_KEY";
+        assert!(pack.missing("audio", &pack.values(None), &audio).is_empty());
+        assert_eq!(pack.missing("models", &pack.values(None), &audio), ["API key"]);
     }
 
     /// A stand-in service on 127.0.0.1: answers `count` requests in turn with `answer(its port,

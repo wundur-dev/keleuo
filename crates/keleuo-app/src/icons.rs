@@ -56,6 +56,12 @@ icon_assets!(
         Redo,
         // Send page to chat, in the web panel.
         MessageSquareShare,
+        // Settings > Tools > Packs: a pack, its services, where keys are kept.
+        Package,
+        Image,
+        AudioLines,
+        Box,
+        Lock,
     ]
 );
 
