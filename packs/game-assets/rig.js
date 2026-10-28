@@ -60,7 +60,8 @@ export default async function (args, kx) {
     const rigged = job("/animations/rig", rigBody, "rig");
 
     const folder = kx.setting("output_folder");
-    const name = kx.slug(what);
+    // (A name already ending in -rigged doesn't get it twice.)
+    const name = kx.slug(what).replace(/-rigged$/, "");
     const ext = rigBody.out_format;
     const files = [];
     if (!rigged.output.model_url) return kx.fail(`The Tripo rig (${rigged.task}) finished without a model.`);

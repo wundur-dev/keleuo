@@ -146,6 +146,7 @@ export default async function (args, kx) {
 | `kx.setting(name)` | a pack setting (Settings > Tools) | |
 | `kx.writeFile(path, bytes \| text)` | write in the session's folder; returns the path written (a free name if taken) | inside the project only, as the write sandbox |
 | `kx.download(url, path, { headers })` | a download saved straight to a project file (a 3D model), never held in the script; returns `{ ok, status, path }` | the same hosts as `fetch`; inside the project only |
+| `kx.writeFile(path, [parts])` | a file put together by Keleuo from texts, `kx.embed(projectFile)` (as base64) and `kx.packFile(name)` (the pack's own), so big parts never pass through the script | inside the project only |
 | `kx.readFile(path)` | read a project file (an image to turn into a 3D model) | inside the project only |
 | `kx.sleep(ms)`, `kx.progress(text)` | wait (polling a job), say how far it is (shown on the tool call's card) | |
 | `kx.base64(text)`, `kx.slug(text)`, `kx.fail(why)` | helpers | |
@@ -212,6 +213,7 @@ What packs make should be visible in Keleuo:
 | `music` | ElevenLabs music | prompt and length |
 | `model_from_text` / `model_from_image` | Tripo | a job: starts it, polls, downloads the GLB (and its preview image, returned to the agent) |
 | `rig_model` | Tripo | rig check, rig (biped, quadruped and more; Tripo, Mixamo, Unity or Unreal bones), and up to five preset animations; GLB or FBX |
+| `view_model` | none (three.js r147, bundled) | a page to look at a GLB in: one HTML file next to it holding the model, opened in the web panel; turn, zoom, play its animations with the camera following |
 
 Each service's request details are checked against its documentation when the tool is written
 (models and endpoints change; that is also why packs update apart from Keleuo).

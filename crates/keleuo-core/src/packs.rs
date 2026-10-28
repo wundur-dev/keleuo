@@ -277,6 +277,8 @@ pub struct Outcome {
     pub text: String,
     pub images: Vec<PathBuf>,
     pub files: Vec<PathBuf>,
+    /// A page it made, to open in the session's web panel (an HTML file in the project).
+    pub show: Option<PathBuf>,
     pub failed: bool,
 }
 
@@ -349,6 +351,8 @@ globalThis.kx = {
   secret(name) { return __kx.secret(String(name)); },
   setting(name) { return __kx.setting(String(name)); },
   writeFile(path, data) {
+    // A list: parts put together by Keleuo (text, kx.embed(projectFile), kx.packFile(name)).
+    if (Array.isArray(data)) return __kx.writeParts(String(path), JSON.stringify(data));
     const b64 = data && data.__b64 !== undefined;
     return __kx.write(String(path), b64 ? data.__b64 : String(data), b64);
   },
@@ -359,6 +363,8 @@ globalThis.kx = {
     return { __b64: __kx.read(String(path)), filename: name, type: types[ext] || "application/octet-stream" };
   },
   base64(text) { return { __b64: String(text) }; },
+  embed(path) { return { file: String(path) }; },
+  packFile(name) { return { pack: String(name) }; },
   sleep(ms) { __kx.sleep(Number(ms)); },
   progress(text) { __kx.progress(String(text)); },
   slug(text) {
@@ -496,6 +502,50 @@ fn run_inner(pack: &Pack, tool: &PackTool, args: &Value, grant: &Grant) -> Resul
             .map_err(err)?,
         )
         .map_err(err)?;
+        // writeParts(path, parts as JSON) -> the path written: a file made of parts, each a
+        // text, a project file as base64 ({file}) or a file of the pack's own ({pack}), put
+        // together here so big ones never pass through the script.
+        let (pcwd, pdir, pwr, giv3) = (cwd.clone(), pack.dir.clone(), written.clone(), given.clone());
+        host.set(
+            "writeParts",
+            Function::new(ctx.clone(), move |path: String, parts: String| -> rquickjs::Result<String> {
+                let fail = |what: &'static str, e: String| rquickjs::Error::new_from_js_message(what, "file", e);
+                let target = inside(&pcwd, &path).map_err(|e| fail("path", e))?;
+                let parts: Vec<Value> = serde_json::from_str(&parts).map_err(|e| fail("parts", e.to_string()))?;
+                if let Some(parent) = target.parent() {
+                    std::fs::create_dir_all(parent).map_err(|e| fail("dir", e.to_string()))?;
+                }
+                let name = target.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                let target = crate::file_clipboard::free_name(target.parent().unwrap_or(&pcwd), &name);
+                let mut out = std::io::BufWriter::new(std::fs::File::create(&target).map_err(|e| fail("write", e.to_string()))?);
+                use std::io::Write as _;
+                for part in parts {
+                    if let Some(file) = part.get("file").and_then(Value::as_str) {
+                        let from = inside(&pcwd, file).map_err(|e| fail("path", e))?;
+                        let bytes = std::fs::read(&from).map_err(|e| fail("read", format!("{file}: {e}")))?;
+                        let mut enc = base64::write::EncoderWriter::new(&mut out, &base64::engine::general_purpose::STANDARD);
+                        enc.write_all(&bytes).map_err(|e| fail("write", e.to_string()))?;
+                        enc.finish().map_err(|e| fail("write", e.to_string()))?;
+                    } else if let Some(own) = part.get("pack").and_then(Value::as_str) {
+                        let from = inside(&pdir, own).map_err(|e| fail("path", e))?;
+                        let bytes = std::fs::read(&from).map_err(|e| fail("read", format!("{own}: {e}")))?;
+                        out.write_all(&bytes).map_err(|e| fail("write", e.to_string()))?;
+                    } else {
+                        // A secret is never written out.
+                        let mut text = part.as_str().map(str::to_string).unwrap_or_else(|| part.to_string());
+                        for s in giv3.borrow().iter() {
+                            text = text.replace(s.as_str(), "•••");
+                        }
+                        out.write_all(text.as_bytes()).map_err(|e| fail("write", e.to_string()))?;
+                    }
+                }
+                out.flush().map_err(|e| fail("write", e.to_string()))?;
+                pwr.borrow_mut().push(target.clone());
+                Ok(target.strip_prefix(&pcwd).unwrap_or(&target).to_string_lossy().to_string())
+            })
+            .map_err(err)?,
+        )
+        .map_err(err)?;
         let rcwd = cwd.clone();
         host.set(
             "read",
@@ -565,6 +615,7 @@ fn run_inner(pack: &Pack, tool: &PackTool, args: &Value, grant: &Grant) -> Resul
         text: if text.is_empty() { "(done)".into() } else { text },
         images: paths("images"),
         files: paths("files"),
+        show: v.get("show").and_then(Value::as_str).and_then(|p| inside(&cwd, p).ok()).filter(|p| p.is_file()),
         failed: v.get("failed").and_then(Value::as_bool).unwrap_or(false),
     })
 }
@@ -1082,6 +1133,38 @@ mod tests {
         let anim = find("POST /v3/animations/retarget");
         assert!(anim.contains(r#""input":"task_rig""#) && anim.contains(r#""animations":["preset:idle","preset:walk"]"#), "{anim}");
         let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
+    fn view_model_writes_one_page_holding_the_model_and_shows_it() {
+        let cwd = scratch("view");
+        std::fs::create_dir_all(cwd.join("assets/generated")).unwrap();
+        std::fs::write(cwd.join("assets/generated/trex.glb"), b"glTF trex").unwrap();
+        let out = run_game_tool("view_model", json!({ "model": "assets/generated/trex.glb", "animation": "walk" }), &[], &cwd);
+        assert!(!out.failed, "{}", out.text);
+        let page = cwd.join("assets/generated/trex-viewer.html");
+        assert_eq!(out.show.as_deref(), Some(page.as_path()));
+        let html = std::fs::read_to_string(&page).unwrap();
+        let b64 = base64::engine::general_purpose::STANDARD.encode(b"glTF trex");
+        assert!(html.contains(&format!("const MODEL_B64=\"{b64}\"")), "the model inside");
+        assert!(html.contains(r#""animation":"walk""#));
+        assert!(html.contains("THREE.GLTFLoader") && html.contains("THREE.OrbitControls") && html.contains("setAnimationLoop"), "three.js and the viewer inside");
+        assert!(html.trim_end().ends_with("</html>"));
+        // Not a GLB: refused.
+        assert!(run_game_tool("view_model", json!({ "model": "assets/generated/trex.png" }), &[], &cwd).failed);
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    /// Makes a viewer page for a real model: `KELEUO_VIEW_GLB=<folder>/<model>.glb cargo test
+    /// -p keleuo-core view_a_real_model -- --ignored` (the page lands beside it).
+    #[test]
+    #[ignore]
+    fn view_a_real_model() {
+        let glb = PathBuf::from(std::env::var("KELEUO_VIEW_GLB").expect("KELEUO_VIEW_GLB"));
+        let (dir, name) = (glb.parent().unwrap().to_path_buf(), glb.file_name().unwrap().to_string_lossy().to_string());
+        let out = run_game_tool("view_model", json!({ "model": name, "animation": std::env::var("KELEUO_VIEW_ANIM").unwrap_or_default() }), &[], &dir);
+        assert!(!out.failed, "{}", out.text);
+        println!("{}", out.show.unwrap().display());
     }
 
     #[test]

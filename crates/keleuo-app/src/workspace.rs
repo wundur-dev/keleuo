@@ -284,6 +284,7 @@ impl Workspace {
                 SessionEvent::TerminalLink { line, column, browser } => {
                     ws.open_terminal_link(line, *column, *browser, window, cx)
                 }
+                SessionEvent::ShowPage(path) => ws.open_web(keleuo_core::web::file_url(path), window, cx),
             },
         ));
         // The session tab's dot and name follow the conversation.

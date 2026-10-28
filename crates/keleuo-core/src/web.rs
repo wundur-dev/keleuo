@@ -29,6 +29,22 @@ pub fn normalize_url(input: &str) -> Option<String> {
     Some(format!("https://{text}"))
 }
 
+/// The `file://` address of `path`, with what an address can't hold as it is encoded (a
+/// space, `%`, `#`, `?`).
+pub fn file_url(path: &std::path::Path) -> String {
+    let mut url = String::from("file://");
+    for c in path.to_string_lossy().chars() {
+        match c {
+            ' ' => url.push_str("%20"),
+            '%' => url.push_str("%25"),
+            '#' => url.push_str("%23"),
+            '?' => url.push_str("%3F"),
+            c => url.push(c),
+        }
+    }
+    url
+}
+
 /// `scheme://…`, or one of the schemes written without slashes.
 fn has_scheme(text: &str) -> bool {
     if let Some((scheme, _)) = text.split_once("://") {
@@ -92,6 +108,11 @@ pub fn short_name(url: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_file_address_encodes_spaces() {
+        assert_eq!(super::file_url(std::path::Path::new("/Volumes/Extreme SSD/t #1/a.html")), "file:///Volumes/Extreme%20SSD/t%20%231/a.html");
+    }
+
     #[test]
     fn web_links_in_a_line() {
         let line = "Serving at http://localhost:3000/app, see (https://example.com).";
