@@ -65,6 +65,8 @@ pub struct Setting {
     pub service: String,
     /// Folded away under Advanced (models, API versions).
     pub advanced: bool,
+    /// Its choices are suggestions: any value may be typed (model names, which change).
+    pub custom: bool,
 }
 
 /// Whether something with `when` is shown, given the pack's settings' `values`: each named
@@ -832,6 +834,25 @@ mod tests {
         assert!(requests[0].contains("name=\"file\"; filename=\"knight.png\""), "{}", requests[0]);
         assert!(requests[1].contains("\"input\":\"tok-1\"") && requests[1].contains("\"face_limit\":5000"), "{}", requests[1]);
         assert!(requests[1].contains("authorization: Bearer key-of-TRIPO_API_KEY"), "{}", requests[1]);
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
+    fn a_foundry_endpoint_is_used_as_azure_openai() {
+        let cwd = scratch("foundry");
+        let png = base64::engine::general_purpose::STANDARD.encode(b"\x89PNG cat");
+        let (port, seen) = stand_in(1, move |_, _, _| (200, "application/json", format!("{{\"data\":[{{\"b64_json\":\"{png}\"}}]}}").into_bytes()));
+        let settings = [
+            ("image_provider", "azure".to_string()),
+            ("azure_endpoint", format!("http://127.0.0.1:{port}/models/ ")),
+            ("azure_deployment", "gpt-image-2.5-sunburst".to_string()),
+        ];
+        let out = run_game_tool("make_image", json!({ "prompt": "a cat" }), &settings, &cwd);
+        assert!(!out.failed, "{}", out.text);
+        let request = &seen.join().unwrap()[0];
+        assert!(request.starts_with("POST /openai/deployments/gpt-image-2.5-sunburst/images/generations?api-version="), "{request}");
+        assert!(request.contains("api-key: key-of-AZURE_OPENAI_KEY"), "{request}");
+        assert!(host_allowed("https://x-eastus2.services.ai.azure.com/openai/deployments/d", &game_assets().manifest.network, false));
         let _ = std::fs::remove_dir_all(&cwd);
     }
 

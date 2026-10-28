@@ -561,19 +561,38 @@ fn setting_row(entity: &Entity<SettingsPage>, pack: &Pack, st: &Setting, values:
     let fg = theme.foreground;
     let m = &pack.manifest;
     let label = div().w(px(150.)).flex_none().text_sm().text_color(fg).child(label_of(&st.label, &st.name));
-    if !st.choices.is_empty() {
+    if !st.choices.is_empty() && !st.custom {
         return div().flex().items_center().gap_2().child(label).child(choice(pack, st, values)).into_any_element();
     }
     let current = settings.pack_settings.get(&m.id).and_then(|s| s.get(&st.name)).cloned().unwrap_or_default();
     let placeholder = if st.placeholder.is_empty() { st.default.clone() } else { st.placeholder.clone() };
     let input = entity.update(cx, |p, cx| field(&mut p.packs, &format!("{}/setting/{}", m.id, st.name), &placeholder, false, &current, window, cx));
     let (inp, pid, name) = (input.clone(), m.id.clone(), st.name.clone());
+    // Choices that are only suggestions: a dropdown beside the field puts one in it and saves.
+    let suggest = (!st.choices.is_empty()).then(|| {
+        let (choices, inp, pid, name) = (st.choices.clone(), input.clone(), m.id.clone(), st.name.clone());
+        let current = values.get(&st.name).cloned().unwrap_or_default();
+        Button::new(SharedString::from(format!("pack-suggest-{pid}-{name}"))).small().ghost().icon(IconName::ChevronDown).tooltip("Known values").dropdown_menu(move |mut menu, _, _| {
+            for c in &choices {
+                let (inp, pid, name, pick) = (inp.clone(), pid.clone(), name.clone(), c.clone());
+                menu = menu.item(PopupMenuItem::new(c.clone()).checked(*c == current).on_click(move |_, window, cx| {
+                    inp.update(cx, |i, cx| i.set_value(pick.clone(), window, cx));
+                    let (pid, name, pick) = (pid.clone(), name.clone(), pick.clone());
+                    change(cx, move |s| {
+                        s.pack_settings.entry(pid).or_default().insert(name, pick);
+                    });
+                }));
+            }
+            menu
+        })
+    });
     div()
         .flex()
         .items_center()
         .gap_2()
         .child(label)
         .child(div().flex_1().child(Input::new(&input).small()))
+        .children(suggest)
         .child(Button::new(SharedString::from(format!("pack-set-{pid}-{name}"))).small().outline().label("Save").on_click(move |_, _, cx| {
             let value = inp.read(cx).value().trim().to_string();
             let (pid, name) = (pid.clone(), name.clone());

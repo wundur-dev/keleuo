@@ -7,7 +7,13 @@ export default async function (args, kx) {
   const background = args.transparent ? "transparent" : "auto";
   let base, headers, model;
   if (azure) {
-    const endpoint = (kx.setting("azure_endpoint") || "").replace(/\/+$/, "");
+    // The resource's address, as Azure shows it in any of its forms: Azure OpenAI
+    // (https://x.openai.azure.com), Foundry (https://x.services.ai.azure.com/models), or with
+    // /openai on the end.
+    const endpoint = (kx.setting("azure_endpoint") || "")
+      .trim()
+      .replace(/\/+$/, "")
+      .replace(/\/(models|openai\/v1|openai)$/i, "");
     const deployment = kx.setting("azure_deployment");
     const key = kx.secret("AZURE_OPENAI_KEY");
     if (!endpoint || !deployment || !key) {

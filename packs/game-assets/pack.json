@@ -1,7 +1,7 @@
 {
   "id": "wundur/game-assets",
   "name": "Game assets",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Images, sound, music, voices and 3D models for games, with your own keys.",
   "homepage": "https://github.com/wundur-dev/keleuo",
   "services": [
@@ -92,12 +92,13 @@
         "image_provider": "openai"
       },
       "service": "images",
-      "advanced": true
+      "advanced": true,
+      "custom": true
     },
     {
       "name": "azure_endpoint",
       "label": "Endpoint",
-      "placeholder": "https://<name>.openai.azure.com",
+      "placeholder": "https://<name>.openai.azure.com or https://<name>.services.ai.azure.com",
       "when": {
         "image_provider": "azure"
       },
@@ -106,7 +107,7 @@
     {
       "name": "azure_deployment",
       "label": "Deployment",
-      "placeholder": "your gpt-image deployment's name",
+      "placeholder": "the deployment's name in Azure (often the model's, e.g. gpt-image-2.5-sunburst)",
       "when": {
         "image_provider": "azure"
       },
@@ -139,7 +140,8 @@
       ],
       "default": "eleven_v3",
       "service": "audio",
-      "advanced": true
+      "advanced": true,
+      "custom": true
     },
     {
       "name": "sound_model",
@@ -150,7 +152,8 @@
       ],
       "default": "eleven_text_to_sound_v2",
       "service": "audio",
-      "advanced": true
+      "advanced": true,
+      "custom": true
     },
     {
       "name": "music_model",
@@ -162,7 +165,8 @@
       ],
       "default": "music_v2_5",
       "service": "audio",
-      "advanced": true
+      "advanced": true,
+      "custom": true
     },
     {
       "name": "model_version",
@@ -174,13 +178,15 @@
       ],
       "default": "v3.1-20260211",
       "service": "models",
-      "advanced": true
+      "advanced": true,
+      "custom": true
     }
   ],
   "network": [
     "api.openai.com",
     "*.openai.azure.com",
     "*.cognitiveservices.azure.com",
+    "*.services.ai.azure.com",
     "api.elevenlabs.io",
     "openapi.tripo3d.ai",
     "*.tripo3d.ai",
