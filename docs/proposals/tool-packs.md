@@ -145,6 +145,7 @@ export default async function (args, kx) {
 | `kx.secret(name)` | a secret's value, from the key store | only names in the manifest; never returned to the agent or written to the log |
 | `kx.setting(name)` | a pack setting (Settings > Tools) | |
 | `kx.writeFile(path, bytes \| text)` | write in the session's folder; returns the path written (a free name if taken) | inside the project only, as the write sandbox |
+| `kx.download(url, path, { headers })` | a download saved straight to a project file (a 3D model), never held in the script; returns `{ ok, status, path }` | the same hosts as `fetch`; inside the project only |
 | `kx.readFile(path)` | read a project file (an image to turn into a 3D model) | inside the project only |
 | `kx.sleep(ms)`, `kx.progress(text)` | wait (polling a job), say how far it is (shown on the tool call's card) | |
 | `kx.base64(text)`, `kx.slug(text)`, `kx.fail(why)` | helpers | |

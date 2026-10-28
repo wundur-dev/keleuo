@@ -336,10 +336,15 @@ globalThis.kx = {
       ok: r.status >= 200 && r.status < 300,
       status: r.status,
       headers: r.headers,
-      text() { return r.text; },
+      text() { return r.text ?? ""; },
       json() { return JSON.parse(r.text); },
-      bytes() { return { __b64: r.base64 }; },
+      bytes() { return { __b64: r.base64 ?? __kx.b64(r.text ?? "") }; },
     };
+  },
+  download(url, path, o) {
+    const r = JSON.parse(__kx.download(String(url), String(path), JSON.stringify(o ?? {})));
+    if (r.error) throw new Error(r.error);
+    return { ok: r.status >= 200 && r.status < 300, status: r.status, path: r.path };
   },
   secret(name) { return __kx.secret(String(name)); },
   setting(name) { return __kx.setting(String(name)); },
@@ -365,9 +370,11 @@ globalThis.kx = {
 
 /// Run `tool` of `pack` with `args` (the agent's call) under `grant`: what the agent gets.
 pub fn run(pack: &Pack, tool: &PackTool, args: &Value, grant: &Grant) -> Outcome {
-    match run_inner(pack, tool, args, grant) {
-        Ok(o) => o,
-        Err(why) => Outcome { text: why, failed: true, ..Default::default() },
+    // A run that breaks (the engine giving out) still answers, as a failure.
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_inner(pack, tool, args, grant))) {
+        Ok(Ok(o)) => o,
+        Ok(Err(why)) => Outcome { text: why, failed: true, ..Default::default() },
+        Err(_) => Outcome { text: format!("The pack's script stopped unexpectedly ({}).", tool.script), failed: true, ..Default::default() },
     }
 }
 
@@ -410,11 +417,40 @@ fn run_inner(pack: &Pack, tool: &PackTool, args: &Value, grant: &Grant) -> Resul
             }
         };
         let host = Object::new(ctx.clone()).map_err(err)?;
-        // fetch(url, options as JSON) -> {status, headers, text, base64} or {error} as JSON.
+        // fetch(url, options as JSON) -> {status, headers, text | base64} or {error} as JSON.
         let hs = hosts.clone();
         host.set(
             "fetch",
             Function::new(ctx.clone(), move |url: String, opts: String| -> String { fetch(&url, &opts, &hs, allow_http, deadline) }).map_err(err)?,
+        )
+        .map_err(err)?;
+        // download(url, path, options as JSON) -> {status, path} or {error}: into a file in the
+        // project (a free name if taken), never through the script.
+        let (dhs, dcwd, dwr) = (hosts.clone(), cwd.clone(), written.clone());
+        host.set(
+            "download",
+            Function::new(ctx.clone(), move |url: String, path: String, opts: String| -> String {
+                let target = match inside(&dcwd, &path) {
+                    Ok(t) => t,
+                    Err(e) => return json!({ "error": e }).to_string(),
+                };
+                let name = target.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                let target = crate::file_clipboard::free_name(target.parent().unwrap_or(&dcwd), &name);
+                match download(&url, &opts, &target, &dhs, allow_http, deadline) {
+                    Ok(status) if (200..300).contains(&status) => {
+                        dwr.borrow_mut().push(target.clone());
+                        json!({ "status": status, "path": target.strip_prefix(&dcwd).unwrap_or(&target).to_string_lossy() }).to_string()
+                    }
+                    Ok(status) => json!({ "status": status }).to_string(),
+                    Err(e) => json!({ "error": e }).to_string(),
+                }
+            })
+            .map_err(err)?,
+        )
+        .map_err(err)?;
+        host.set(
+            "b64",
+            Function::new(ctx.clone(), |text: String| -> String { base64::engine::general_purpose::STANDARD.encode(text.as_bytes()) }).map_err(err)?,
         )
         .map_err(err)?;
         let giv = given.clone();
@@ -536,8 +572,47 @@ fn run_inner(pack: &Pack, tool: &PackTool, args: &Value, grant: &Grant) -> Resul
 /// One request, for `kx.fetch`: JSON with the status, headers and body (as text and base64), or
 /// an error.
 fn fetch(url: &str, opts: &str, hosts: &[String], allow_http: bool, deadline: Instant) -> String {
+    match send(url, opts, hosts, allow_http, deadline) {
+        Ok(mut res) => {
+            let status = res.status().as_u16();
+            let hs: serde_json::Map<String, Value> = res.headers().iter().filter_map(|(k, v)| Some((k.to_string(), Value::String(v.to_str().ok()?.to_string())))).collect();
+            let bytes = res.body_mut().with_config().limit(100 << 20).read_to_vec().unwrap_or_default();
+            // Text as text, anything else as base64: never both (a big download twice over
+            // would not fit in the script's memory). Large files: kx.download.
+            match String::from_utf8(bytes) {
+                Ok(text) => json!({ "status": status, "headers": hs, "text": text }),
+                Err(e) => json!({ "status": status, "headers": hs, "base64": base64::engine::general_purpose::STANDARD.encode(e.as_bytes()) }),
+            }
+            .to_string()
+        }
+        Err(e) => json!({ "error": e }).to_string(),
+    }
+}
+
+/// One request, for `kx.download`: the body goes straight to `target` (it never passes through
+/// the script), when the answer is a success. JSON with the status, or an error.
+fn download(url: &str, opts: &str, target: &Path, hosts: &[String], allow_http: bool, deadline: Instant) -> Result<u16, String> {
+    let mut res = send(url, opts, hosts, allow_http, deadline)?;
+    let status = res.status().as_u16();
+    if !(200..300).contains(&status) {
+        return Ok(status);
+    }
+    if let Some(parent) = target.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let mut file = std::fs::File::create(target).map_err(|e| e.to_string())?;
+    let mut body = res.body_mut().with_config().limit(2 << 30).reader();
+    std::io::copy(&mut body, &mut file).map_err(|e| {
+        let _ = std::fs::remove_file(target);
+        format!("{url}: {e}")
+    })?;
+    Ok(status)
+}
+
+/// Send the request `kx.fetch` or `kx.download` describes, to a host the pack may reach.
+fn send(url: &str, opts: &str, hosts: &[String], allow_http: bool, deadline: Instant) -> Result<ureq::http::Response<ureq::Body>, String> {
     if !host_allowed(url, hosts, allow_http) {
-        return json!({ "error": format!("{url}: not among the hosts this pack may reach") }).to_string();
+        return Err(format!("{url}: not among the hosts this pack may reach"));
     }
     let o: Value = serde_json::from_str(opts).unwrap_or(json!({}));
     let method = o.get("method").and_then(Value::as_str).unwrap_or("GET").to_uppercase();
@@ -587,21 +662,7 @@ fn fetch(url: &str, opts: &str, hosts: &[String], allow_http: bool, deadline: In
         Some(b) => req.body(b).map_err(|e| e.to_string()).and_then(|r| agent.run(r).map_err(|e| e.to_string())),
         None => req.body(()).map_err(|e| e.to_string()).and_then(|r| agent.run(r).map_err(|e| e.to_string())),
     };
-    match sent {
-        Ok(mut res) => {
-            let status = res.status().as_u16();
-            let hs: serde_json::Map<String, Value> = res.headers().iter().filter_map(|(k, v)| Some((k.to_string(), Value::String(v.to_str().ok()?.to_string())))).collect();
-            let bytes = res.body_mut().with_config().limit(100 << 20).read_to_vec().unwrap_or_default();
-            json!({
-                "status": status,
-                "headers": hs,
-                "text": String::from_utf8_lossy(&bytes),
-                "base64": base64::engine::general_purpose::STANDARD.encode(&bytes),
-            })
-            .to_string()
-        }
-        Err(e) => json!({ "error": format!("{url}: {e}") }).to_string(),
-    }
+    sent.map_err(|e| format!("{url}: {e}"))
 }
 
 #[cfg(test)]
@@ -880,6 +941,7 @@ mod tests {
         let requests = seen.join().unwrap();
         assert!(requests[0].contains("name=\"file\"; filename=\"knight.png\""), "{}", requests[0]);
         assert!(requests[1].contains("\"input\":\"tok-1\"") && requests[1].contains("\"face_limit\":5000"), "{}", requests[1]);
+        assert!(!requests[1].contains("texture_version"), "{}", requests[1]);
         assert!(requests[1].contains("authorization: Bearer key-of-TRIPO_API_KEY"), "{}", requests[1]);
         let _ = std::fs::remove_dir_all(&cwd);
     }
@@ -950,6 +1012,24 @@ mod tests {
         std::fs::write(other.join("pack.json"), json!({ "id": "t/other", "tools": [{ "name": "a" }] }).to_string()).unwrap();
         assert!(update_from_folder(&now, &other, &dir).unwrap_err().contains("holds t/other, not t/up"));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_download_bigger_than_the_scripts_memory_goes_straight_to_a_file() {
+        let dir = scratch("big");
+        std::fs::write(dir.join("get.js"), "export default function (a, kx) { const d = kx.download(a.url, 'out/model.glb'); return { text: d.path, files: [d.path] }; }").unwrap();
+        let tool = PackTool { name: "get".into(), script: "get.js".into(), ..Default::default() };
+        let pack = Pack { manifest: Manifest { id: "t/big".into(), tools: vec![tool.clone()], ..Default::default() }, dir: dir.clone() };
+        // 80 MB: more than the script's 64 MB.
+        let (port, seen) = stand_in(1, |_, _, _| (200, "model/gltf-binary", vec![7u8; 80 << 20]));
+        let none = |_: &str| None;
+        let grant = Grant { cwd: &dir, secret: &none, settings: &BTreeMap::new(), extra_hosts: vec!["127.0.0.1".into()], allow_http: true };
+        let out = run(&pack, &tool, &json!({ "url": format!("http://127.0.0.1:{port}/m.glb") }), &grant);
+        assert!(!out.failed, "{}", out.text);
+        assert_eq!(out.files, [dir.join("out/model.glb")]);
+        assert_eq!(std::fs::metadata(&out.files[0]).unwrap().len(), 80 << 20);
+        seen.join().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
