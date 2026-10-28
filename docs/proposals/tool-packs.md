@@ -101,7 +101,8 @@ A pack that uses several services lists them in `services` (`id`, `name`, `descr
 `icon`, and `choose`: a setting picking a provider, shown on the service's row); its keys,
 settings and tools each name their `service`. Settings shows a row per service, set up or not
 on its own. A setting with `choices` is a dropdown (`labels` names the choices); `advanced`
-folds it away; `when` (`{"image_provider": "azure"}`) shows a key or setting only when it
+folds it away; `address` marks an address you give (an Azure endpoint), whose host the pack may
+then reach (HTTPS only, that host exactly, never from a default); `when` (`{"image_provider": "azure"}`) shows a key or setting only when it
 applies.
 
 Parameters use the same kinds as your own tools (text, number, yes/no, choice), so one schema and

@@ -65,6 +65,11 @@ pub struct Setting {
     pub service: String,
     /// Folded away under Advanced (models, API versions).
     pub advanced: bool,
+    /// Its choices are suggestions: any value may be typed (model names, which change).
+    pub custom: bool,
+    /// An address the person gives (an Azure endpoint): its host may be reached, as if in the
+    /// pack's `network`, once given. HTTPS only; never from a default.
+    pub address: bool,
 }
 
 /// Whether something with `when` is shown, given the pack's settings' `values`: each named
@@ -215,7 +220,38 @@ pub fn install_from_folder(from: &Path, dir: &Path) -> Result<Pack, String> {
         std::fs::remove_dir_all(&folder).map_err(|e| e.to_string())?;
     }
     copy_dir(from, &folder).map_err(|e| format!("Could not copy the pack: {e}"))?;
+    // Where it came from, to update from later.
+    let _ = std::fs::write(folder.join(SOURCE), from.to_string_lossy().as_bytes());
     Ok(Pack { manifest, dir: folder })
+}
+
+/// The file in an installed pack's folder naming the folder it was installed from.
+const SOURCE: &str = ".keleuo-source";
+
+impl Pack {
+    /// The folder it was installed from, if it is still there.
+    pub fn source(&self) -> Option<PathBuf> {
+        let from = PathBuf::from(std::fs::read_to_string(self.dir.join(SOURCE)).ok()?.trim());
+        from.join("pack.json").is_file().then_some(from)
+    }
+}
+
+/// Update `pack` from the folder `from` (the same pack, a newer copy), in place: its keys and
+/// settings, kept by its id, stay. What it says: the new version, and any hosts it may now
+/// reach that it couldn't before.
+pub fn update_from_folder(pack: &Pack, from: &Path, dir: &Path) -> Result<String, String> {
+    let next: Manifest = serde_json::from_str(&std::fs::read_to_string(from.join("pack.json")).map_err(|e| format!("No pack.json there: {e}"))?)
+        .map_err(|e| format!("pack.json is not a pack: {e}"))?;
+    if next.id != pack.manifest.id {
+        return Err(format!("That folder holds {}, not {}.", if next.id.is_empty() { "no pack" } else { &next.id }, pack.manifest.id));
+    }
+    let new_hosts: Vec<String> = next.network.iter().filter(|h| !pack.manifest.network.contains(h)).cloned().collect();
+    let done = install_from_folder(from, dir)?;
+    let mut said = format!("Updated {} to {}.", done.manifest.name, done.manifest.version);
+    if !new_hosts.is_empty() {
+        said.push_str(&format!(" It may now also reach: {}.", new_hosts.join(", ")));
+    }
+    Ok(said)
 }
 
 fn copy_dir(from: &Path, to: &Path) -> std::io::Result<()> {
@@ -255,16 +291,23 @@ pub struct Grant<'a> {
     pub allow_http: bool,
 }
 
-/// Whether `url` may be reached under `hosts`: HTTPS, to one of them (`*.x`: under x).
-fn host_allowed(url: &str, hosts: &[String], allow_http: bool) -> bool {
+/// The host `url` names, if it is HTTPS (or HTTP, where allowed).
+fn url_host(url: &str, allow_http: bool) -> Option<String> {
+    let url = url.trim();
     let rest = match (url.strip_prefix("https://"), url.strip_prefix("http://")) {
         (Some(r), _) => r,
         (None, Some(r)) if allow_http => r,
-        _ => return false,
+        _ => return None,
     };
     let host = rest.split(['/', '?', '#']).next().unwrap_or_default();
     let host = host.rsplit('@').next().unwrap_or(host);
     let host = host.split(':').next().unwrap_or(host).to_lowercase();
+    (!host.is_empty()).then_some(host)
+}
+
+/// Whether `url` may be reached under `hosts`: HTTPS, to one of them (`*.x`: under x).
+fn host_allowed(url: &str, hosts: &[String], allow_http: bool) -> bool {
+    let Some(host) = url_host(url, allow_http) else { return false };
     hosts.iter().any(|h| {
         let h = h.to_lowercase();
         match h.strip_prefix("*.") {
@@ -341,6 +384,12 @@ fn run_inner(pack: &Pack, tool: &PackTool, args: &Value, grant: &Grant) -> Resul
     let mut hosts = m.network.clone();
     hosts.extend(grant.extra_hosts.iter().cloned());
     let allow_http = grant.allow_http;
+    // The addresses the person gave (an endpoint): theirs to reach, exactly that host.
+    for st in m.settings.iter().filter(|s| s.address) {
+        if let Some(host) = grant.settings.get(&st.name).and_then(|v| url_host(v, allow_http)) {
+            hosts.push(host);
+        }
+    }
     // Its declared secrets only, read here (the engine's calls own what they use).
     let secrets: BTreeMap<String, String> = m.secrets.iter().filter_map(|s| Some((s.name.clone(), (grant.secret)(&s.name)?))).collect();
     // What secrets were read: blanked from whatever comes back.
@@ -833,6 +882,74 @@ mod tests {
         assert!(requests[1].contains("\"input\":\"tok-1\"") && requests[1].contains("\"face_limit\":5000"), "{}", requests[1]);
         assert!(requests[1].contains("authorization: Bearer key-of-TRIPO_API_KEY"), "{}", requests[1]);
         let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
+    fn a_foundry_endpoint_is_used_as_azure_openai() {
+        let cwd = scratch("foundry");
+        let png = base64::engine::general_purpose::STANDARD.encode(b"\x89PNG cat");
+        let (port, seen) = stand_in(1, move |_, _, _| (200, "application/json", format!("{{\"data\":[{{\"b64_json\":\"{png}\"}}]}}").into_bytes()));
+        let settings = [
+            ("image_provider", "azure".to_string()),
+            ("azure_endpoint", format!("http://127.0.0.1:{port}/models/ ")),
+            ("azure_deployment", "gpt-image-2.5-sunburst".to_string()),
+        ];
+        let out = run_game_tool("make_image", json!({ "prompt": "a cat" }), &settings, &cwd);
+        assert!(!out.failed, "{}", out.text);
+        let request = &seen.join().unwrap()[0];
+        assert!(request.starts_with("POST /openai/deployments/gpt-image-2.5-sunburst/images/generations?api-version="), "{request}");
+        assert!(request.contains("api-key: key-of-AZURE_OPENAI_KEY"), "{request}");
+        assert!(game_assets().manifest.settings.iter().any(|s| s.name == "azure_endpoint" && s.address), "the endpoint you give is reachable");
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
+    fn an_address_the_person_gives_may_be_reached() {
+        let dir = scratch("address");
+        std::fs::write(dir.join("ping.js"), "export default function (a, kx) { return { text: kx.fetch(kx.setting('endpoint') + '/ping').text() }; }").unwrap();
+        let tool = PackTool { name: "ping".into(), script: "ping.js".into(), ..Default::default() };
+        let run_with = |address: bool, port: u16| {
+            let setting = Setting { name: "endpoint".into(), address, ..Default::default() };
+            let pack = Pack { manifest: Manifest { id: "t/address".into(), settings: vec![setting], tools: vec![tool.clone()], ..Default::default() }, dir: dir.clone() };
+            let settings: BTreeMap<String, String> = [("endpoint".to_string(), format!("http://127.0.0.1:{port}"))].into();
+            let none = |_: &str| None;
+            let grant = Grant { cwd: &dir, secret: &none, settings: &settings, extra_hosts: vec![], allow_http: true };
+            run(&pack, &tool, &json!({}), &grant)
+        };
+        // Not marked as an address: refused, as any host the pack didn't name.
+        let refused = run_with(false, 9);
+        assert!(refused.failed && refused.text.contains("not among the hosts"), "{}", refused.text);
+        let (port, seen) = stand_in(1, |_, _, _| (200, "text/plain", b"pong".to_vec()));
+        let out = run_with(true, port);
+        assert!(!out.failed && out.text == "pong", "{}", out.text);
+        assert!(seen.join().unwrap()[0].starts_with("GET /ping "));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_pack_updates_from_where_it_came_from() {
+        let root = scratch("update");
+        let (from, dir) = (root.join("src"), root.join("installed"));
+        std::fs::create_dir_all(&from).unwrap();
+        let manifest = |version: &str, network: &[&str]| json!({ "id": "t/up", "name": "Up", "version": version, "network": network, "tools": [{ "name": "a", "script": "a.js" }] }).to_string();
+        std::fs::write(from.join("pack.json"), manifest("1.0.0", &["a.example.com"])).unwrap();
+        std::fs::write(from.join("a.js"), "export default () => ({ text: 'one' })").unwrap();
+        let pack = install_from_folder(&from, &dir).unwrap();
+        assert_eq!(pack.source(), Some(from.clone()));
+        std::fs::write(from.join("pack.json"), manifest("1.1.0", &["a.example.com", "b.example.com"])).unwrap();
+        std::fs::write(from.join("a.js"), "export default () => ({ text: 'two' })").unwrap();
+        let said = update_from_folder(&pack, &from, &dir).unwrap();
+        assert_eq!(said, "Updated Up to 1.1.0. It may now also reach: b.example.com.");
+        let now = installed(&dir).pop().unwrap();
+        assert_eq!(now.manifest.version, "1.1.0");
+        assert_eq!(std::fs::read_to_string(now.dir.join("a.js")).unwrap(), "export default () => ({ text: 'two' })");
+        assert_eq!(now.source(), Some(from.clone()));
+        // Another pack's folder isn't an update.
+        let other = root.join("other");
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::write(other.join("pack.json"), json!({ "id": "t/other", "tools": [{ "name": "a" }] }).to_string()).unwrap();
+        assert!(update_from_folder(&now, &other, &dir).unwrap_err().contains("holds t/other, not t/up"));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

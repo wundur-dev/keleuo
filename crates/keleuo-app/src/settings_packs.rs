@@ -28,7 +28,11 @@ pub struct PacksState {
     loading: bool,
     fields: HashMap<String, Entity<InputState>>,
     open: HashSet<String>,
+    /// Where each pack was installed from (by id), when that folder is still there: Update.
+    sources: HashMap<String, std::path::PathBuf>,
     error: Option<String>,
+    /// What the last update did (its version, any hosts it may now reach).
+    notice: Option<String>,
 }
 
 impl PacksState {
@@ -52,8 +56,44 @@ fn field(state: &mut PacksState, key: &str, placeholder: &str, masked: bool, val
 fn set_error(page: &WeakEntity<SettingsPage>, error: Option<String>, cx: &mut App) {
     let _ = page.update(cx, |p, cx| {
         p.packs.error = error;
+        p.packs.notice = None;
         cx.notify();
     });
+}
+
+/// Update `pack` in place from `from`, or from a folder asked for: keys and settings stay.
+fn update(page: WeakEntity<SettingsPage>, pack: Pack, from: Option<std::path::PathBuf>, cx: &mut App) {
+    let picked = from.is_none().then(|| cx.prompt_for_paths(PathPromptOptions { files: false, directories: true, multiple: false, prompt: Some("Update pack".into()) }));
+    cx.spawn(async move |cx: &mut AsyncApp| {
+        let from = match (from, picked) {
+            (Some(f), _) => f,
+            (None, Some(picked)) => {
+                let Ok(Ok(Some(paths))) = picked.await else { return };
+                let Some(f) = paths.into_iter().next() else { return };
+                f
+            }
+            (None, None) => return,
+        };
+        let Some(dir) = packs::dir() else { return };
+        let done = packs::update_from_folder(&pack, &from, &dir);
+        cx.update(|cx| {
+            let _ = page.update(cx, |p, cx| {
+                match done {
+                    Ok(said) => {
+                        p.packs.notice = Some(said);
+                        p.packs.error = None;
+                    }
+                    Err(e) => {
+                        p.packs.error = Some(e);
+                        p.packs.notice = None;
+                    }
+                }
+                cx.notify();
+            });
+            reload(&page, cx);
+        });
+    })
+    .detach();
 }
 
 /// Fold or unfold the part named `key`.
@@ -73,17 +113,23 @@ fn load(page: &WeakEntity<SettingsPage>, cx: &mut App) {
         let found = cx
             .background_spawn(async move {
                 let found = packs::dir().map(|d| packs::installed(&d)).unwrap_or_default();
+                let mut sources = HashMap::new();
                 for p in &found {
                     for s in &p.manifest.secrets {
                         keleuo_core::secrets::kept(&p.secret_account(&s.name));
                     }
+                    if let Some(from) = p.source() {
+                        sources.insert(p.manifest.id.clone(), from);
+                    }
                 }
-                found
+                (found, sources)
             })
             .await;
         cx.update(|cx| {
+            let (found, sources) = found;
             let _ = page.update(cx, |p, cx| {
                 p.packs.packs = Some(found);
+                p.packs.sources = sources;
                 p.packs.loading = false;
                 cx.notify();
             });
@@ -150,7 +196,7 @@ pub fn render(page: &WeakEntity<SettingsPage>, window: &mut Window, cx: &mut App
     let theme = cx.theme();
     let (fg, muted, border, danger) = (theme.foreground, theme.muted_foreground, theme.border, theme.danger);
     let state = &entity.read(cx).packs;
-    let (installed, loading, error) = (state.packs.clone(), state.loading, state.error.clone());
+    let (installed, loading, error, notice) = (state.packs.clone(), state.loading, state.error.clone(), state.notice.clone());
     let p_install = page.clone();
     let mut head = div()
         .flex()
@@ -197,7 +243,11 @@ pub fn render(page: &WeakEntity<SettingsPage>, window: &mut Window, cx: &mut App
             }
         }
     }
-    section.children(error.map(|e| div().text_sm().text_color(danger).child(e))).into_any_element()
+    let green = cx.theme().green;
+    section
+        .children(notice.map(|n| div().text_sm().text_color(green).child(n)))
+        .children(error.map(|e| div().text_sm().text_color(danger).child(e)))
+        .into_any_element()
 }
 
 fn card(page: &WeakEntity<SettingsPage>, entity: &Entity<SettingsPage>, pack: &Pack, settings: &keleuo_core::settings::Settings, window: &mut Window, cx: &mut App) -> AnyElement {
@@ -222,6 +272,8 @@ fn card(page: &WeakEntity<SettingsPage>, entity: &Entity<SettingsPage>, pack: &P
     };
 
     let (id_on, id_remove, dir, p_remove) = (m.id.clone(), m.id.clone(), pack.dir.clone(), page.clone());
+    let source = entity.read(cx).packs.sources.get(&m.id).cloned();
+    let (p_update, pack_update) = (page.clone(), pack.clone());
     let header = div()
         .flex()
         .items_start()
@@ -265,9 +317,17 @@ fn card(page: &WeakEntity<SettingsPage>, entity: &Entity<SettingsPage>, pack: &P
                         }
                     });
                 }))
-                .child(Button::new(SharedString::from(format!("pack-more-{}", m.id))).ghost().small().icon(IconName::Ellipsis).dropdown_menu(move |menu, _, _| {
+                .child(Button::new(SharedString::from(format!("pack-more-{}", m.id))).ghost().small().icon(IconName::Ellipsis).dropdown_menu(move |mut menu, _, _| {
+                    // Update in place (keys and settings stay): from where it came, or a folder.
+                    if let Some(from) = source.clone() {
+                        let name = from.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                        let (page, pack) = (p_update.clone(), pack_update.clone());
+                        menu = menu.item(PopupMenuItem::new(format!("Update from {name}")).on_click(move |_, _, cx| update(page.clone(), pack.clone(), Some(from.clone()), cx)));
+                    }
+                    let (page, pack) = (p_update.clone(), pack_update.clone());
+                    menu = menu.item(PopupMenuItem::new("Update from folder…").on_click(move |_, _, cx| update(page.clone(), pack.clone(), None, cx)));
                     let (dir, id, page) = (dir.clone(), id_remove.clone(), p_remove.clone());
-                    menu.item(PopupMenuItem::new("Remove pack").on_click(move |_, _, cx| {
+                    menu.separator().item(PopupMenuItem::new("Remove pack").on_click(move |_, _, cx| {
                         let _ = std::fs::remove_dir_all(&dir);
                         reload(&page, cx);
                         let id = id.clone();
@@ -358,7 +418,15 @@ fn card(page: &WeakEntity<SettingsPage>, entity: &Entity<SettingsPage>, pack: &P
                 .child(Icon::new(Lucide::Lock).small())
                 .child("Keys stay in your system's key store. Agents never see them."),
         )
-        .when(!m.network.is_empty(), |d| d.child(div().text_xs().text_color(muted).child(format!("May reach: {}", m.network.join(", ")))))
+        .when(!m.network.is_empty(), |d| {
+            // And the addresses you give it (an endpoint), exactly those hosts.
+            let yours: Vec<String> = m.settings.iter().filter(|s| s.address).map(|s| label_of(&s.label, &s.name)).collect();
+            let mut text = format!("May reach: {}", m.network.join(", "));
+            if !yours.is_empty() {
+                text.push_str(&format!(", and the address you give as {}", yours.join(", ")));
+            }
+            d.child(div().text_xs().text_color(muted).child(text))
+        })
         .child(div().h(px(1.)).bg(border))
         .child(fold(page, &tools_key, "Included tools", &format!("{} tools · {ready_tools} ready", m.tools.len()), open.contains(&tools_key), cx))
         .when(open.contains(&tools_key), |d| d.child(tools))
@@ -561,19 +629,38 @@ fn setting_row(entity: &Entity<SettingsPage>, pack: &Pack, st: &Setting, values:
     let fg = theme.foreground;
     let m = &pack.manifest;
     let label = div().w(px(150.)).flex_none().text_sm().text_color(fg).child(label_of(&st.label, &st.name));
-    if !st.choices.is_empty() {
+    if !st.choices.is_empty() && !st.custom {
         return div().flex().items_center().gap_2().child(label).child(choice(pack, st, values)).into_any_element();
     }
     let current = settings.pack_settings.get(&m.id).and_then(|s| s.get(&st.name)).cloned().unwrap_or_default();
     let placeholder = if st.placeholder.is_empty() { st.default.clone() } else { st.placeholder.clone() };
     let input = entity.update(cx, |p, cx| field(&mut p.packs, &format!("{}/setting/{}", m.id, st.name), &placeholder, false, &current, window, cx));
     let (inp, pid, name) = (input.clone(), m.id.clone(), st.name.clone());
+    // Choices that are only suggestions: a dropdown beside the field puts one in it and saves.
+    let suggest = (!st.choices.is_empty()).then(|| {
+        let (choices, inp, pid, name) = (st.choices.clone(), input.clone(), m.id.clone(), st.name.clone());
+        let current = values.get(&st.name).cloned().unwrap_or_default();
+        Button::new(SharedString::from(format!("pack-suggest-{pid}-{name}"))).small().ghost().icon(IconName::ChevronDown).tooltip("Known values").dropdown_menu(move |mut menu, _, _| {
+            for c in &choices {
+                let (inp, pid, name, pick) = (inp.clone(), pid.clone(), name.clone(), c.clone());
+                menu = menu.item(PopupMenuItem::new(c.clone()).checked(*c == current).on_click(move |_, window, cx| {
+                    inp.update(cx, |i, cx| i.set_value(pick.clone(), window, cx));
+                    let (pid, name, pick) = (pid.clone(), name.clone(), pick.clone());
+                    change(cx, move |s| {
+                        s.pack_settings.entry(pid).or_default().insert(name, pick);
+                    });
+                }));
+            }
+            menu
+        })
+    });
     div()
         .flex()
         .items_center()
         .gap_2()
         .child(label)
         .child(div().flex_1().child(Input::new(&input).small()))
+        .children(suggest)
         .child(Button::new(SharedString::from(format!("pack-set-{pid}-{name}"))).small().outline().label("Save").on_click(move |_, _, cx| {
             let value = inp.read(cx).value().trim().to_string();
             let (pid, name) = (pid.clone(), name.clone());
