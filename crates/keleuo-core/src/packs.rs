@@ -1048,6 +1048,43 @@ mod tests {
     }
 
     #[test]
+    fn a_model_is_checked_rigged_and_animated() {
+        let cwd = scratch("rig");
+        let (port, seen) = stand_in(8, |port, line, _| {
+            let json = "application/json";
+            let task = |id: &str| format!(r#"{{"code":0,"data":{{"task_id":"{id}"}}}}"#).into_bytes();
+            let done = |output: String| format!(r#"{{"code":0,"data":{{"status":"success","output":{output}}}}}"#).into_bytes();
+            let m = format!("http://127.0.0.1:{port}/m");
+            match line.split_whitespace().take(2).collect::<Vec<_>>()[..] {
+                ["POST", "/v3/animations/rig-check"] => (200, json, task("task_check")),
+                ["GET", "/v3/tasks/task_check"] => (200, json, done(r#"{"riggable":true,"rig_type":"biped"}"#.into())),
+                ["POST", "/v3/animations/rig"] => (200, json, task("task_rig")),
+                ["GET", "/v3/tasks/task_rig"] => (200, json, done(format!(r#"{{"model_url":"{m}/rigged.glb?sig=1"}}"#))),
+                ["POST", "/v3/animations/retarget"] => (200, json, task("task_anim")),
+                ["GET", "/v3/tasks/task_anim"] => (200, json, done(format!(r#"{{"model_url":"{m}/animated.glb?sig=1"}}"#))),
+                ["GET", p] if p.starts_with("/m/rigged.glb") => (200, "model/gltf-binary", b"glTF rigged".to_vec()),
+                ["GET", p] if p.starts_with("/m/animated.glb") => (200, "model/gltf-binary", b"glTF animated".to_vec()),
+                _ => (404, json, b"{}".to_vec()),
+            }
+        });
+        let settings = [("tripo_url", format!("http://127.0.0.1:{port}/v3")), ("poll_ms", "1".to_string())];
+        let out = run_game_tool("rig_model", json!({ "model": "task_cat", "animations": "idle, walk", "skeleton": "mixamo", "name": "cat" }), &settings, &cwd);
+        assert!(!out.failed, "{}", out.text);
+        let g = cwd.join("assets/generated");
+        assert_eq!(out.files, [g.join("cat-rigged.glb"), g.join("cat-animated.glb")]);
+        assert_eq!(std::fs::read(&out.files[1]).unwrap(), b"glTF animated");
+        assert!(out.text.starts_with("Rigged as biped"), "{}", out.text);
+        let requests = seen.join().unwrap();
+        let find = |start: &str| requests.iter().find(|r| r.starts_with(start)).cloned().unwrap_or_default();
+        assert!(find("POST /v3/animations/rig-check").contains(r#""input":"task_cat""#));
+        let rig = find("POST /v3/animations/rig ");
+        assert!(rig.contains(r#""rig_type":"biped""#) && rig.contains(r#""spec":"mixamo""#) && rig.contains(r#""model":"v3.0-20260909""#), "{rig}");
+        let anim = find("POST /v3/animations/retarget");
+        assert!(anim.contains(r#""input":"task_rig""#) && anim.contains(r#""animations":["preset:idle","preset:walk"]"#), "{anim}");
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
     fn a_script_that_runs_too_long_is_stopped() {
         let dir = std::env::temp_dir().join(format!("keleuo-pack-slow-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();

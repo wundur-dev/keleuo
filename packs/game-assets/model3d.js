@@ -69,5 +69,5 @@ export default async function (args, kx) {
     const p = kx.download(out.rendered_image_url, `${folder}/${name}-preview.${ext}`);
     if (p.ok) images.push(p.path);
   }
-  return { text: `Saved ${file}${images.length ? ` and its preview ${images[0]}` : ""} (Tripo task ${task}).`, files: [file], images };
+  return { text: `Saved ${file}${images.length ? ` and its preview ${images[0]}` : ""} (Tripo task ${task}: give it to rig_model to rig and animate this model).`, files: [file], images };
 }

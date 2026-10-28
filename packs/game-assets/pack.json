@@ -1,7 +1,7 @@
 {
   "id": "wundur/game-assets",
   "name": "Game assets",
-  "version": "0.2.3",
+  "version": "0.3.0",
   "description": "Images, sound, music, voices and 3D models for games, with your own keys.",
   "homepage": "https://github.com/wundur-dev/keleuo",
   "services": [
@@ -21,7 +21,7 @@
     {
       "id": "models",
       "name": "3D models",
-      "description": "Tripo · From text or images",
+      "description": "Tripo · From text or images, rigged and animated",
       "icon": "model"
     }
   ],
@@ -178,6 +178,19 @@
         "P2-20260801"
       ],
       "default": "v3.1-20260211",
+      "service": "models",
+      "advanced": true,
+      "custom": true
+    },
+    {
+      "name": "rig_version",
+      "label": "Rig model",
+      "choices": [
+        "v3.0-20260909",
+        "v2.5-20260210",
+        "v1.0-20240301"
+      ],
+      "default": "v3.0-20260909",
       "service": "models",
       "advanced": true,
       "custom": true
@@ -503,6 +516,77 @@
         "TRIPO_API_KEY"
       ],
       "cost": "uses Tripo credits, per model",
+      "timeout_secs": 600,
+      "service": "models"
+    },
+    {
+      "name": "rig_model",
+      "description": "Rig a 3D model with Tripo (a skeleton, so it can be animated), and optionally animate it with Tripo's presets; saves the rigged model and the animated one in the project. Give the Tripo task id model_from_image or model_from_text reported (no new upload), or a GLB or FBX in the project. Works best on a character in a T-pose or A-pose, or an animal. Biped presets: idle, walk, run, jump, turn, climb, dive, slash, shoot, hurt, fall; quadruped: quadruped:walk. Takes a few minutes.",
+      "script": "rig.js",
+      "params": [
+        {
+          "name": "model",
+          "kind": "text",
+          "required": true,
+          "description": "The Tripo task id from model_from_* (e.g. task_...), or a GLB or FBX path in the project."
+        },
+        {
+          "name": "animations",
+          "kind": "text",
+          "description": "Presets to apply, comma-separated, up to five (e.g. idle, walk, run). Left out: rigged only."
+        },
+        {
+          "name": "rig_type",
+          "kind": "choice",
+          "choices": [
+            "biped",
+            "quadruped",
+            "hexapod",
+            "octopod",
+            "avian",
+            "serpentine",
+            "aquatic",
+            "others"
+          ],
+          "description": "The skeleton. Left out: Tripo checks the model and picks."
+        },
+        {
+          "name": "skeleton",
+          "kind": "choice",
+          "choices": [
+            "tripo",
+            "mixamo",
+            "unity",
+            "unreal",
+            "actorcore",
+            "vrm"
+          ],
+          "description": "For a biped: whose bone layout, to match an engine or animation library (mixamo for Unity and Unreal retargeting). Default tripo."
+        },
+        {
+          "name": "format",
+          "kind": "choice",
+          "choices": [
+            "glb",
+            "fbx"
+          ],
+          "description": "File format. Default glb; fbx for most game engines' importers."
+        },
+        {
+          "name": "in_place",
+          "kind": "flag",
+          "description": "Animations play in place, without moving forward (for game controllers)."
+        },
+        {
+          "name": "name",
+          "kind": "text",
+          "description": "File name to save as, without extension."
+        }
+      ],
+      "needs": [
+        "TRIPO_API_KEY"
+      ],
+      "cost": "uses Tripo credits: a rig check, the rig, and the animations",
       "timeout_secs": 600,
       "service": "models"
     }

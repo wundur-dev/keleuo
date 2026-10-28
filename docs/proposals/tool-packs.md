@@ -211,6 +211,7 @@ What packs make should be visible in Keleuo:
 | `voice_line`, `list_voices` | ElevenLabs text to speech | text and voice; saves MP3 |
 | `music` | ElevenLabs music | prompt and length |
 | `model_from_text` / `model_from_image` | Tripo | a job: starts it, polls, downloads the GLB (and its preview image, returned to the agent) |
+| `rig_model` | Tripo | rig check, rig (biped, quadruped and more; Tripo, Mixamo, Unity or Unreal bones), and up to five preset animations; GLB or FBX |
 
 Each service's request details are checked against its documentation when the tool is written
 (models and endpoints change; that is also why packs update apart from Keleuo).
