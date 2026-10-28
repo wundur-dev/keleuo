@@ -57,6 +57,11 @@ pub fn is_web_link(url: &str) -> bool {
 /// The web address in `line` that covers byte `at` (as in a terminal row), if any: from its
 /// scheme to the first space, quote or bracket, without a trailing full stop or comma.
 pub fn web_link_at(line: &str, at: usize) -> Option<String> {
+    web_link_span(line, at).map(|(from, to)| line[from..to].to_string())
+}
+
+/// Where in `line` (bytes) the web address at byte `at` is, if there is one.
+pub fn web_link_span(line: &str, at: usize) -> Option<(usize, usize)> {
     let mut from = 0;
     while let Some(i) = line[from..].find("http").map(|i| from + i) {
         let rest = &line[i..];
@@ -64,7 +69,7 @@ pub fn web_link_at(line: &str, at: usize) -> Option<String> {
             let len = rest.find(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '<' | '>' | ')' | ']' | '`')).unwrap_or(rest.len());
             let url = rest[..len].trim_end_matches(['.', ',', ';', ':']);
             if i <= at && at < i + url.len() {
-                return Some(url.to_string());
+                return Some((i, i + url.len()));
             }
             from = i + len.max(1);
         } else {

@@ -281,8 +281,8 @@ impl Workspace {
                     cx.emit(WorkspaceEvent::AgentEdited(path.clone()));
                 }
                 SessionEvent::TurnEnded => ws.files.update(cx, |t, cx| t.refresh(cx)),
-                SessionEvent::TerminalLink { line, column } => {
-                    ws.open_terminal_link(line, *column, window, cx)
+                SessionEvent::TerminalLink { line, column, browser } => {
+                    ws.open_terminal_link(line, *column, *browser, window, cx)
                 }
             },
         ));
@@ -861,6 +861,7 @@ impl Workspace {
         &mut self,
         line: &str,
         column: usize,
+        browser: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -868,9 +869,14 @@ impl Workspace {
             .char_indices()
             .nth(column)
             .map_or(line.len(), |(i, _)| i);
-        // A web address (a dev server's, say): the Web panel.
+        // A web address (a dev server's, say): the Web panel; Cmd+click, the browser (as in
+        // the chat).
         if let Some(url) = keleuo_core::web::web_link_at(line, at) {
-            self.open_web(url, window, cx);
+            if browser {
+                cx.open_url(&url);
+            } else {
+                self.open_web(url, window, cx);
+            }
             return;
         }
         let index = self.doc_ctx.index.borrow().clone();
@@ -976,8 +982,8 @@ impl Workspace {
                 window,
                 move |ws, view, ev: &TerminalEvent, window, cx| match ev {
                     TerminalEvent::Activated => ws.touch_code(view.entity_id()),
-                    TerminalEvent::OpenLink { line, column } => {
-                        ws.open_terminal_link(line, *column, window, cx)
+                    TerminalEvent::OpenLink { line, column, browser } => {
+                        ws.open_terminal_link(line, *column, *browser, window, cx)
                     }
                     TerminalEvent::Closed => {
                         ws.terminals.borrow_mut().retain(|t| t != view);

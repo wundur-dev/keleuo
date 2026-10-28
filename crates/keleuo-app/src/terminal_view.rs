@@ -114,6 +114,10 @@ pub struct TerminalView {
     bounds: Rc<Cell<Bounds<Pixels>>>,
     cell: Rc<Cell<Size<Pixels>>>,
     selecting: bool,
+    /// A click that began on a web address: opened when the button comes up without a drag.
+    pending_link: Option<(String, usize)>,
+    /// The web address under the pointer: its row and columns (underlined, a hand pointer).
+    hover_link: Option<(i32, usize, usize)>,
     /// Wheel movement smaller than a line, kept for the next event (trackpads send many
     /// small deltas).
     wheel_rest: f32,
@@ -231,9 +235,10 @@ pub enum TerminalEvent {
     /// The program wrote something (or exited): sent for every batch, drawn or not, for whoever
     /// follows what it shows (an agent's interface read for its reply).
     Output,
-    /// Cmd+click: the text of the row clicked and the column (in characters), for whoever
-    /// knows the project's files to open the file named there.
-    OpenLink { line: String, column: usize },
+    /// A link clicked: the text of its row and the column (in characters), for whoever knows
+    /// the project's files to open the file or page named there. A click on a web address,
+    /// or Cmd+click on anything (`browser`: a web address then goes to the browser).
+    OpenLink { line: String, column: usize, browser: bool },
 }
 
 impl EventEmitter<TerminalEvent> for TerminalView {}
@@ -329,6 +334,8 @@ impl TerminalView {
             settling: None,
             images: None,
             hover_image: None,
+            pending_link: None,
+            hover_link: None,
             error,
             bounds: Rc::new(Cell::new(Bounds::default())),
             cell: Rc::new(Cell::new(size(px(8.), px(16.)))),
@@ -700,8 +707,16 @@ impl TerminalView {
         let (point, side) = self.grid_point(e.position);
         if e.modifiers.platform && e.click_count == 1 {
             let line = self.row_text(point.line);
-            cx.emit(TerminalEvent::OpenLink { line, column: point.column.0 });
+            cx.emit(TerminalEvent::OpenLink { line, column: point.column.0, browser: true });
             return;
+        }
+        // On a web address: opened on the way up, unless the pointer drags (a selection).
+        self.pending_link = None;
+        if e.click_count == 1 {
+            let line = self.row_text(point.line);
+            if web_span_at(&line, point.column.0).is_some() {
+                self.pending_link = Some((line, point.column.0));
+            }
         }
         if let Some(pty) = &self.pty {
             let ty = match e.click_count {
@@ -720,6 +735,23 @@ impl TerminalView {
     }
 
     fn mouse_move(&mut self, e: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
+        // A web address under the pointer: underlined, with a hand.
+        if self.pty.is_some() {
+            let (point, _) = self.grid_point(e.position);
+            let line = self.row_text(point.line);
+            let hover = web_span_at(&line, point.column.0).map(|(a, b)| (point.line.0, a, b));
+            if hover != self.hover_link {
+                self.hover_link = hover;
+                cx.notify();
+            }
+            // Dragged off the cell it began on: a selection, not a click on the link.
+            if e.pressed_button == Some(MouseButton::Left)
+                && let Some((_, col)) = &self.pending_link
+                && *col != point.column.0
+            {
+                self.pending_link = None;
+            }
+        }
         if let Some(images) = self.images.clone()
             && self.pty.is_some()
         {
@@ -746,6 +778,14 @@ impl TerminalView {
 
     fn mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
         self.selecting = false;
+        if let Some((line, column)) = self.pending_link.take() {
+            if let Some(pty) = &self.pty {
+                pty.term.lock().selection = None;
+            }
+            cx.emit(TerminalEvent::OpenLink { line, column, browser: false });
+            cx.notify();
+            return;
+        }
         if let Some(pty) = &self.pty {
             let mut term = pty.term.lock();
             if term.selection.as_ref().is_some_and(|s| s.is_empty()) {
@@ -928,6 +968,7 @@ impl Focusable for TerminalView {
 impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let focused = self.focus.is_focused(window);
+        let hover_link = self.hover_link;
         let pty = self.pty.clone();
         let pty_paint = self.pty.clone();
         let on_screen = self.on_screen.clone();
@@ -953,7 +994,7 @@ impl Render for TerminalView {
             .on_mouse_move(cx.listener(Self::mouse_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::mouse_up))
             .on_scroll_wheel(cx.listener(Self::scroll))
-            .cursor(CursorStyle::IBeam);
+            .cursor(if self.hover_link.is_some() { CursorStyle::PointingHand } else { CursorStyle::IBeam });
         if let Some(err) = &self.error {
             return base.p_2().text_color(hsla(if palette::is_dark() { 0xcc6666 } else { 0xc0392b })).child(err.clone());
         }
@@ -1060,7 +1101,7 @@ impl Render for TerminalView {
                         return;
                     }
                     let start = std::time::Instant::now();
-                    paint_grid(text_size, pty, bounds, cell_paint.get(), focused, window, cx);
+                    paint_grid(text_size, pty, bounds, cell_paint.get(), focused, hover_link, window, cx);
                     crate::perf::record("terminal paint", start.elapsed());
                     crate::perf::terminal_painted();
                 },
@@ -1121,12 +1162,14 @@ impl TerminalView {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn paint_grid(
     text_size: f32,
     pty: &Pty,
     bounds: Bounds<Pixels>,
     cell: Size<Pixels>,
     focused: bool,
+    hover_link: Option<(i32, usize, usize)>,
     window: &mut Window,
     cx: &mut App,
 ) {
@@ -1275,6 +1318,18 @@ fn paint_grid(
             window,
             cx,
         );
+        // The web address under the pointer, underlined.
+        if let Some((l, from, to)) = hover_link
+            && l == line.0
+        {
+            window.paint_quad(fill(
+                Bounds::new(
+                    point(bounds.origin.x + cell.width * from as f32, y + cell.height - px(2.)),
+                    size(cell.width * (to - from) as f32, px(1.)),
+                ),
+                gpui_kit::component::ActiveTheme::theme(cx).blue,
+            ));
+        }
     }
 
     // Cursor.
@@ -1357,5 +1412,26 @@ mod tests {
         assert_eq!(wheel_input(mode, -2, 10, 4), Wheel::Send("\x1b[<65;10;4M".repeat(2)));
         let x10 = TermMode::MOUSE_DRAG;
         assert_eq!(wheel_input(x10, 1, 1, 1), Wheel::Send("\x1b[M`!!".into()));
+    }
+}
+
+/// The web address at column `column` of a row's text (a character per column): its columns.
+fn web_span_at(line: &str, column: usize) -> Option<(usize, usize)> {
+    let at = line.char_indices().nth(column).map_or(line.len(), |(i, _)| i);
+    let (from, to) = keleuo_core::web::web_link_span(line, at)?;
+    Some((line[..from].chars().count(), line[..to].chars().count()))
+}
+
+#[cfg(test)]
+mod link_tests {
+    use super::web_span_at;
+
+    #[::core::prelude::v1::test]
+    fn a_web_address_is_found_by_its_columns() {
+        let line = "  ➜  Local:   http://localhost:5173/ (ready)";
+        let start = line.chars().position(|c| c == 'h').unwrap();
+        assert_eq!(web_span_at(line, start + 3), Some((start, start + "http://localhost:5173/".len())));
+        assert_eq!(web_span_at(line, 2), None, "not on the address");
+        assert_eq!(web_span_at("see https://example.com.", 10), Some((4, 23)), "the full stop is not part of it");
     }
 }

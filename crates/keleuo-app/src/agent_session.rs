@@ -123,7 +123,7 @@ pub enum SessionEvent {
     FileChanged(PathBuf),
     TurnEnded,
     /// Cmd+click in the agent's terminal interface: the row's text and the column clicked.
-    TerminalLink { line: String, column: usize },
+    TerminalLink { line: String, column: usize, browser: bool },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1134,8 +1134,8 @@ impl AgentSession {
         .detach();
         self.ready = false;
         let links = cx.subscribe(&view, |_, _, ev: &TerminalEvent, cx| {
-            if let TerminalEvent::OpenLink { line, column } = ev {
-                cx.emit(SessionEvent::TerminalLink { line: line.clone(), column: *column });
+            if let TerminalEvent::OpenLink { line, column, browser } = ev {
+                cx.emit(SessionEvent::TerminalLink { line: line.clone(), column: *column, browser: *browser });
             }
         });
         self.terminal = Some(TerminalRun { view, _exit: exit, _links: links });
