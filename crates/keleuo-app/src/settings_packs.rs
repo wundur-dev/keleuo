@@ -1,11 +1,15 @@
 //! Settings > Tools > Packs: tool packs ([`keleuo_core::packs`]) installed from a folder, each
 //! with its tools (and what they cost), its keys (kept in the system's key store, never shown
 //! again), its settings, a switch, and Remove.
+//!
+//! Drawing reads nothing from disk or the key store: the packs and which keys are kept are
+//! loaded once in the background (and again after an install or a removal).
 
 use std::collections::HashMap;
 
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputState};
+use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{ActiveTheme, IconName, Sizable};
 use gpui_kit::prelude::*;
@@ -14,11 +18,46 @@ use keleuo_core::packs::{self, Pack};
 
 use crate::settings_window::{SettingsPage, change};
 
-/// The section's own state: its fields (one per key and per setting), what went wrong.
+/// The section's own state: the installed packs (`None`: not loaded yet), its fields (one per
+/// key and per setting), what went wrong.
 #[derive(Default)]
 pub struct PacksState {
+    packs: Option<Vec<Pack>>,
+    loading: bool,
     fields: HashMap<String, Entity<InputState>>,
     error: Option<String>,
+}
+
+/// Load the installed packs and look up their keys, off the main thread.
+fn load(page: &WeakEntity<SettingsPage>, cx: &mut App) {
+    let page = page.clone();
+    cx.spawn(async move |cx: &mut AsyncApp| {
+        let found = cx
+            .background_spawn(async move {
+                let found = packs::dir().map(|d| packs::installed(&d)).unwrap_or_default();
+                for p in &found {
+                    for s in &p.manifest.secrets {
+                        keleuo_core::secrets::kept(&p.secret_account(&s.name));
+                    }
+                }
+                found
+            })
+            .await;
+        cx.update(|cx| {
+            let _ = page.update(cx, |p, cx| {
+                p.packs.packs = Some(found);
+                p.packs.loading = false;
+                cx.notify();
+            });
+        })
+    })
+    .detach();
+}
+
+/// Load the packs again (after an install or a removal).
+fn reload(page: &WeakEntity<SettingsPage>, cx: &mut App) {
+    let _ = page.update(cx, |p, _| p.packs.packs = None);
+    cx.refresh_windows();
 }
 
 fn field(state: &mut PacksState, key: &str, placeholder: &str, masked: bool, value: &str, window: &mut Window, cx: &mut App) -> Entity<InputState> {
@@ -49,7 +88,7 @@ fn install(page: WeakEntity<SettingsPage>, cx: &mut App) {
         let done = packs::install_from_folder(&from, &dir);
         cx.update(|cx| {
             set_error(&page, done.err(), cx);
-            cx.refresh_windows();
+            reload(&page, cx);
         });
     })
     .detach();
@@ -60,9 +99,17 @@ pub fn render(page: &WeakEntity<SettingsPage>, window: &mut Window, cx: &mut App
     let Some(entity) = page.upgrade() else { return div().into_any_element() };
     let theme = cx.theme();
     let (fg, muted, border, danger, green) = (theme.foreground, theme.muted_foreground, theme.border, theme.danger, theme.green);
-    let installed = packs::dir().map(|d| packs::installed(&d)).unwrap_or_default();
+    let state = &entity.read(cx).packs;
+    let (installed, loading) = (state.packs.clone(), state.loading);
     let settings = cx.global::<crate::AppSettings>().0.borrow().clone();
     let mut list = div().flex().flex_col().gap_2();
+    let Some(installed) = installed else {
+        if !loading {
+            entity.update(cx, |p, _| p.packs.loading = true);
+            load(page, cx);
+        }
+        return div().pt_4().text_sm().text_color(muted).child("Loading packs…").into_any_element();
+    };
     if installed.is_empty() {
         list = list.child(div().text_sm().text_color(muted).child("No packs yet. A pack is a folder with a pack.json and its scripts."));
     }
@@ -92,9 +139,13 @@ fn card(page: &WeakEntity<SettingsPage>, entity: &Entity<SettingsPage>, pack: &P
     let (fg, muted, border, green) = (theme.foreground, theme.muted_foreground, theme.border, theme.green);
     let m = &pack.manifest;
     let on = !settings.packs_off.contains(&m.id);
-    let has = |name: &str| keleuo_core::secrets::get(&pack.secret_account(name)).is_some();
+    // As loaded in the background (a key saved since is known at once).
+    let has = |name: &str| keleuo_core::secrets::known(&pack.secret_account(name)).unwrap_or(false);
+    // Its settings as they stand: what to show depends on them (no Azure fields for OpenAI).
+    let values = pack.values(settings.pack_settings.get(&m.id));
     let (id1, id2) = (m.id.clone(), m.id.clone());
     let dir = pack.dir.clone();
+    let p_remove = page.clone();
     let mut tools = div().flex().flex_col().gap_0p5();
     for t in &m.tools {
         let ready = packs::Pack::ready(t, &has);
@@ -113,9 +164,9 @@ fn card(page: &WeakEntity<SettingsPage>, entity: &Entity<SettingsPage>, pack: &P
     }
     // Its keys: a field each, saved to the key store (a kept one shows as kept, never its value).
     let mut keys = div().flex().flex_col().gap_1();
-    for s in &m.secrets {
+    for s in m.secrets.iter().filter(|s| packs::shown(&s.when, &values)) {
         let account = pack.secret_account(&s.name);
-        let kept = keleuo_core::secrets::get(&account).is_some();
+        let kept = has(&s.name);
         let input = entity.update(cx, |p, cx| field(&mut p.packs, &format!("{}/secret/{}", m.id, s.name), if kept { "kept in the key store; type to replace" } else { "paste the key" }, true, "", window, cx));
         let (inp, acct, pg) = (input.clone(), account.clone(), page.clone());
         let label = if s.label.is_empty() { s.name.clone() } else { s.label.clone() };
@@ -141,13 +192,39 @@ fn card(page: &WeakEntity<SettingsPage>, entity: &Entity<SettingsPage>, pack: &P
     }
     // Its settings: a field each, saved with Keleuo's settings.
     let mut sets = div().flex().flex_col().gap_1();
-    for st in &m.settings {
+    for st in m.settings.iter().filter(|s| packs::shown(&s.when, &values)) {
+        let label = if st.label.is_empty() { st.name.clone() } else { st.label.clone() };
+        if !st.choices.is_empty() {
+            // One of a few: a dropdown, saved when picked.
+            let current = values.get(&st.name).cloned().unwrap_or_default();
+            let (choices, pid, name) = (st.choices.clone(), m.id.clone(), st.name.clone());
+            sets = sets.child(
+                div().flex().items_center().gap_2().child(div().w(px(170.)).flex_none().text_sm().text_color(fg).child(label)).child(
+                    Button::new(SharedString::from(format!("pack-choice-{pid}-{name}")))
+                        .label(if current.is_empty() { "Choose".to_string() } else { current.clone() })
+                        .small()
+                        .outline()
+                        .dropdown_caret(true)
+                        .dropdown_menu(move |mut menu, _, _| {
+                            for c in &choices {
+                                let (pid, name, pick) = (pid.clone(), name.clone(), c.clone());
+                                menu = menu.item(PopupMenuItem::new(c.clone()).checked(*c == current).on_click(move |_, _, cx| {
+                                    let (pid, name, pick) = (pid.clone(), name.clone(), pick.clone());
+                                    change(cx, move |s| {
+                                        s.pack_settings.entry(pid).or_default().insert(name, pick);
+                                    });
+                                }));
+                            }
+                            menu
+                        }),
+                ),
+            );
+            continue;
+        }
         let current = settings.pack_settings.get(&m.id).and_then(|s| s.get(&st.name)).cloned().unwrap_or_default();
         let placeholder = if st.placeholder.is_empty() { st.default.clone() } else { st.placeholder.clone() };
         let input = entity.update(cx, |p, cx| field(&mut p.packs, &format!("{}/setting/{}", m.id, st.name), &placeholder, false, &current, window, cx));
         let (inp, pid, name) = (input.clone(), m.id.clone(), st.name.clone());
-        let label = if st.label.is_empty() { st.name.clone() } else { st.label.clone() };
-        let hint = if st.choices.is_empty() { String::new() } else { st.choices.join(" / ") };
         sets = sets.child(
             div()
                 .flex()
@@ -155,7 +232,6 @@ fn card(page: &WeakEntity<SettingsPage>, entity: &Entity<SettingsPage>, pack: &P
                 .gap_2()
                 .child(div().w(px(170.)).flex_none().text_sm().text_color(fg).child(label))
                 .child(div().flex_1().child(Input::new(&input).small()))
-                .child(div().text_xs().text_color(muted).child(hint))
                 .child(Button::new(SharedString::from(format!("pack-set-{pid}-{name}"))).xsmall().ghost().label("Save").on_click(move |_, _, cx| {
                     let value = inp.read(cx).value().trim().to_string();
                     let (pid, name) = (pid.clone(), name.clone());
@@ -184,6 +260,7 @@ fn card(page: &WeakEntity<SettingsPage>, entity: &Entity<SettingsPage>, pack: &P
                 .child(div().flex_1())
                 .child(Button::new(SharedString::from(format!("pack-remove-{}", m.id))).xsmall().ghost().icon(gpui_kit::assets::IconName::Trash).tooltip("Remove").on_click(move |_, _, cx| {
                     let _ = std::fs::remove_dir_all(&dir);
+                    reload(&p_remove, cx);
                     let id = id2.clone();
                     change(cx, move |s| s.packs_off.retain(|x| *x != id));
                 }))

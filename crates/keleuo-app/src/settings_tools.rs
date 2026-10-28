@@ -326,7 +326,7 @@ pub fn render(page: &WeakEntity<SettingsPage>, window: &mut Window, cx: &mut App
         let secrets: Vec<String> = t
             .secrets
             .iter()
-            .map(|n| format!("{n} {}", if keleuo_core::secrets::get(&cli_tools::secret_account(&t.name, n)).is_some() { "in the key store ✓" } else { "missing" }))
+            .map(|n| format!("{n} {}", if keleuo_core::secrets::kept(&cli_tools::secret_account(&t.name, n)) { "in the key store ✓" } else { "missing" }))
             .collect();
         let mut how = vec![format!("stops after {}s", t.timeout().as_secs())];
         if t.ask {
