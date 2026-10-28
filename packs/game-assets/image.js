@@ -1,15 +1,11 @@
-// make_image: gpt-image, from OpenAI directly or through Azure OpenAI.
+// make_image and edit_image: gpt-image, from OpenAI directly or through Azure OpenAI.
 export default async function (args, kx) {
+  const editing = kx.tool === "edit_image";
   const azure = kx.setting("image_provider") === "azure";
-  const body = {
-    prompt: args.prompt,
-    size: args.size || "1024x1024",
-    quality: args.quality || "medium",
-    background: args.transparent ? "transparent" : "auto",
-    output_format: "png",
-    n: 1,
-  };
-  let url, headers;
+  const size = args.size || (editing ? "auto" : "1024x1024");
+  const quality = args.quality || "medium";
+  const background = args.transparent ? "transparent" : "auto";
+  let base, headers, model;
   if (azure) {
     const endpoint = (kx.setting("azure_endpoint") || "").replace(/\/+$/, "");
     const deployment = kx.setting("azure_deployment");
@@ -17,17 +13,41 @@ export default async function (args, kx) {
     if (!endpoint || !deployment || !key) {
       return kx.fail("Azure OpenAI isn't set up: give the endpoint, the deployment and the key in Settings > Tools > Packs.");
     }
-    url = `${endpoint}/openai/deployments/${encodeURIComponent(deployment)}/images/generations?api-version=${kx.setting("azure_api_version")}`;
+    base = `${endpoint}/openai/deployments/${encodeURIComponent(deployment)}/images/`;
     headers = { "api-key": key };
   } else {
     const key = kx.secret("OPENAI_API_KEY");
     if (!key) return kx.fail("No OpenAI key: add it in Settings > Tools > Packs (or choose Azure).");
-    url = "https://api.openai.com/v1/images/generations";
+    base = `${kx.setting("openai_url") || "https://api.openai.com/v1"}/images/`;
     headers = { authorization: `Bearer ${key}` };
-    body.model = kx.setting("image_model") || "gpt-image-1";
+    model = kx.setting("image_model") || "gpt-image-2.5-sunburst";
   }
-  kx.progress(`make_image: ${args.prompt.slice(0, 60)}`);
-  const res = await kx.fetch(url, { method: "POST", headers, json: body });
+  const query = azure ? `?api-version=${kx.setting("azure_api_version")}` : "";
+  let res;
+  if (editing) {
+    // The images to change (several: the first is changed, the rest are references), and an
+    // optional mask whose transparent pixels say where.
+    if (!args.image) return kx.fail("edit_image needs the image to change.");
+    const images = String(args.image).split(",").map((p) => p.trim()).filter(Boolean);
+    let files;
+    try {
+      files = images.map((p) => kx.readFile(p));
+    } catch (e) {
+      return kx.fail(`Couldn't read the image: ${e.message}`);
+    }
+    const form = { prompt: args.prompt, size, quality, background, output_format: "png", n: "1", "image[]": files };
+    if (model) form.model = model;
+    if (args.mask) {
+      try { form.mask = kx.readFile(args.mask); } catch (e) { return kx.fail(`Couldn't read the mask: ${e.message}`); }
+    }
+    kx.progress(`edit_image: ${args.prompt.slice(0, 60)}`);
+    res = kx.fetch(base + "edits" + query, { method: "POST", headers, form });
+  } else {
+    const body = { prompt: args.prompt, size, quality, background, output_format: "png", n: 1 };
+    if (model) body.model = model;
+    kx.progress(`make_image: ${args.prompt.slice(0, 60)}`);
+    res = kx.fetch(base + "generations" + query, { method: "POST", headers, json: body });
+  }
   if (!res.ok) {
     let why = res.text();
     try { why = res.json().error.message; } catch (_) {}
@@ -36,7 +56,8 @@ export default async function (args, kx) {
   const data = res.json();
   const image = data.data && data.data[0] && data.data[0].b64_json;
   if (!image) return kx.fail("The image service sent no image.");
-  const name = args.name ? kx.slug(args.name) : kx.slug(args.prompt);
+  const from = editing ? String(args.image).split(",")[0].trim().split("/").pop().replace(/\.[^.]+$/, "") + "-edit" : args.prompt;
+  const name = kx.slug(args.name || from);
   const file = kx.writeFile(`${kx.setting("output_folder")}/${name}.png`, kx.base64(image));
-  return { text: `Saved ${file} (${body.size}, ${body.quality}${args.transparent ? ", transparent" : ""}).`, images: [file] };
+  return { text: `Saved ${file} (${size}, ${quality}${args.transparent ? ", transparent" : ""}).`, images: [file] };
 }

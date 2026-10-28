@@ -236,7 +236,12 @@ globalThis.kx = {
     const b64 = data && data.__b64 !== undefined;
     return __kx.write(String(path), b64 ? data.__b64 : String(data), b64);
   },
-  readFile(path) { return { __b64: __kx.read(String(path)) }; },
+  readFile(path) {
+    const name = String(path).split("/").pop();
+    const ext = (name.split(".").pop() || "").toLowerCase();
+    const types = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", webp: "image/webp", gif: "image/gif", glb: "model/gltf-binary", mp3: "audio/mpeg", wav: "audio/wav" };
+    return { __b64: __kx.read(String(path)), filename: name, type: types[ext] || "application/octet-stream" };
+  },
   base64(text) { return { __b64: String(text) }; },
   sleep(ms) { __kx.sleep(Number(ms)); },
   progress(text) { __kx.progress(String(text)); },
@@ -372,6 +377,8 @@ fn run_inner(pack: &Pack, tool: &PackTool, args: &Value, grant: &Grant) -> Resul
         let main: Function = module.get("default").map_err(|_| format!("{} has no default export (export default async function (args, kx) {{ ... }})", tool.script))?;
         let args_js = ctx.json_parse(args.to_string()).map_err(err)?;
         let kx: Object = ctx.globals().get("kx").map_err(err)?;
+        // Which tool was called, for a script that serves several.
+        kx.set("tool", tool.name.as_str()).map_err(err)?;
         let returned: rquickjs::Value = main.call((args_js, kx)).map_err(err)?;
         let value: rquickjs::Value = match returned.clone().into_promise() {
             Some(p) => {
@@ -429,6 +436,36 @@ fn fetch(url: &str, opts: &str, hosts: &[String], allow_http: bool, deadline: In
     let body: Option<Vec<u8>> = if let Some(j) = o.get("json") {
         headers.push(("content-type".into(), "application/json".into()));
         Some(j.to_string().into_bytes())
+    } else if let Some(form) = o.get("form").and_then(Value::as_object) {
+        // A form with files (an upload): each field a text, or a file ({__b64, filename, type});
+        // a list repeats the field (OpenAI's image[]).
+        let boundary = format!("keleuo-{:x}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0));
+        let mut out: Vec<u8> = Vec::new();
+        for (name, value) in form {
+            let values: Vec<&Value> = match value {
+                Value::Array(list) => list.iter().collect(),
+                v => vec![v],
+            };
+            for v in values {
+                out.extend(format!("--{boundary}\r\n").as_bytes());
+                match v.get("__b64").and_then(Value::as_str) {
+                    Some(b64) => {
+                        let filename = v.get("filename").and_then(Value::as_str).unwrap_or("file");
+                        let kind = v.get("type").and_then(Value::as_str).unwrap_or("application/octet-stream");
+                        out.extend(format!("Content-Disposition: form-data; name=\"{name}\"; filename=\"{filename}\"\r\nContent-Type: {kind}\r\n\r\n").as_bytes());
+                        out.extend(base64::engine::general_purpose::STANDARD.decode(b64.trim()).unwrap_or_default());
+                    }
+                    None => {
+                        let text = v.as_str().map(str::to_string).unwrap_or_else(|| v.to_string());
+                        out.extend(format!("Content-Disposition: form-data; name=\"{name}\"\r\n\r\n{text}").as_bytes());
+                    }
+                }
+                out.extend(b"\r\n");
+            }
+        }
+        out.extend(format!("--{boundary}--\r\n").as_bytes());
+        headers.push(("content-type".into(), format!("multipart/form-data; boundary={boundary}")));
+        Some(out)
     } else {
         o.get("body").and_then(Value::as_str).map(|b| b.as_bytes().to_vec())
     };
@@ -571,6 +608,137 @@ mod tests {
         let request = seen.join().unwrap();
         assert!(request.starts_with("POST /openai/deployments/gpt-image/images/generations?api-version=2025-04-01-preview"), "{request}");
         assert!(request.contains("api-key: az-key-9") && request.contains("\"background\":\"transparent\""), "{request}");
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    /// A stand-in service on 127.0.0.1: answers `count` requests in turn with `answer(its port,
+    /// request line, whole request)` (status, content type, body) and gives back what it was sent.
+    fn stand_in(count: usize, answer: impl Fn(u16, &str, &[u8]) -> (u16, &'static str, Vec<u8>) + Send + 'static) -> (u16, std::thread::JoinHandle<Vec<String>>) {
+        let server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = server.local_addr().unwrap().port();
+        let seen = std::thread::spawn(move || {
+            let mut seen = Vec::new();
+            for _ in 0..count {
+                let (mut s, _) = server.accept().unwrap();
+                let mut got: Vec<u8> = Vec::new();
+                let mut buf = vec![0u8; 65536];
+                // The head, then as much body as it says.
+                loop {
+                    let n = s.read(&mut buf).unwrap();
+                    got.extend(&buf[..n]);
+                    let Some(end) = got.windows(4).position(|w| w == b"\r\n\r\n") else {
+                        if n == 0 { break } else { continue }
+                    };
+                    let head = String::from_utf8_lossy(&got[..end]).to_lowercase();
+                    let length: usize = head.lines().find_map(|l| l.strip_prefix("content-length:")).map(|v| v.trim().parse().unwrap()).unwrap_or(0);
+                    if got.len() >= end + 4 + length || n == 0 {
+                        break;
+                    }
+                }
+                let text = String::from_utf8_lossy(&got).to_string();
+                let (status, kind, body) = answer(port, text.lines().next().unwrap_or(""), &got);
+                let _ = write!(s, "HTTP/1.1 {status} X\r\ncontent-type: {kind}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n", body.len());
+                let _ = s.write_all(&body);
+                seen.push(text);
+            }
+            seen
+        });
+        (port, seen)
+    }
+
+    fn game_assets() -> Pack {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packs/game-assets");
+        let manifest: Manifest = serde_json::from_str(&std::fs::read_to_string(root.join("pack.json")).unwrap()).unwrap();
+        Pack { manifest, dir: root }
+    }
+
+    fn run_game_tool(name: &str, args: Value, settings: &[(&str, String)], cwd: &Path) -> Outcome {
+        let pack = game_assets();
+        let tool = pack.manifest.tools.iter().find(|t| t.name == name).unwrap().clone();
+        let settings: BTreeMap<String, String> = settings.iter().map(|(k, v)| (k.to_string(), v.clone())).collect();
+        let secret = |name: &str| Some(format!("key-of-{name}"));
+        let grant = Grant { cwd, secret: &secret, settings: &settings, extra_hosts: vec!["127.0.0.1".into()], allow_http: true };
+        run(&pack, &tool, &args, &grant)
+    }
+
+    fn scratch(name: &str) -> PathBuf {
+        let cwd = std::env::temp_dir().join(format!("keleuo-pack-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&cwd);
+        std::fs::create_dir_all(&cwd).unwrap();
+        cwd
+    }
+
+    #[test]
+    fn edit_image_uploads_the_image_as_a_form() {
+        let cwd = scratch("edit");
+        std::fs::create_dir_all(cwd.join("art")).unwrap();
+        std::fs::write(cwd.join("art/coin.png"), b"\x89PNG old coin").unwrap();
+        let png = base64::engine::general_purpose::STANDARD.encode(b"\x89PNG red coin");
+        let (port, seen) = stand_in(1, move |_, _, _| (200, "application/json", format!("{{\"data\":[{{\"b64_json\":\"{png}\"}}]}}").into_bytes()));
+        let out = run_game_tool("edit_image", json!({ "image": "art/coin.png", "prompt": "make it red" }), &[("openai_url", format!("http://127.0.0.1:{port}/v1"))], &cwd);
+        assert!(!out.failed, "{}", out.text);
+        assert_eq!(out.images, [cwd.join("assets/generated/coin-edit.png")]);
+        assert_eq!(std::fs::read(&out.images[0]).unwrap(), b"\x89PNG red coin");
+        let request = &seen.join().unwrap()[0];
+        assert!(request.starts_with("POST /v1/images/edits "), "{request}");
+        assert!(request.contains("authorization: Bearer key-of-OPENAI_API_KEY"), "{request}");
+        assert!(request.contains("multipart/form-data; boundary="), "{request}");
+        assert!(request.contains("name=\"image[]\"; filename=\"coin.png\"\r\nContent-Type: image/png\r\n\r\n\u{FFFD}PNG old coin"), "{request}");
+        assert!(request.contains("name=\"model\"\r\n\r\ngpt-image-2.5-sunburst"), "{request}");
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
+    fn sound_effect_saves_what_elevenlabs_sends() {
+        let cwd = scratch("sound");
+        let (port, seen) = stand_in(1, |_, _, _| (200, "audio/mpeg", b"ID3 boom".to_vec()));
+        let out = run_game_tool("sound_effect", json!({ "prompt": "A big boom", "seconds": 2, "loop": true }), &[("elevenlabs_url", format!("http://127.0.0.1:{port}/v1"))], &cwd);
+        assert!(!out.failed, "{}", out.text);
+        assert_eq!(out.files, [cwd.join("assets/generated/a-big-boom.mp3")]);
+        assert_eq!(std::fs::read(&out.files[0]).unwrap(), b"ID3 boom");
+        let request = &seen.join().unwrap()[0];
+        assert!(request.starts_with("POST /v1/sound-generation?output_format=mp3_44100_128 "), "{request}");
+        assert!(request.contains("xi-api-key: key-of-ELEVENLABS_API_KEY"), "{request}");
+        assert!(request.contains("\"duration_seconds\":2") && request.contains("\"loop\":true"), "{request}");
+        assert!(!out.text.contains("key-of"), "{}", out.text);
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
+    fn a_tripo_model_is_uploaded_waited_for_and_downloaded() {
+        let cwd = scratch("tripo");
+        std::fs::write(cwd.join("knight.png"), b"\x89PNG knight").unwrap();
+        let polls = std::sync::atomic::AtomicUsize::new(0);
+        let (port, seen) = stand_in(6, move |port, line, _| {
+            let json = "application/json";
+            if line.starts_with("POST /v3/files ") {
+                (200, json, br#"{"code":0,"data":{"file_token":"tok-1"}}"#.to_vec())
+            } else if line.starts_with("POST /v3/generation/image-to-model ") {
+                (200, json, br#"{"code":0,"data":{"task_id":"task-7"}}"#.to_vec())
+            } else if line.starts_with("GET /v3/tasks/task-7 ") {
+                if polls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                    (200, json, br#"{"code":0,"data":{"status":"running","progress":40}}"#.to_vec())
+                } else {
+                    let m = format!("http://127.0.0.1:{port}/m/knight");
+                    (200, json, format!(r#"{{"code":0,"data":{{"status":"success","output":{{"model_url":"{m}.glb?sig=1","rendered_image_url":"{m}.webp?sig=1"}}}}}}"#).into_bytes())
+                }
+            } else if line.starts_with("GET /m/knight.glb") {
+                (200, "model/gltf-binary", b"glTF knight".to_vec())
+            } else if line.starts_with("GET /m/knight.webp") {
+                (200, "image/webp", b"RIFF knight".to_vec())
+            } else {
+                (404, json, b"{}".to_vec())
+            }
+        });
+        let out = run_game_tool("model_from_image", json!({ "image": "knight.png", "faces": 5000 }), &[("tripo_url", format!("http://127.0.0.1:{port}/v3")), ("poll_ms", "1".into())], &cwd);
+        assert!(!out.failed, "{}", out.text);
+        assert_eq!(out.files, [cwd.join("assets/generated/knight.glb")]);
+        assert_eq!(std::fs::read(&out.files[0]).unwrap(), b"glTF knight");
+        assert_eq!(out.images, [cwd.join("assets/generated/knight-preview.webp")]);
+        let requests = seen.join().unwrap();
+        assert!(requests[0].contains("name=\"file\"; filename=\"knight.png\""), "{}", requests[0]);
+        assert!(requests[1].contains("\"input\":\"tok-1\"") && requests[1].contains("\"face_limit\":5000"), "{}", requests[1]);
+        assert!(requests[1].contains("authorization: Bearer key-of-TRIPO_API_KEY"), "{}", requests[1]);
         let _ = std::fs::remove_dir_all(&cwd);
     }
 

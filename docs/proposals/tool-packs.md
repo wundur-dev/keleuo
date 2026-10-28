@@ -196,10 +196,10 @@ What packs make should be visible in Keleuo:
 
 | Tool | Service | Notes |
 |---|---|---|
-| `make_image` | OpenAI `gpt-image-1`, or Azure OpenAI | size, transparent background, quality; saves PNG |
+| `make_image` | OpenAI gpt-image (`gpt-image-2.5-sunburst` by default), or Azure OpenAI | size, transparent background, quality; saves PNG |
 | `edit_image` | the same | change an existing image with a prompt (and a mask), e.g. recolour a sprite |
 | `sound_effect` | ElevenLabs sound generation | text and length; saves MP3 |
-| `voice_line` | ElevenLabs text to speech | text and voice; saves MP3 |
+| `voice_line`, `list_voices` | ElevenLabs text to speech | text and voice; saves MP3 |
 | `music` | ElevenLabs music | prompt and length |
 | `model_from_text` / `model_from_image` | Tripo | a job: starts it, polls, downloads the GLB (and its preview image, returned to the agent) |
 
