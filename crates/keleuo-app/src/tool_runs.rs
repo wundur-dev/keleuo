@@ -76,7 +76,7 @@ fn pack_tools(cx: &App) -> Vec<(Pack, PackTool)> {
         .into_iter()
         .filter(|p| !off.contains(&p.manifest.id))
         .flat_map(|p| {
-            let has = |name: &str| keleuo_core::secrets::get(&p.secret_account(name)).is_some();
+            let has = |name: &str| keleuo_core::secrets::kept(&p.secret_account(name));
             let ready: Vec<PackTool> = p.manifest.tools.iter().filter(|t| Pack::ready(t, &has)).cloned().collect();
             ready.into_iter().map(move |t| (p.clone(), t))
         })

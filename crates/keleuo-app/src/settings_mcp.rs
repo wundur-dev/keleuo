@@ -265,7 +265,7 @@ pub fn render(page: &WeakEntity<SettingsPage>, window: &mut Window, cx: &mut App
             .secrets
             .iter()
             .map(|n| {
-                let kept = keleuo_core::secrets::get(&mcp::secret_account(&s.name, n)).is_some();
+                let kept = keleuo_core::secrets::kept(&mcp::secret_account(&s.name, n));
                 format!("{n} {}", if kept { "in the key store ✓" } else { "missing" })
             })
             .collect();

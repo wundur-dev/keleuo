@@ -2,8 +2,10 @@
 //! the `security` command), the Secret Service on Linux (by `secret-tool`). Windows is not
 //! supported yet. Each secret is named by an account under Keleuo's service.
 
+use std::collections::HashMap;
 use std::io;
 use std::process::Stdio;
+use std::sync::Mutex;
 
 /// The service Keleuo's secrets are kept under.
 const SERVICE: &str = "keleuo";
@@ -19,8 +21,35 @@ pub fn supported() -> Result<(), String> {
     }
 }
 
+/// Which secrets are kept, as last looked up or changed here: asking the store is a process
+/// each time (tens of milliseconds), too slow to do while drawing.
+static KEPT: Mutex<Option<HashMap<String, bool>>> = Mutex::new(None);
+
+fn note(account: &str, kept: bool) {
+    if let Ok(mut k) = KEPT.lock() {
+        k.get_or_insert_with(HashMap::new).insert(account.to_string(), kept);
+    }
+}
+
+/// Whether the secret named `account` is kept, as known without asking the store (`None`: not
+/// looked up yet; [`kept`] looks).
+pub fn known(account: &str) -> Option<bool> {
+    KEPT.lock().ok()?.as_ref()?.get(account).copied()
+}
+
+/// Whether the secret named `account` is kept: from what is known, else the store (once).
+pub fn kept(account: &str) -> bool {
+    known(account).unwrap_or_else(|| get(account).is_some())
+}
+
 /// The secret named `account`, if there is one.
 pub fn get(account: &str) -> Option<String> {
+    let value = read(account);
+    note(account, value.is_some());
+    value
+}
+
+fn read(account: &str) -> Option<String> {
     let out = if cfg!(target_os = "macos") {
         crate::platform::command("security").args(["find-generic-password", "-s", SERVICE, "-a", account, "-w"]).stderr(Stdio::null()).output().ok()?
     } else if cfg!(target_os = "linux") {
@@ -58,11 +87,16 @@ pub fn set(account: &str, value: &str) -> io::Result<()> {
         child.stdin.take().map(|mut i| i.write_all(value.as_bytes())).transpose()?;
         child.wait()?
     };
-    if status.success() { Ok(()) } else { Err(io::Error::other("the system's key store refused it")) }
+    if !status.success() {
+        return Err(io::Error::other("the system's key store refused it"));
+    }
+    note(account, true);
+    Ok(())
 }
 
 /// Forget the secret named `account`.
 pub fn remove(account: &str) {
+    note(account, false);
     if cfg!(target_os = "macos") {
         let _ = crate::platform::command("security").args(["delete-generic-password", "-s", SERVICE, "-a", account]).output();
     } else if cfg!(target_os = "linux") {

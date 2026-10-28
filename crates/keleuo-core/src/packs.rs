@@ -25,6 +25,8 @@ pub struct Secret {
     pub label: String,
     pub help: String,
     pub optional: bool,
+    /// Shown only when these settings have these values ([`shown`]).
+    pub when: BTreeMap<String, String>,
 }
 
 /// A setting the person gives a pack (an endpoint, a folder).
@@ -34,8 +36,21 @@ pub struct Setting {
     pub name: String,
     pub label: String,
     pub placeholder: String,
+    /// One of these (a dropdown in Settings), when given.
     pub choices: Vec<String>,
     pub default: String,
+    /// Shown only when these settings have these values ([`shown`]): an Azure endpoint only
+    /// when images come from Azure.
+    pub when: BTreeMap<String, String>,
+}
+
+/// Whether something with `when` is shown, given the pack's settings' `values`: each named
+/// setting has one of the values listed (`"a|b"`).
+pub fn shown(when: &BTreeMap<String, String>, values: &BTreeMap<String, String>) -> bool {
+    when.iter().all(|(name, wanted)| {
+        let have = values.get(name).map(String::as_str).unwrap_or("");
+        wanted.split('|').any(|w| w.trim() == have)
+    })
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -78,6 +93,17 @@ pub struct Pack {
 }
 
 impl Pack {
+    /// Its settings' values: the defaults, with what the person gave (empty: the default).
+    pub fn values(&self, given: Option<&BTreeMap<String, String>>) -> BTreeMap<String, String> {
+        let mut values: BTreeMap<String, String> = self.manifest.settings.iter().map(|s| (s.name.clone(), s.default.clone())).collect();
+        for (k, v) in given.into_iter().flatten() {
+            if !v.is_empty() {
+                values.insert(k.clone(), v.clone());
+            }
+        }
+        values
+    }
+
     /// The key store's name for its secret `name`.
     pub fn secret_account(&self, name: &str) -> String {
         format!("pack/{}/{name}", self.manifest.id)
@@ -277,12 +303,7 @@ fn run_inner(pack: &Pack, tool: &PackTool, args: &Value, grant: &Grant) -> Resul
     let secrets: BTreeMap<String, String> = m.secrets.iter().filter_map(|s| Some((s.name.clone(), (grant.secret)(&s.name)?))).collect();
     // What secrets were read: blanked from whatever comes back.
     let given = std::rc::Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
-    let mut settings: BTreeMap<String, String> = m.settings.iter().map(|s| (s.name.clone(), s.default.clone())).collect();
-    for (k, v) in grant.settings {
-        if !v.is_empty() {
-            settings.insert(k.clone(), v.clone());
-        }
-    }
+    let settings = pack.values(Some(grant.settings));
     let cwd = grant.cwd.to_path_buf();
     let written = std::rc::Rc::new(std::cell::RefCell::new(Vec::<PathBuf>::new()));
 
@@ -609,6 +630,24 @@ mod tests {
         assert!(request.starts_with("POST /openai/deployments/gpt-image/images/generations?api-version=2025-04-01-preview"), "{request}");
         assert!(request.contains("api-key: az-key-9") && request.contains("\"background\":\"transparent\""), "{request}");
         let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
+    fn azure_fields_show_only_for_azure() {
+        let pack = game_assets();
+        let names = |given: &[(&str, &str)]| -> Vec<String> {
+            let given: BTreeMap<String, String> = given.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+            let values = pack.values(Some(&given));
+            let m = &pack.manifest;
+            m.secrets.iter().filter(|s| shown(&s.when, &values)).map(|s| s.name.clone()).chain(m.settings.iter().filter(|s| shown(&s.when, &values)).map(|s| s.name.clone())).collect()
+        };
+        let openai = names(&[]);
+        assert!(openai.contains(&"OPENAI_API_KEY".into()) && openai.contains(&"image_model".into()), "{openai:?}");
+        assert!(!openai.iter().any(|n| n.contains("azure") || n.contains("AZURE")), "{openai:?}");
+        let azure = names(&[("image_provider", "azure")]);
+        assert!(azure.contains(&"AZURE_OPENAI_KEY".into()) && azure.contains(&"azure_endpoint".into()), "{azure:?}");
+        assert!(!azure.contains(&"OPENAI_API_KEY".into()) && !azure.contains(&"image_model".into()), "{azure:?}");
+        assert!(azure.contains(&"ELEVENLABS_API_KEY".into()) && azure.contains(&"output_folder".into()));
     }
 
     /// A stand-in service on 127.0.0.1: answers `count` requests in turn with `answer(its port,

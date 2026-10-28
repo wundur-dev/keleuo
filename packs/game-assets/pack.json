@@ -5,23 +5,23 @@
   "description": "Images, sound effects, voice lines, music and 3D models for games, with your own keys: OpenAI's gpt-image (directly or through Azure OpenAI), ElevenLabs and Tripo. Each service's tools appear once its key is set.",
   "homepage": "https://github.com/wundur-dev/keleuo",
   "secrets": [
-    { "name": "OPENAI_API_KEY", "label": "OpenAI API key", "help": "https://platform.openai.com/api-keys", "optional": true },
-    { "name": "AZURE_OPENAI_KEY", "label": "Azure OpenAI key", "optional": true },
+    { "name": "OPENAI_API_KEY", "label": "OpenAI API key", "help": "https://platform.openai.com/api-keys", "optional": true, "when": { "image_provider": "openai" } },
+    { "name": "AZURE_OPENAI_KEY", "label": "Azure OpenAI key", "optional": true, "when": { "image_provider": "azure" } },
     { "name": "ELEVENLABS_API_KEY", "label": "ElevenLabs API key", "help": "https://elevenlabs.io/app/settings/api-keys", "optional": true },
     { "name": "TRIPO_API_KEY", "label": "Tripo API key", "help": "https://platform.tripo3d.ai/api-keys", "optional": true }
   ],
   "settings": [
     { "name": "output_folder", "label": "Save to", "default": "assets/generated" },
     { "name": "image_provider", "label": "Images from", "choices": ["openai", "azure"], "default": "openai" },
-    { "name": "image_model", "label": "OpenAI image model", "default": "gpt-image-2.5-sunburst" },
-    { "name": "azure_endpoint", "label": "Azure endpoint", "placeholder": "https://<name>.openai.azure.com" },
-    { "name": "azure_deployment", "label": "Azure deployment", "placeholder": "your gpt-image deployment's name" },
-    { "name": "azure_api_version", "label": "Azure API version", "default": "2025-04-01-preview" },
+    { "name": "image_model", "label": "OpenAI image model", "choices": ["gpt-image-2.5-sunburst", "gpt-image-2.5-flare"], "default": "gpt-image-2.5-sunburst", "when": { "image_provider": "openai" } },
+    { "name": "azure_endpoint", "label": "Azure endpoint", "placeholder": "https://<name>.openai.azure.com", "when": { "image_provider": "azure" } },
+    { "name": "azure_deployment", "label": "Azure deployment", "placeholder": "your gpt-image deployment's name", "when": { "image_provider": "azure" } },
+    { "name": "azure_api_version", "label": "Azure API version", "default": "2025-04-01-preview", "when": { "image_provider": "azure" } },
     { "name": "voice_id", "label": "Default ElevenLabs voice", "placeholder": "a voice id (list_voices shows them)", "default": "JBFqnCBsd6RMkjVDRZzb" },
-    { "name": "voice_model", "label": "ElevenLabs voice model", "default": "eleven_v3" },
-    { "name": "sound_model", "label": "ElevenLabs sound model", "default": "eleven_text_to_sound_v2" },
-    { "name": "music_model", "label": "ElevenLabs music model", "default": "music_v2_5" },
-    { "name": "model_version", "label": "Tripo model", "default": "v3.1-20260211" }
+    { "name": "voice_model", "label": "ElevenLabs voice model", "choices": ["eleven_v3", "eleven_multilingual_v2", "eleven_flash_v2_5"], "default": "eleven_v3" },
+    { "name": "sound_model", "label": "ElevenLabs sound model", "choices": ["eleven_text_to_sound_v2", "eleven_text_to_sound_v3"], "default": "eleven_text_to_sound_v2" },
+    { "name": "music_model", "label": "ElevenLabs music model", "choices": ["music_v2_5", "music_v2", "music_v1"], "default": "music_v2_5" },
+    { "name": "model_version", "label": "Tripo model", "choices": ["v3.1-20260211", "P1-20260311", "P2-20260801"], "default": "v3.1-20260211" }
   ],
   "network": [
     "api.openai.com", "*.openai.azure.com", "*.cognitiveservices.azure.com",
