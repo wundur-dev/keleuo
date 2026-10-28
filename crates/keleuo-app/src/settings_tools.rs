@@ -629,13 +629,14 @@ pub fn render(page: &WeakEntity<SettingsPage>, window: &mut Window, cx: &mut App
         .flex_col()
         .gap_3()
         .child(scope_bar)
+        .child(crate::settings_packs::render(page, window, cx))
+        .child(div().pt_4().text_lg().font_weight(FontWeight::SEMIBOLD).text_color(cx.theme().foreground).child("Custom tools"))
         .child(div().text_sm().text_color(muted).child(
             "Your own tools, made from command-line programs: every agent gets them beside Keleuo's (send_message and the rest). Keleuo runs them, in the session's folder, with their secrets from the key store: the agent never sees those.",
         ))
         .child(list)
         .child(add)
         .children(error.map(|e| div().text_sm().text_color(danger).child(e)))
-        .child(crate::settings_packs::render(page, window, cx))
         .child(div().text_xs().text_color(muted).child(
             "Agents started before a change get it when they next list their tools (most do so at start: restart the session if one doesn't see it). With \"Keep agents' writes inside the session folder\" on, a tool writes only there and in the folders it names.",
         ))

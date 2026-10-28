@@ -2,31 +2,189 @@
   "id": "wundur/game-assets",
   "name": "Game assets",
   "version": "0.2.0",
-  "description": "Images, sound effects, voice lines, music and 3D models for games, with your own keys: OpenAI's gpt-image (directly or through Azure OpenAI), ElevenLabs and Tripo. Each service's tools appear once its key is set.",
+  "description": "Images, sound, music, voices and 3D models for games, with your own keys.",
   "homepage": "https://github.com/wundur-dev/keleuo",
+  "services": [
+    {
+      "id": "images",
+      "name": "Images",
+      "description": "gpt-image · Make and edit images",
+      "icon": "image",
+      "choose": "image_provider"
+    },
+    {
+      "id": "audio",
+      "name": "Audio",
+      "description": "ElevenLabs · Sound effects, voices and music",
+      "icon": "audio"
+    },
+    {
+      "id": "models",
+      "name": "3D models",
+      "description": "Tripo · From text or images",
+      "icon": "model"
+    }
+  ],
   "secrets": [
-    { "name": "OPENAI_API_KEY", "label": "OpenAI API key", "help": "https://platform.openai.com/api-keys", "optional": true, "when": { "image_provider": "openai" } },
-    { "name": "AZURE_OPENAI_KEY", "label": "Azure OpenAI key", "optional": true, "when": { "image_provider": "azure" } },
-    { "name": "ELEVENLABS_API_KEY", "label": "ElevenLabs API key", "help": "https://elevenlabs.io/app/settings/api-keys", "optional": true },
-    { "name": "TRIPO_API_KEY", "label": "Tripo API key", "help": "https://platform.tripo3d.ai/api-keys", "optional": true }
+    {
+      "name": "OPENAI_API_KEY",
+      "label": "OpenAI API key",
+      "help": "https://platform.openai.com/api-keys",
+      "optional": true,
+      "when": {
+        "image_provider": "openai"
+      },
+      "service": "images"
+    },
+    {
+      "name": "AZURE_OPENAI_KEY",
+      "label": "Azure OpenAI key",
+      "optional": true,
+      "when": {
+        "image_provider": "azure"
+      },
+      "service": "images"
+    },
+    {
+      "name": "ELEVENLABS_API_KEY",
+      "label": "API key",
+      "help": "https://elevenlabs.io/app/settings/api-keys",
+      "optional": true,
+      "service": "audio"
+    },
+    {
+      "name": "TRIPO_API_KEY",
+      "label": "API key",
+      "help": "https://platform.tripo3d.ai/api-keys",
+      "optional": true,
+      "service": "models"
+    }
   ],
   "settings": [
-    { "name": "output_folder", "label": "Save to", "default": "assets/generated" },
-    { "name": "image_provider", "label": "Images from", "choices": ["openai", "azure"], "default": "openai" },
-    { "name": "image_model", "label": "OpenAI image model", "choices": ["gpt-image-2.5-sunburst", "gpt-image-2.5-flare"], "default": "gpt-image-2.5-sunburst", "when": { "image_provider": "openai" } },
-    { "name": "azure_endpoint", "label": "Azure endpoint", "placeholder": "https://<name>.openai.azure.com", "when": { "image_provider": "azure" } },
-    { "name": "azure_deployment", "label": "Azure deployment", "placeholder": "your gpt-image deployment's name", "when": { "image_provider": "azure" } },
-    { "name": "azure_api_version", "label": "Azure API version", "default": "2025-04-01-preview", "when": { "image_provider": "azure" } },
-    { "name": "voice_id", "label": "Default ElevenLabs voice", "placeholder": "a voice id (list_voices shows them)", "default": "JBFqnCBsd6RMkjVDRZzb" },
-    { "name": "voice_model", "label": "ElevenLabs voice model", "choices": ["eleven_v3", "eleven_multilingual_v2", "eleven_flash_v2_5"], "default": "eleven_v3" },
-    { "name": "sound_model", "label": "ElevenLabs sound model", "choices": ["eleven_text_to_sound_v2", "eleven_text_to_sound_v3"], "default": "eleven_text_to_sound_v2" },
-    { "name": "music_model", "label": "ElevenLabs music model", "choices": ["music_v2_5", "music_v2", "music_v1"], "default": "music_v2_5" },
-    { "name": "model_version", "label": "Tripo model", "choices": ["v3.1-20260211", "P1-20260311", "P2-20260801"], "default": "v3.1-20260211" }
+    {
+      "name": "output_folder",
+      "label": "Save to",
+      "default": "assets/generated"
+    },
+    {
+      "name": "image_provider",
+      "label": "Images from",
+      "choices": [
+        "openai",
+        "azure"
+      ],
+      "default": "openai",
+      "service": "images",
+      "labels": {
+        "openai": "OpenAI",
+        "azure": "Azure OpenAI"
+      }
+    },
+    {
+      "name": "image_model",
+      "label": "Model",
+      "choices": [
+        "gpt-image-2.5-sunburst",
+        "gpt-image-2.5-flare"
+      ],
+      "default": "gpt-image-2.5-sunburst",
+      "when": {
+        "image_provider": "openai"
+      },
+      "service": "images",
+      "advanced": true
+    },
+    {
+      "name": "azure_endpoint",
+      "label": "Endpoint",
+      "placeholder": "https://<name>.openai.azure.com",
+      "when": {
+        "image_provider": "azure"
+      },
+      "service": "images"
+    },
+    {
+      "name": "azure_deployment",
+      "label": "Deployment",
+      "placeholder": "your gpt-image deployment's name",
+      "when": {
+        "image_provider": "azure"
+      },
+      "service": "images"
+    },
+    {
+      "name": "azure_api_version",
+      "label": "API version",
+      "default": "2025-04-01-preview",
+      "when": {
+        "image_provider": "azure"
+      },
+      "service": "images",
+      "advanced": true
+    },
+    {
+      "name": "voice_id",
+      "label": "Default voice",
+      "placeholder": "a voice id (list_voices shows them)",
+      "default": "JBFqnCBsd6RMkjVDRZzb",
+      "service": "audio"
+    },
+    {
+      "name": "voice_model",
+      "label": "Voice model",
+      "choices": [
+        "eleven_v3",
+        "eleven_multilingual_v2",
+        "eleven_flash_v2_5"
+      ],
+      "default": "eleven_v3",
+      "service": "audio",
+      "advanced": true
+    },
+    {
+      "name": "sound_model",
+      "label": "Sound model",
+      "choices": [
+        "eleven_text_to_sound_v2",
+        "eleven_text_to_sound_v3"
+      ],
+      "default": "eleven_text_to_sound_v2",
+      "service": "audio",
+      "advanced": true
+    },
+    {
+      "name": "music_model",
+      "label": "Music model",
+      "choices": [
+        "music_v2_5",
+        "music_v2",
+        "music_v1"
+      ],
+      "default": "music_v2_5",
+      "service": "audio",
+      "advanced": true
+    },
+    {
+      "name": "model_version",
+      "label": "Model",
+      "choices": [
+        "v3.1-20260211",
+        "P1-20260311",
+        "P2-20260801"
+      ],
+      "default": "v3.1-20260211",
+      "service": "models",
+      "advanced": true
+    }
   ],
   "network": [
-    "api.openai.com", "*.openai.azure.com", "*.cognitiveservices.azure.com",
+    "api.openai.com",
+    "*.openai.azure.com",
+    "*.cognitiveservices.azure.com",
     "api.elevenlabs.io",
-    "openapi.tripo3d.ai", "*.tripo3d.ai", "*.tripo3d.com"
+    "openapi.tripo3d.ai",
+    "*.tripo3d.ai",
+    "*.tripo3d.com"
   ],
   "tools": [
     {
@@ -34,108 +192,308 @@
       "description": "Make an image with gpt-image and save it as a PNG in the project. Use for game sprites, icons, textures and concept art: describe subject, style, colours and framing in detail. Returns the image so you can check it and try again.",
       "script": "image.js",
       "params": [
-        { "name": "prompt", "kind": "text", "required": true, "description": "What to draw, in detail: subject, style, colours, framing." },
-        { "name": "size", "kind": "choice", "choices": ["1024x1024", "1536x1024", "1024x1536", "auto"], "description": "Pixel size (square, landscape, portrait). Default square." },
-        { "name": "quality", "kind": "choice", "choices": ["low", "medium", "high", "xhigh", "auto"], "description": "Higher costs more. Default medium." },
-        { "name": "transparent", "kind": "flag", "description": "A transparent background, for sprites and icons." },
-        { "name": "name", "kind": "text", "description": "File name to save as, without extension (default: from the prompt)." }
+        {
+          "name": "prompt",
+          "kind": "text",
+          "required": true,
+          "description": "What to draw, in detail: subject, style, colours, framing."
+        },
+        {
+          "name": "size",
+          "kind": "choice",
+          "choices": [
+            "1024x1024",
+            "1536x1024",
+            "1024x1536",
+            "auto"
+          ],
+          "description": "Pixel size (square, landscape, portrait). Default square."
+        },
+        {
+          "name": "quality",
+          "kind": "choice",
+          "choices": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "auto"
+          ],
+          "description": "Higher costs more. Default medium."
+        },
+        {
+          "name": "transparent",
+          "kind": "flag",
+          "description": "A transparent background, for sprites and icons."
+        },
+        {
+          "name": "name",
+          "kind": "text",
+          "description": "File name to save as, without extension (default: from the prompt)."
+        }
       ],
-      "needs": ["OPENAI_API_KEY|AZURE_OPENAI_KEY"],
+      "needs": [
+        "OPENAI_API_KEY|AZURE_OPENAI_KEY"
+      ],
       "cost": "about $0.01 to $0.25 an image, by size and quality",
-      "timeout_secs": 180
+      "timeout_secs": 180,
+      "service": "images"
     },
     {
       "name": "edit_image",
       "description": "Change an existing image in the project with gpt-image and save the result as a new PNG: recolour a sprite, add or remove something, make a variation, restyle. Give more images (comma-separated) to use the rest as references. Returns the image.",
       "script": "image.js",
       "params": [
-        { "name": "image", "kind": "text", "required": true, "description": "The image to change, a path in the project (PNG, JPEG or WebP); more, comma-separated, are references." },
-        { "name": "prompt", "kind": "text", "required": true, "description": "What to change, in detail." },
-        { "name": "mask", "kind": "text", "description": "Optional: a PNG the same size as the image whose transparent pixels mark where to change." },
-        { "name": "size", "kind": "choice", "choices": ["1024x1024", "1536x1024", "1024x1536", "auto"], "description": "Pixel size. Default: as the image." },
-        { "name": "quality", "kind": "choice", "choices": ["low", "medium", "high", "xhigh", "auto"], "description": "Higher costs more. Default medium." },
-        { "name": "transparent", "kind": "flag", "description": "A transparent background." },
-        { "name": "name", "kind": "text", "description": "File name to save as, without extension (default: the image's name with -edit)." }
+        {
+          "name": "image",
+          "kind": "text",
+          "required": true,
+          "description": "The image to change, a path in the project (PNG, JPEG or WebP); more, comma-separated, are references."
+        },
+        {
+          "name": "prompt",
+          "kind": "text",
+          "required": true,
+          "description": "What to change, in detail."
+        },
+        {
+          "name": "mask",
+          "kind": "text",
+          "description": "Optional: a PNG the same size as the image whose transparent pixels mark where to change."
+        },
+        {
+          "name": "size",
+          "kind": "choice",
+          "choices": [
+            "1024x1024",
+            "1536x1024",
+            "1024x1536",
+            "auto"
+          ],
+          "description": "Pixel size. Default: as the image."
+        },
+        {
+          "name": "quality",
+          "kind": "choice",
+          "choices": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "auto"
+          ],
+          "description": "Higher costs more. Default medium."
+        },
+        {
+          "name": "transparent",
+          "kind": "flag",
+          "description": "A transparent background."
+        },
+        {
+          "name": "name",
+          "kind": "text",
+          "description": "File name to save as, without extension (default: the image's name with -edit)."
+        }
       ],
-      "needs": ["OPENAI_API_KEY|AZURE_OPENAI_KEY"],
+      "needs": [
+        "OPENAI_API_KEY|AZURE_OPENAI_KEY"
+      ],
       "cost": "about $0.01 to $0.25 an image, by size and quality",
-      "timeout_secs": 180
+      "timeout_secs": 180,
+      "service": "images"
     },
     {
       "name": "sound_effect",
       "description": "Make a sound effect with ElevenLabs and save it as an MP3 in the project: footsteps, explosions, UI clicks, ambience. Describe the sound plainly (\"a short metallic coin pickup chime\").",
       "script": "eleven.js",
       "params": [
-        { "name": "prompt", "kind": "text", "required": true, "description": "The sound, described." },
-        { "name": "seconds", "kind": "number", "description": "Length, 0.5 to 30 seconds (default: chosen from the prompt)." },
-        { "name": "loop", "kind": "flag", "description": "Make it loop seamlessly (ambience, engines)." },
-        { "name": "name", "kind": "text", "description": "File name to save as, without extension." }
+        {
+          "name": "prompt",
+          "kind": "text",
+          "required": true,
+          "description": "The sound, described."
+        },
+        {
+          "name": "seconds",
+          "kind": "number",
+          "description": "Length, 0.5 to 30 seconds (default: chosen from the prompt)."
+        },
+        {
+          "name": "loop",
+          "kind": "flag",
+          "description": "Make it loop seamlessly (ambience, engines)."
+        },
+        {
+          "name": "name",
+          "kind": "text",
+          "description": "File name to save as, without extension."
+        }
       ],
-      "needs": ["ELEVENLABS_API_KEY"],
-      "cost": "uses ElevenLabs credits, by length"
+      "needs": [
+        "ELEVENLABS_API_KEY"
+      ],
+      "cost": "uses ElevenLabs credits, by length",
+      "service": "audio"
     },
     {
       "name": "voice_line",
       "description": "Speak a line with an ElevenLabs voice and save it as an MP3 in the project, for dialogue and narration. Audio tags in brackets set delivery, e.g. \"[whispers] Over here.\" Use list_voices to pick a voice.",
       "script": "eleven.js",
       "params": [
-        { "name": "text", "kind": "text", "required": true, "description": "What to say." },
-        { "name": "voice", "kind": "text", "description": "A voice id from list_voices (default: the one set in Settings)." },
-        { "name": "name", "kind": "text", "description": "File name to save as, without extension." }
+        {
+          "name": "text",
+          "kind": "text",
+          "required": true,
+          "description": "What to say."
+        },
+        {
+          "name": "voice",
+          "kind": "text",
+          "description": "A voice id from list_voices (default: the one set in Settings)."
+        },
+        {
+          "name": "name",
+          "kind": "text",
+          "description": "File name to save as, without extension."
+        }
       ],
-      "needs": ["ELEVENLABS_API_KEY"],
-      "cost": "uses ElevenLabs credits, by length"
+      "needs": [
+        "ELEVENLABS_API_KEY"
+      ],
+      "cost": "uses ElevenLabs credits, by length",
+      "service": "audio"
     },
     {
       "name": "list_voices",
       "description": "List the ElevenLabs voices this account can use (id, name, accent, age, use), for voice_line.",
       "script": "voices.js",
       "params": [],
-      "needs": ["ELEVENLABS_API_KEY"]
+      "needs": [
+        "ELEVENLABS_API_KEY"
+      ],
+      "service": "audio"
     },
     {
       "name": "music",
       "description": "Make a music track with ElevenLabs and save it as an MP3 in the project: describe genre, mood, instruments, tempo. Note: ElevenLabs' terms limit music in games to plans that include it; check before shipping.",
       "script": "eleven.js",
       "params": [
-        { "name": "prompt", "kind": "text", "required": true, "description": "The music, described." },
-        { "name": "seconds", "kind": "number", "description": "Length, 3 to 600 seconds (default 30)." },
-        { "name": "instrumental", "kind": "flag", "description": "No vocals." },
-        { "name": "name", "kind": "text", "description": "File name to save as, without extension." }
+        {
+          "name": "prompt",
+          "kind": "text",
+          "required": true,
+          "description": "The music, described."
+        },
+        {
+          "name": "seconds",
+          "kind": "number",
+          "description": "Length, 3 to 600 seconds (default 30)."
+        },
+        {
+          "name": "instrumental",
+          "kind": "flag",
+          "description": "No vocals."
+        },
+        {
+          "name": "name",
+          "kind": "text",
+          "description": "File name to save as, without extension."
+        }
       ],
-      "needs": ["ELEVENLABS_API_KEY"],
+      "needs": [
+        "ELEVENLABS_API_KEY"
+      ],
       "cost": "uses ElevenLabs credits, by length",
-      "timeout_secs": 300
+      "timeout_secs": 300,
+      "service": "audio"
     },
     {
       "name": "model_from_text",
       "description": "Make a 3D model (GLB, textured) with Tripo from a description and save it in the project, with a preview image you can look at. Takes a minute or a few.",
       "script": "model3d.js",
       "params": [
-        { "name": "prompt", "kind": "text", "required": true, "description": "The object, described: shape, style, materials." },
-        { "name": "faces", "kind": "number", "description": "Most faces the mesh may have (lower for games and mobile)." },
-        { "name": "texture_quality", "kind": "choice", "choices": ["fast", "standard", "detailed"], "description": "Texture detail. Default standard." },
-        { "name": "pbr", "kind": "flag", "description": "PBR materials." },
-        { "name": "name", "kind": "text", "description": "File name to save as, without extension." }
+        {
+          "name": "prompt",
+          "kind": "text",
+          "required": true,
+          "description": "The object, described: shape, style, materials."
+        },
+        {
+          "name": "faces",
+          "kind": "number",
+          "description": "Most faces the mesh may have (lower for games and mobile)."
+        },
+        {
+          "name": "texture_quality",
+          "kind": "choice",
+          "choices": [
+            "fast",
+            "standard",
+            "detailed"
+          ],
+          "description": "Texture detail. Default standard."
+        },
+        {
+          "name": "pbr",
+          "kind": "flag",
+          "description": "PBR materials."
+        },
+        {
+          "name": "name",
+          "kind": "text",
+          "description": "File name to save as, without extension."
+        }
       ],
-      "needs": ["TRIPO_API_KEY"],
+      "needs": [
+        "TRIPO_API_KEY"
+      ],
       "cost": "uses Tripo credits, per model",
-      "timeout_secs": 600
+      "timeout_secs": 600,
+      "service": "models"
     },
     {
       "name": "model_from_image",
       "description": "Make a 3D model (GLB, textured) with Tripo from an image in the project (concept art, a sprite, a photo) and save it, with a preview image you can look at. Takes a minute or a few.",
       "script": "model3d.js",
       "params": [
-        { "name": "image", "kind": "text", "required": true, "description": "The image, a path in the project (PNG or JPEG, up to 20 MB)." },
-        { "name": "faces", "kind": "number", "description": "Most faces the mesh may have (lower for games and mobile)." },
-        { "name": "texture_quality", "kind": "choice", "choices": ["fast", "standard", "detailed"], "description": "Texture detail. Default standard." },
-        { "name": "pbr", "kind": "flag", "description": "PBR materials." },
-        { "name": "name", "kind": "text", "description": "File name to save as, without extension (default: the image's name)." }
+        {
+          "name": "image",
+          "kind": "text",
+          "required": true,
+          "description": "The image, a path in the project (PNG or JPEG, up to 20 MB)."
+        },
+        {
+          "name": "faces",
+          "kind": "number",
+          "description": "Most faces the mesh may have (lower for games and mobile)."
+        },
+        {
+          "name": "texture_quality",
+          "kind": "choice",
+          "choices": [
+            "fast",
+            "standard",
+            "detailed"
+          ],
+          "description": "Texture detail. Default standard."
+        },
+        {
+          "name": "pbr",
+          "kind": "flag",
+          "description": "PBR materials."
+        },
+        {
+          "name": "name",
+          "kind": "text",
+          "description": "File name to save as, without extension (default: the image's name)."
+        }
       ],
-      "needs": ["TRIPO_API_KEY"],
+      "needs": [
+        "TRIPO_API_KEY"
+      ],
       "cost": "uses Tripo credits, per model",
-      "timeout_secs": 600
+      "timeout_secs": 600,
+      "service": "models"
     }
   ]
 }

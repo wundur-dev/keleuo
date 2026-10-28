@@ -97,6 +97,13 @@ game-assets/
 }
 ```
 
+A pack that uses several services lists them in `services` (`id`, `name`, `description`,
+`icon`, and `choose`: a setting picking a provider, shown on the service's row); its keys,
+settings and tools each name their `service`. Settings shows a row per service, set up or not
+on its own. A setting with `choices` is a dropdown (`labels` names the choices); `advanced`
+folds it away; `when` (`{"image_provider": "azure"}`) shows a key or setting only when it
+applies.
+
 Parameters use the same kinds as your own tools (text, number, yes/no, choice), so one schema and
 one form serve both. `needs` says which secrets a tool can't run without (`|`: either one); a
 tool whose needs are missing isn't offered to agents, and Settings says which key to add.
