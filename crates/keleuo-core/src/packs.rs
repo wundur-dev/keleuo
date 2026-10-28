@@ -1033,6 +1033,21 @@ mod tests {
     }
 
     #[test]
+    fn an_image_for_3d_asks_for_a_whole_subject_in_a_t_pose() {
+        let cwd = scratch("for3d");
+        let png = base64::engine::general_purpose::STANDARD.encode(b"\x89PNG knight");
+        let answer = move |_: u16, _: &str, _: &[u8]| (200, "application/json", format!("{{\"data\":[{{\"b64_json\":\"{png}\"}}]}}").into_bytes());
+        let (port, seen) = stand_in(2, answer);
+        let settings = [("openai_url", format!("http://127.0.0.1:{port}/v1"))];
+        assert!(!run_game_tool("make_image", json!({ "prompt": "a knight", "for_3d": true }), &settings, &cwd).failed);
+        assert!(!run_game_tool("make_image", json!({ "prompt": "a knight" }), &settings, &cwd).failed);
+        let requests = seen.join().unwrap();
+        assert!(requests[0].contains("a knight\\n\\nFor turning into a 3D model") && requests[0].contains("T-pose"), "{}", requests[0]);
+        assert!(!requests[1].contains("3D model"), "{}", requests[1]);
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
     fn a_script_that_runs_too_long_is_stopped() {
         let dir = std::env::temp_dir().join(format!("keleuo-pack-slow-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();

@@ -4,6 +4,10 @@ export default async function (args, kx) {
   const azure = kx.setting("image_provider") === "azure";
   const size = args.size || (editing ? "auto" : "1024x1024");
   const quality = args.quality || "medium";
+  // For a 3D model: what image-to-3D needs, said once here so every call gets it.
+  const prompt = args.for_3d
+    ? `${args.prompt}\n\nFor turning into a 3D model: a single subject, entirely in frame and centred, nothing cropped; a front or three-quarter view; even, soft lighting with no strong shadows or reflections; a plain, uncluttered background; no text. A character stands in a T-pose (or A-pose), arms held away from the body, legs apart, feet visible.`
+    : args.prompt;
   const background = args.transparent ? "transparent" : "auto";
   let base, headers, model;
   if (azure) {
@@ -41,7 +45,7 @@ export default async function (args, kx) {
     } catch (e) {
       return kx.fail(`Couldn't read the image: ${e.message}`);
     }
-    const form = { prompt: args.prompt, size, quality, background, output_format: "png", n: "1", "image[]": files };
+    const form = { prompt, size, quality, background, output_format: "png", n: "1", "image[]": files };
     if (model) form.model = model;
     if (args.mask) {
       try { form.mask = kx.readFile(args.mask); } catch (e) { return kx.fail(`Couldn't read the mask: ${e.message}`); }
@@ -49,7 +53,7 @@ export default async function (args, kx) {
     kx.progress(`edit_image: ${args.prompt.slice(0, 60)}`);
     res = kx.fetch(base + "edits" + query, { method: "POST", headers, form });
   } else {
-    const body = { prompt: args.prompt, size, quality, background, output_format: "png", n: 1 };
+    const body = { prompt, size, quality, background, output_format: "png", n: 1 };
     if (model) body.model = model;
     kx.progress(`make_image: ${args.prompt.slice(0, 60)}`);
     res = kx.fetch(base + "generations" + query, { method: "POST", headers, json: body });

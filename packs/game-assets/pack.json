@@ -1,7 +1,7 @@
 {
   "id": "wundur/game-assets",
   "name": "Game assets",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "Images, sound, music, voices and 3D models for games, with your own keys.",
   "homepage": "https://github.com/wundur-dev/keleuo",
   "services": [
@@ -195,7 +195,7 @@
   "tools": [
     {
       "name": "make_image",
-      "description": "Make an image with gpt-image and save it as a PNG in the project. Use for game sprites, icons, textures and concept art: describe subject, style, colours and framing in detail. Returns the image so you can check it and try again.",
+      "description": "Make an image with gpt-image and save it as a PNG in the project. Use for game sprites, icons, textures and concept art: describe subject, style, colours and framing in detail. Returns the image so you can check it and try again. If the image is to become a 3D model (model_from_image), set for_3d and draw it for that: one subject, whole and centred, a front or three-quarter view, even lighting, a plain background; characters in a T-pose or A-pose with arms away from the body and feet showing.",
       "script": "image.js",
       "params": [
         {
@@ -231,6 +231,11 @@
           "name": "transparent",
           "kind": "flag",
           "description": "A transparent background, for sprites and icons."
+        },
+        {
+          "name": "for_3d",
+          "kind": "flag",
+          "description": "The image is to become a 3D model: the pack adds what makes a good source (whole subject, centred, even light, plain background, T-pose for characters)."
         },
         {
           "name": "name",
@@ -415,7 +420,7 @@
     },
     {
       "name": "model_from_text",
-      "description": "Make a 3D model (GLB, textured) with Tripo from a description and save it in the project, with a preview image you can look at. Takes a minute or a few.",
+      "description": "Make a 3D model (GLB, textured) with Tripo from a description and save it in the project, with a preview image you can look at. Takes a minute or a few. Describe one object: shape, style, materials; for a character, say T-pose or A-pose (better to rig and animate).",
       "script": "model3d.js",
       "params": [
         {
@@ -459,7 +464,7 @@
     },
     {
       "name": "model_from_image",
-      "description": "Make a 3D model (GLB, textured) with Tripo from an image in the project (concept art, a sprite, a photo) and save it, with a preview image you can look at. Takes a minute or a few.",
+      "description": "Make a 3D model (GLB, textured) with Tripo from an image in the project and save it, with a preview image you can look at. Takes a minute or a few. Works best from one whole subject, centred, on a plain background, in even light, seen from the front or three-quarters; characters in a T-pose or A-pose. Making the image first? Use make_image with for_3d.",
       "script": "model3d.js",
       "params": [
         {
