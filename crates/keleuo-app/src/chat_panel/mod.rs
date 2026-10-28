@@ -340,7 +340,7 @@ impl ChatPanel {
             views: Rc::new(StripState::default()),
             _subs: vec![s1, s2, s3],
         };
-        Self::watch_scrolling(&panel.list, panel.latest.shown.clone(), panel.me.clone());
+        Self::watch_scrolling(&panel.list, &panel.latest, panel.me.clone());
         panel
     }
 
@@ -412,7 +412,7 @@ impl ChatPanel {
             self.list_len = new.len();
             self.rows = new;
             self.synced_items = items;
-            self.latest.from = usize::MAX;
+            self.latest.from.set(usize::MAX);
             self.sync_latest(0, cx);
             return;
         }
@@ -432,6 +432,11 @@ impl ChatPanel {
         self.rows = new;
         self.synced_items = items;
         self.sync_latest(from, cx);
+        // Scrolled up and the conversation changed: something new may be past what shows, so
+        // the pane shows even inside the latest turn (until the newest row is in view again).
+        if !self.list.is_following_tail() {
+            self.latest.news.set(true);
+        }
     }
 
     /// An earlier part came into view: read it off the UI thread, then put its items in its

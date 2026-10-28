@@ -1,7 +1,9 @@
 //! The latest messages, kept in view while the conversation is scrolled up: a pane under it
 //! showing the current turn (from the person's last message), following it as it grows. It
 //! shows only while the newest row is out of view (at the bottom it would repeat what shows),
-//! and a separator above it sets its height, kept for next time. Settings can turn it off.
+//! and then only once the view is above the turn, or something new came in since the person
+//! scrolled up (see `shows`). A separator above it sets its height, kept for next time.
+//! Settings can turn it off.
 
 use std::cell::Cell;
 
@@ -20,8 +22,12 @@ const PILL: f32 = 30.;
 /// The pane's own list and its state, apart from the conversation's list.
 pub(super) struct Latest {
     pub list: ListState,
-    /// The first of the conversation's rows the pane shows.
-    pub from: usize,
+    /// The first of the conversation's rows the pane shows: the start of the turn. Shared
+    /// with the scroll handler, which decides as the list scrolls.
+    pub from: Rc<Cell<usize>>,
+    /// Whether rows came or grew while the conversation was scrolled up with its newest row
+    /// out of view; cleared once the newest row is in view again.
+    pub news: Rc<Cell<bool>>,
     /// Its height, in pixels; and a drag of the separator (where it began, the height then).
     pub height: Rc<Cell<f32>>,
     pub drag: Rc<Cell<Option<(f32, f32)>>>,
@@ -35,12 +41,22 @@ impl Latest {
         list.set_follow_mode(FollowMode::Tail);
         Self {
             list,
-            from: usize::MAX,
+            from: Rc::new(Cell::new(usize::MAX)),
+            news: Rc::default(),
             height: Rc::new(Cell::new(height.max(MIN_HEIGHT))),
             drag: Rc::default(),
             shown: Rc::default(),
         }
     }
+}
+
+/// Whether the pane shows, given where the conversation is scrolled. Only while its newest row
+/// is out of view; then when the view is above the latest turn (its start, the person's last
+/// message, is below the view: they are reading earlier turns), or when something new came in
+/// since they scrolled up. Reading up through the latest reply is plain scrolling: the pane
+/// would show part of the turn they are reading below it.
+pub(super) fn shows(newest_below: bool, turn_start_below: bool, news: bool) -> bool {
+    newest_below && (turn_start_below || news)
 }
 
 impl ChatPanel {
@@ -57,8 +73,8 @@ impl ChatPanel {
     pub(super) fn sync_latest(&mut self, changed: usize, cx: &App) {
         let start = self.latest_start(cx);
         let count = self.rows.len() - start;
-        if start != self.latest.from {
-            self.latest.from = start;
+        if start != self.latest.from.get() {
+            self.latest.from.set(start);
             self.latest.list.reset(count);
             return;
         }
@@ -75,26 +91,39 @@ impl ChatPanel {
     }
 
     /// Told by the conversation's list as it scrolls: redraw when the pane is to show or go.
-    pub(super) fn watch_scrolling(list: &ListState, shown: Rc<Cell<bool>>, me: WeakEntity<Self>) {
+    pub(super) fn watch_scrolling(list: &ListState, latest: &Latest, me: WeakEntity<Self>) {
+        let (shown, from, news) = (latest.shown.clone(), latest.from.clone(), latest.news.clone());
         list.set_scroll_handler(move |ev, _, cx| {
-            let below = ev.visible_range.end < ev.count;
-            if below != shown.get() {
-                shown.set(below);
+            let newest_below = ev.visible_range.end < ev.count;
+            if !newest_below {
+                news.set(false);
+            }
+            let start = from.get();
+            let show = start < ev.count && shows(newest_below, ev.visible_range.end <= start, news.get());
+            if show != shown.get() {
+                shown.set(show);
                 let _ = me.update(cx, |_, cx| cx.notify());
             }
         });
     }
 
     /// The pane, when it shows: on in Settings, the conversation (not a subagent's) scrolled
-    /// up so that its newest row is out of view.
+    /// up so that its newest row is out of view, and above the latest turn or with something
+    /// new in it (see `shows`).
     pub(super) fn render_latest(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let last = self.list_len.checked_sub(1);
+        // Rows just added are not measured yet, so not known to be below: then the list not
+        // following its end says they are.
+        let following = self.list.is_following_tail();
+        let below = |ix: usize| self.list.item_is_below_viewport(ix).unwrap_or(!following);
+        let newest_below = self.list_len.checked_sub(1).is_some_and(below);
+        if !newest_below {
+            self.latest.news.set(false);
+        }
+        let from = self.latest.from.get();
         let show = crate::prefs(cx).latest_pane
             && self.agent.is_none()
-            && self.latest.from < self.list_len
-            // Rows just added are not measured yet, so not known to be below: then the list not
-            // following its end says they are.
-            && last.is_some_and(|l| self.list.item_is_below_viewport(l).unwrap_or(!self.list.is_following_tail()));
+            && from < self.list_len
+            && shows(newest_below, below(from), self.latest.news.get());
         self.latest.shown.set(show);
         if !show {
             return None;
@@ -104,7 +133,6 @@ impl ChatPanel {
         let (fg, raised, hover) = (theme.foreground, theme.background, theme.secondary_hover);
         let height = self.latest.height.get();
         let dragging = self.latest.drag.get().is_some();
-        let from = self.latest.from;
         let (drag, height_cell, conversation) = (self.latest.drag.clone(), self.latest.height.clone(), self.list.clone());
         let separator = div()
             .id("latest-separator")
@@ -249,5 +277,31 @@ impl ChatPanel {
                 .relative()
                 .into_any_element(),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::shows;
+
+    #[test]
+    fn hidden_while_the_newest_row_is_in_view() {
+        assert!(!shows(false, false, false));
+        assert!(!shows(false, true, true));
+    }
+
+    #[test]
+    fn hidden_while_reading_up_through_the_latest_turn() {
+        assert!(!shows(true, false, false));
+    }
+
+    #[test]
+    fn shown_above_the_latest_turn() {
+        assert!(shows(true, true, false));
+    }
+
+    #[test]
+    fn shown_inside_the_turn_once_something_new_comes() {
+        assert!(shows(true, false, true));
     }
 }
