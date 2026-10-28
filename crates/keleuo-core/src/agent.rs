@@ -242,6 +242,8 @@ pub struct StartOptions {
     pub mcp_config: Option<PathBuf>,
     /// Environment it starts with: the tool servers' secrets ([`crate::mcp::secret_env`]).
     pub env: Vec<(String, String)>,
+    /// Instructions added to the agent's own (parent mode's), for an agent that takes them.
+    pub instructions: Option<String>,
 }
 
 /// A running conversation with an agent.

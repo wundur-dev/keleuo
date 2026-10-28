@@ -215,6 +215,9 @@ impl Backend for ClaudeBackend {
         if let Some(mode) = &options.permission_mode {
             args.extend(["--permission-mode".into(), mode.clone()]);
         }
+        if let Some(text) = &options.instructions {
+            args.extend(["--append-system-prompt".into(), text.clone()]);
+        }
         Some(ProgramSpec {
             program: self.program_name(),
             args,
@@ -433,6 +436,7 @@ impl Agent for ClaudeCode {
                 effort: options.effort.clone(),
                 mcp_config: options.mcp_config.clone(),
                 env: options.env.clone(),
+                instructions: options.instructions.clone(),
             }
             .program_spec(),
         );

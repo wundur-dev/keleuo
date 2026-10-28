@@ -25,6 +25,8 @@ pub struct SettingsPage {
     pub(crate) tools: crate::settings_tools::ToolsState,
     /// The tool packs' section of the tools page (see `settings_packs`).
     pub(crate) packs: crate::settings_packs::PacksState,
+    /// Parent mode's page (see `settings_parent`).
+    pub(crate) parent: crate::settings_parent::ParentState,
     /// The font search open under one of the fonts (see `settings_fonts`).
     pub(crate) font_search: Option<crate::settings_fonts::Search>,
     /// The page shown first (a link to a setting opens on its page).
@@ -32,7 +34,7 @@ pub struct SettingsPage {
 }
 
 /// The pages, in order, by the names links and tests use.
-const PAGES: [&str; 7] = ["general", "chat", "mcp", "tools", "terminals", "notifications", "summaries"];
+const PAGES: [&str; 8] = ["general", "chat", "mcp", "tools", "terminals", "notifications", "summaries", "parent"];
 
 /// The page asks to be closed (Escape).
 pub struct CloseSettings;
@@ -42,7 +44,7 @@ impl EventEmitter<CloseSettings> for SettingsPage {}
 impl SettingsPage {
     /// `folders`: the folders the MCP servers page offers (the shown session's first).
     pub fn new(folders: Vec<std::path::PathBuf>, cx: &mut Context<Self>) -> Self {
-        Self { focus: cx.focus_handle(), font_search: None, packs: Default::default(), tools: crate::settings_tools::ToolsState::new(folders.clone()), mcp: crate::settings_mcp::McpState::new(folders), start: 0 }
+        Self { focus: cx.focus_handle(), font_search: None, packs: Default::default(), parent: Default::default(), tools: crate::settings_tools::ToolsState::new(folders.clone()), mcp: crate::settings_mcp::McpState::new(folders), start: 0 }
     }
 
     /// Show page `name` first (see [`PAGES`]); its folder for the MCP servers page.
@@ -74,6 +76,13 @@ fn mcp_page(page: WeakEntity<SettingsPage>) -> SettingPage {
 fn tools_page(page: WeakEntity<SettingsPage>) -> SettingPage {
     SettingPage::new("Tools").icon(gpui_kit::assets::IconName::Toolbox).group(
         SettingGroup::new().item(SettingItem::render(move |_, window, cx| crate::settings_tools::render(&page, window, cx))),
+    )
+}
+
+/// Parent mode: for a child building with an agent (see `settings_parent`).
+fn parent_page(page: WeakEntity<SettingsPage>) -> SettingPage {
+    SettingPage::new("Parent mode").icon(IconName::User).group(
+        SettingGroup::new().item(SettingItem::render(move |_, window, cx| crate::settings_parent::render(&page, window, cx))),
     )
 }
 
@@ -565,7 +574,7 @@ impl Render for SettingsPage {
                         // As wide as New session's folders.
                         .sidebar_width(px(252.))
                         .default_selected_index(gpui_kit::component::setting::SelectIndex { page_ix: self.start, group_ix: None })
-                        .pages([general(cx.entity().downgrade()), chat(), mcp_page(cx.entity().downgrade()), tools_page(cx.entity().downgrade()), terminals(), notifications(), summaries()]),
+                        .pages([general(cx.entity().downgrade()), chat(), mcp_page(cx.entity().downgrade()), tools_page(cx.entity().downgrade()), terminals(), notifications(), summaries(), parent_page(cx.entity().downgrade())]),
                 ),
             )
     }

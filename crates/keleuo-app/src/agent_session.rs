@@ -1044,6 +1044,7 @@ impl AgentSession {
             sandbox: self.write_policy(cx),
             mcp_config: self.mcp_config(cx),
             env: keleuo_core::mcp::secret_env(&self.mcp_servers(cx)),
+            instructions: crate::parent_mode::instructions(cx),
         };
         self.confined = options.sandbox.is_some();
         let Some(spec) = self.backend.terminal_program(&options, &id, new) else { return };
@@ -1498,6 +1499,7 @@ impl AgentSession {
                     self.idle_later(cx);
                     cx.emit(SessionEvent::TurnEnded);
                     self.summarize_turn(cx);
+                    crate::parent_mode::check_turn(&self.chat, self.chat.turn_start(), cx);
                 }
                 if std::mem::take(&mut self.restart_after_turn) {
                     self.stop(cx);
@@ -1538,6 +1540,7 @@ impl AgentSession {
             sandbox: self.write_policy(cx),
             mcp_config: self.mcp_config(cx),
             env: keleuo_core::mcp::secret_env(&self.mcp_servers(cx)),
+            instructions: crate::parent_mode::instructions(cx),
         };
         self.confined = options.sandbox.is_some();
         let (tx, rx) = async_channel::unbounded::<Message>();
@@ -1685,6 +1688,7 @@ impl AgentSession {
                     self.idle_later(cx);
                     cx.emit(SessionEvent::TurnEnded);
                     self.summarize_turn(cx);
+                    crate::parent_mode::check_turn(&self.chat, self.chat.turn_start(), cx);
                 }
             }
             Message::Log(line) => {
