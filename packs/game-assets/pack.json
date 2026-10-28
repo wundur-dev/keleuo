@@ -1,7 +1,7 @@
 {
   "id": "wundur/game-assets",
   "name": "Game assets",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "Images, sound, music, voices and 3D models for games, with your own keys.",
   "homepage": "https://github.com/wundur-dev/keleuo",
   "services": [
@@ -21,7 +21,7 @@
     {
       "id": "models",
       "name": "3D models",
-      "description": "Tripo · From text or images",
+      "description": "Tripo · From text or images, rigged and animated",
       "icon": "model"
     }
   ],
@@ -181,6 +181,19 @@
       "service": "models",
       "advanced": true,
       "custom": true
+    },
+    {
+      "name": "rig_version",
+      "label": "Rig model",
+      "choices": [
+        "v3.0-20260909",
+        "v2.5-20260210",
+        "v1.0-20240301"
+      ],
+      "default": "v3.0-20260909",
+      "service": "models",
+      "advanced": true,
+      "custom": true
     }
   ],
   "network": [
@@ -195,7 +208,7 @@
   "tools": [
     {
       "name": "make_image",
-      "description": "Make an image with gpt-image and save it as a PNG in the project. Use for game sprites, icons, textures and concept art: describe subject, style, colours and framing in detail. Returns the image so you can check it and try again.",
+      "description": "Make an image with gpt-image and save it as a PNG in the project. Use for game sprites, icons, textures and concept art: describe subject, style, colours and framing in detail. Returns the image so you can check it and try again. If the image is to become a 3D model (model_from_image), set for_3d and draw it for that: one subject, whole and centred, a front or three-quarter view, even lighting, a plain background; characters in a T-pose or A-pose with arms away from the body and feet showing.",
       "script": "image.js",
       "params": [
         {
@@ -231,6 +244,11 @@
           "name": "transparent",
           "kind": "flag",
           "description": "A transparent background, for sprites and icons."
+        },
+        {
+          "name": "for_3d",
+          "kind": "flag",
+          "description": "The image is to become a 3D model: the pack adds what makes a good source (whole subject, centred, even light, plain background, T-pose for characters)."
         },
         {
           "name": "name",
@@ -415,7 +433,7 @@
     },
     {
       "name": "model_from_text",
-      "description": "Make a 3D model (GLB, textured) with Tripo from a description and save it in the project, with a preview image you can look at. Takes a minute or a few.",
+      "description": "Make a 3D model (GLB, textured) with Tripo from a description and save it in the project, with a preview image you can look at. Takes a minute or a few. Describe one object: shape, style, materials; for a character, say T-pose or A-pose (better to rig and animate).",
       "script": "model3d.js",
       "params": [
         {
@@ -459,7 +477,7 @@
     },
     {
       "name": "model_from_image",
-      "description": "Make a 3D model (GLB, textured) with Tripo from an image in the project (concept art, a sprite, a photo) and save it, with a preview image you can look at. Takes a minute or a few.",
+      "description": "Make a 3D model (GLB, textured) with Tripo from an image in the project and save it, with a preview image you can look at. Takes a minute or a few. Works best from one whole subject, centred, on a plain background, in even light, seen from the front or three-quarters; characters in a T-pose or A-pose. Making the image first? Use make_image with for_3d.",
       "script": "model3d.js",
       "params": [
         {
@@ -498,6 +516,77 @@
         "TRIPO_API_KEY"
       ],
       "cost": "uses Tripo credits, per model",
+      "timeout_secs": 600,
+      "service": "models"
+    },
+    {
+      "name": "rig_model",
+      "description": "Rig a 3D model with Tripo (a skeleton, so it can be animated), and optionally animate it with Tripo's presets; saves the rigged model and the animated one in the project. Give the Tripo task id model_from_image or model_from_text reported (no new upload), or a GLB or FBX in the project. Works best on a character in a T-pose or A-pose, or an animal. Biped presets: idle, walk, run, jump, turn, climb, dive, slash, shoot, hurt, fall; quadruped: quadruped:walk. Takes a few minutes.",
+      "script": "rig.js",
+      "params": [
+        {
+          "name": "model",
+          "kind": "text",
+          "required": true,
+          "description": "The Tripo task id from model_from_* (e.g. task_...), or a GLB or FBX path in the project."
+        },
+        {
+          "name": "animations",
+          "kind": "text",
+          "description": "Presets to apply, comma-separated, up to five (e.g. idle, walk, run). Left out: rigged only."
+        },
+        {
+          "name": "rig_type",
+          "kind": "choice",
+          "choices": [
+            "biped",
+            "quadruped",
+            "hexapod",
+            "octopod",
+            "avian",
+            "serpentine",
+            "aquatic",
+            "others"
+          ],
+          "description": "The skeleton. Left out: Tripo checks the model and picks."
+        },
+        {
+          "name": "skeleton",
+          "kind": "choice",
+          "choices": [
+            "tripo",
+            "mixamo",
+            "unity",
+            "unreal",
+            "actorcore",
+            "vrm"
+          ],
+          "description": "For a biped: whose bone layout, to match an engine or animation library (mixamo for Unity and Unreal retargeting). Default tripo."
+        },
+        {
+          "name": "format",
+          "kind": "choice",
+          "choices": [
+            "glb",
+            "fbx"
+          ],
+          "description": "File format. Default glb; fbx for most game engines' importers."
+        },
+        {
+          "name": "in_place",
+          "kind": "flag",
+          "description": "Animations play in place, without moving forward (for game controllers)."
+        },
+        {
+          "name": "name",
+          "kind": "text",
+          "description": "File name to save as, without extension."
+        }
+      ],
+      "needs": [
+        "TRIPO_API_KEY"
+      ],
+      "cost": "uses Tripo credits: a rig check, the rig, and the animations",
       "timeout_secs": 600,
       "service": "models"
     }

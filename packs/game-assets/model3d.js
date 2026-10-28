@@ -31,6 +31,8 @@ export default async function (args, kx) {
   }
   if (args.faces) body.face_limit = Math.round(Number(args.faces));
   if (args.texture_quality) body.texture_quality = args.texture_quality;
+  // Tripo: fast textures come only from its newer texture model.
+  if (args.texture_quality === "fast") body.texture_version = kx.setting("fast_texture_version") || "v3.5-20260815";
   if (args.pbr) body.pbr = true;
   const res = kx.fetch(start, { method: "POST", headers: auth, json: body });
   if (!res.ok) return failed(res, "to the job");
@@ -54,18 +56,18 @@ export default async function (args, kx) {
   const out = job.output || {};
   const url = out.model_url || out.pbr_model_url || out.base_model_url;
   if (!url) return kx.fail(`The Tripo job ${task} finished without a model.`);
-  const glb = kx.fetch(url);
-  if (!glb.ok) return kx.fail(`Couldn't download the model (${glb.status}).`);
+  // Straight to files (a model is tens of megabytes: too big to hold in the script).
   const name = kx.slug(what);
   const folder = kx.setting("output_folder");
-  const file = kx.writeFile(`${folder}/${name}.glb`, glb.bytes());
+  kx.progress("Tripo: downloading the model");
+  const glb = kx.download(url, `${folder}/${name}.glb`);
+  if (!glb.ok) return kx.fail(`Couldn't download the model (${glb.status}).`);
+  const file = glb.path;
   const images = [];
   if (out.rendered_image_url) {
-    const p = kx.fetch(out.rendered_image_url);
-    if (p.ok) {
-      const ext = (out.rendered_image_url.split("?")[0].match(/\.(png|jpe?g|webp)$/i) || [, "webp"])[1].toLowerCase();
-      images.push(kx.writeFile(`${folder}/${name}-preview.${ext}`, p.bytes()));
-    }
+    const ext = (out.rendered_image_url.split("?")[0].match(/\.(png|jpe?g|webp)$/i) || [, "webp"])[1].toLowerCase();
+    const p = kx.download(out.rendered_image_url, `${folder}/${name}-preview.${ext}`);
+    if (p.ok) images.push(p.path);
   }
-  return { text: `Saved ${file}${images.length ? ` and its preview ${images[0]}` : ""} (Tripo task ${task}).`, files: [file], images };
+  return { text: `Saved ${file}${images.length ? ` and its preview ${images[0]}` : ""} (Tripo task ${task}: give it to rig_model to rig and animate this model).`, files: [file], images };
 }
