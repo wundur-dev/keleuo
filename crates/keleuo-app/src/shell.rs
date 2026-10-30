@@ -2329,6 +2329,19 @@ impl Render for Shell {
                             .text_xs()
                             .text_color(muted)
                             .child(div().flex_none().font_weight(FontWeight::SEMIBOLD).text_color(fg).child("Keleuo"))
+                            // Parent mode shows, so the child knows.
+                            .when(crate::parent_mode::on(cx), |d| {
+                                d.child(
+                                    div()
+                                        .flex_none()
+                                        .px_1p5()
+                                        .rounded_sm()
+                                        .border_1()
+                                        .border_color(cx.theme().border)
+                                        .text_color(fg)
+                                        .child("Parent mode"),
+                                )
+                            })
                             .child(div().flex_none().child("·"))
                             .child(div().min_w_0().truncate().child(title)),
                     ),

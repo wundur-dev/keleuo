@@ -30,6 +30,8 @@ pub struct Options {
     pub mcp_config: Option<PathBuf>,
     /// Environment it starts with (the tool servers' secrets).
     pub env: Vec<(String, String)>,
+    /// `--append-system-prompt`: instructions added to Claude's own.
+    pub instructions: Option<String>,
 }
 
 impl Options {
@@ -78,6 +80,9 @@ impl Options {
         if let Some(config) = &self.mcp_config {
             // Keleuo's own tools need no asking: every message they send is the person's to allow.
             args.extend(["--mcp-config".into(), config.to_string_lossy().to_string(), "--allowedTools".into(), "mcp__keleuo".into()]);
+        }
+        if let Some(text) = &self.instructions {
+            args.extend(["--append-system-prompt".into(), text.clone()]);
         }
         if let Some(id) = &self.resume {
             args.extend(["--resume".into(), id.clone()]);
@@ -277,6 +282,9 @@ mod tests {
                 .any(|w| w == ["--permission-mode", "acceptEdits"])
         );
         assert!(full.windows(2).any(|w| w == ["--resume", "abc"]));
+        assert!(!full.iter().any(|a| a == "--append-system-prompt"));
+        let told = Options { cwd: "/p".into(), instructions: Some("Stay on the project.".into()), ..Default::default() }.args();
+        assert!(told.windows(2).any(|w| w == ["--append-system-prompt", "Stay on the project."]));
     }
 
     /// A fake `claude` (a shell script printing a recorded stream) drives the real process code.

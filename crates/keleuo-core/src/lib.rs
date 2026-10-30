@@ -52,6 +52,7 @@ pub mod skill_install;
 pub mod skills;
 pub mod slash;
 pub mod spelling;
+pub mod parent;
 pub mod summary;
 pub mod symbols;
 pub mod table;

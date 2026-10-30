@@ -229,6 +229,8 @@ pub struct Settings {
     pub continue_on_start: Vec<String>,
     /// Turn summaries by a language model server (off until set up).
     pub summaries: crate::summary::Config,
+    /// Parent mode ([`crate::parent`]): off until a parent sets it up.
+    pub parent: crate::parent::Config,
     /// Tool servers (MCP) every agent gets ([`crate::mcp`]); and each folder's own.
     pub mcp_servers: Vec<crate::mcp::Server>,
     pub folder_mcp: std::collections::BTreeMap<PathBuf, crate::mcp::FolderServers>,
