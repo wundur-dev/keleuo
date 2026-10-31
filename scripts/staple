@@ -1,0 +1,24 @@
+#!/bin/bash
+# Staple a notarized app or disk image: attach Apple's ticket so Gatekeeper accepts it offline.
+# Apple's ticket server (CloudKit) now and then drops the connection for minutes at a time, so
+# stapling is retried with growing waits (about 12 minutes in all). Once it is stapled, a
+# separate `stapler validate` asks the same server again: when that can't get through either,
+# it's a warning, not a failure (staple has validated already, and the next steps check the
+# result with Gatekeeper, `spctl --assess`, which needs no network).
+set -u
+target="$1"
+wait=30
+for attempt in 1 2 3 4 5 6 7 8; do
+  if xcrun stapler staple "$target"; then
+    for check in 1 2 3; do
+      xcrun stapler validate "$target" && exit 0
+      sleep 20
+    done
+    echo "::warning::Stapled $target, but Apple's server didn't answer the extra validation; Gatekeeper checks it next."
+    exit 0
+  fi
+  [ "$attempt" = 8 ] && { echo "::error::Couldn't staple $target after $attempt attempts."; exit 1; }
+  echo "Stapling failed (attempt $attempt); retrying in $wait s"
+  sleep "$wait"
+  wait=$(( wait < 120 ? wait + 30 : 120 ))
+done

@@ -84,13 +84,7 @@ jobs:
           # Fails the job if Apple rejects it. The log is then at: xcrun notarytool log <id> (same key flags).
           xcrun notarytool submit "$RUNNER_TEMP/Keleuo-notarize.zip" \
             --key "$KEY" --key-id "$APPLE_API_KEY_ID" --issuer "$APPLE_API_ISSUER_ID" --wait
-          # Stapling fetches the ticket from Apple, which now and then drops the connection: retry.
-          for attempt in 1 2 3 4 5; do
-            if xcrun stapler staple "$APP" && xcrun stapler validate "$APP"; then break; fi
-            [ "$attempt" = 5 ] && exit 1
-            echo "Stapling failed (attempt $attempt); retrying in 30 s"
-            sleep 30
-          done
+          bash ./scripts/staple "$APP"
           rm -f "$KEY"
 
       - name: Package
@@ -114,12 +108,7 @@ jobs:
           printf '%s' "$APPLE_API_KEY_P8" | base64 --decode > "$KEY"
           xcrun notarytool submit "$DMG" --key "$KEY" --key-id "$APPLE_API_KEY_ID" --issuer "$APPLE_API_ISSUER_ID" --wait
           rm -f "$KEY"
-          for attempt in 1 2 3 4 5; do
-            if xcrun stapler staple "$DMG" && xcrun stapler validate "$DMG"; then break; fi
-            [ "$attempt" = 5 ] && exit 1
-            echo "Stapling the disk image failed (attempt $attempt); retrying in 30 s"
-            sleep 30
-          done
+          bash ./scripts/staple "$DMG"
           spctl --assess --type open --context context:primary-signature --verbose=2 "$DMG"
 
       - name: Upload the build
