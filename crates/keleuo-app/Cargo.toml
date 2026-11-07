@@ -31,6 +31,11 @@ serde_json = { workspace = true }
 # gpui-kit pins the matching gpui snapshot (published as gpui-pre 0.3.8) and re-exports gpui,
 # gpui-component and the Lucide icon assets.
 gpui-kit = { version = "=0.7.1", features = ["tree-sitter-languages"] }
+# Highlight queries for grammars gpui-component registers without one (src/languages.rs);
+# the same versions it builds.
+tree-sitter-c-sharp = "=0.23.5"
+tree-sitter-swift = "=0.7.4"
+tree-sitter-cmake = "=0.7.5"
 alacritty_terminal = "0.26.0"
 async-channel = "2"
 libc = "0.2"
@@ -44,6 +49,8 @@ interprocess = "2.4"
 [dev-dependencies]
 # The same gpui-kit with its headless UI test harness (drags, clicks, element queries).
 gpui-kit = { version = "=0.7.1", features = ["tree-sitter-languages", "test-support"] }
+# Compiling the highlight queries in src/languages.rs's test.
+tree-sitter = "=0.26.13"
 
 # The Dock icon (no app bundle yet): NSApplication's icon image, from the embedded PNG; its
 # badge and bounce (see src/attention.rs).

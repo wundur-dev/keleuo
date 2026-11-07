@@ -3851,7 +3851,7 @@ dependencies = [
 
 [[package]]
 name = "keleuo-app"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
@@ -3872,13 +3872,17 @@ dependencies = [
  "objc2-speech",
  "raw-window-handle",
  "serde_json",
+ "tree-sitter",
+ "tree-sitter-c-sharp",
+ "tree-sitter-cmake",
+ "tree-sitter-swift",
  "windows 0.62.2",
  "wry",
 ]
 
 [[package]]
 name = "keleuo-core"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
