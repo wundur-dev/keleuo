@@ -39,6 +39,7 @@ mod file_tree;
 mod fonts;
 mod hooks;
 mod icons;
+mod languages;
 mod palette;
 mod panels;
 mod parent_mode;
@@ -282,6 +283,7 @@ fn main() {
         .with_assets(icons::AppAssets)
         .run(move |cx: &mut App| {
             perf::step("gpui init", || gpui_kit::init(cx));
+            languages::register();
             let settings = perf::step("settings", || Settings::load(Settings::default_path()));
             let forced = match settings.appearance.as_str() {
                 "light" => Some(WindowAppearance::Light),
