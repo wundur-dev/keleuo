@@ -1084,6 +1084,7 @@ impl Shell {
         let subs = vec![
             cx.subscribe_in(&ws, window, |shell, ws, ev: &WorkspaceEvent, window, cx| match ev {
                 WorkspaceEvent::AgentEdited(path) => shell.edited(ws.clone(), path.clone(), window, cx),
+                WorkspaceEvent::FreshStart => shell.fresh_from_summary(ws.clone(), window, cx),
             }),
             // The row's name, dot, activity and cost follow the session and its workspace (drawn
             // again only when the row changed); its conversation id, once it has one, is kept
@@ -1328,6 +1329,58 @@ impl Shell {
         Some((number, session))
     }
 
+    /// Carry on from the session in `ws` in a new one (same folder, agent and model), its
+    /// message box holding a handoff drafted from the old one (see `keleuo_core::handoff`),
+    /// condensed by the local summary model when one is set up. The old session is left as
+    /// it is.
+    pub fn fresh_from_summary(&mut self, ws: Entity<Workspace>, window: &mut Window, cx: &mut Context<Self>) {
+        let number = self.tabs.iter().find(|t| t.ws == ws).map(|t| t.number);
+        let given = number.and_then(|n| cx.global::<panels::Names>().0.borrow().get(&panels::session_key(n)).map(str::to_string));
+        let (host, root, old) = {
+            let w = ws.read(cx);
+            (w.host(), w.root().to_path_buf(), w.session.clone())
+        };
+        let (draft, backend, model) = {
+            let s = old.read(cx);
+            (keleuo_core::handoff::draft(&s.chat, &root, given.as_deref().unwrap_or("")), s.backend.clone(), s.model.clone())
+        };
+        let mut session = AgentSession::new(host.clone(), backend, root.clone());
+        session.model = model;
+        self.add_session(host, root, session, None, None, window, cx);
+        let Some(tab) = self.tabs.last() else { return };
+        let (fresh, chat) = {
+            let w = tab.ws.read(cx);
+            (w.session.clone(), w.claude.clone())
+        };
+        if let Some(name) = given {
+            let _ = cx.global::<panels::Names>().0.borrow_mut().set(&panels::session_key(tab.number), &format!("{name} (fresh)"));
+        }
+        let summaries = cx.global::<AppSettings>().0.borrow().summaries.clone();
+        if summaries.model.trim().is_empty() {
+            chat.update(cx, |p, cx| p.take_handoff(&draft, window, cx));
+            return;
+        }
+        // With a local model: condensed into a brief (the draft when that fails).
+        fresh.update(cx, |s, cx| {
+            s.chat.push_notice(format!("Writing the handoff with {}…", summaries.model.trim()));
+            cx.notify();
+        });
+        let window_handle = window.window_handle();
+        cx.spawn(async move |_, cx: &mut AsyncApp| {
+            let d = draft.clone();
+            let condensed = cx.background_spawn(async move { keleuo_core::handoff::condense(&summaries, &d) }).await;
+            let text = match condensed {
+                Ok(t) => t,
+                Err(e) => {
+                    eprintln!("keleuo: handoff: {e:#}");
+                    draft
+                }
+            };
+            let _ = window_handle.update(cx, |_, window, cx| chat.update(cx, |p, cx| p.take_handoff(&text, window, cx)));
+        })
+        .detach();
+    }
+
     pub fn new_session_in(&mut self, host: Arc<dyn Host>, root: PathBuf, backend: Arc<dyn Backend>, window: &mut Window, cx: &mut Context<Self>) {
         let session = AgentSession::new(host.clone(), backend, root.clone());
         self.add_session(host, root, session, None, None, window, cx);
@@ -1499,6 +1552,16 @@ impl Shell {
                         "ok".into()
                     }
                     None => "no browser".into(),
+                }
+            }
+            "fresh-start" => {
+                // Tests: Start fresh from a summary, for the shown session.
+                match self.active_workspace() {
+                    Some(ws) => {
+                        self.fresh_from_summary(ws, window, cx);
+                        "ok".into()
+                    }
+                    None => "no session".into(),
                 }
             }
             "show-image" => {
