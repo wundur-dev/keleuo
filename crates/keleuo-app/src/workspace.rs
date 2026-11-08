@@ -144,6 +144,8 @@ pub fn register_panels(cx: &mut App) {
 pub enum WorkspaceEvent {
     /// This session's Claude wrote or edited a file.
     AgentEdited(PathBuf),
+    /// Carry on in a new session from a summary of this one.
+    FreshStart,
 }
 
 impl EventEmitter<WorkspaceEvent> for Workspace {}
@@ -264,6 +266,7 @@ impl Workspace {
                 ChatPanelEvent::OpenWeb(url) => ws.open_web(url.clone(), window, cx),
                 ChatPanelEvent::RunCommand(command) => ws.run_in_terminal(command.clone(), window, cx),
                 ChatPanelEvent::ShowChanges => ws.show_changes(window, cx),
+                ChatPanelEvent::FreshStart => cx.emit(WorkspaceEvent::FreshStart),
                 ChatPanelEvent::Closed | ChatPanelEvent::Activated => {}
             },
         ));
@@ -761,6 +764,7 @@ impl Workspace {
                 ChatPanelEvent::RunCommand(command) => ws.run_in_terminal(command.clone(), window, cx),
                 ChatPanelEvent::ShowChanges => ws.show_changes(window, cx),
                 ChatPanelEvent::Activated => ws.touch_code(panel.entity_id()),
+                ChatPanelEvent::FreshStart => {}
                 ChatPanelEvent::Closed => {
                     ws.agent_views.retain(|v| v.entity_id() != panel.entity_id());
                     ws.panel_subs.remove(&panel.entity_id());

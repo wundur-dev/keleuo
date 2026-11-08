@@ -55,6 +55,8 @@ pub enum ChatPanelEvent {
     RunCommand(String),
     /// Show the Changes panel.
     ShowChanges,
+    /// Carry on in a new session from a summary of this one.
+    FreshStart,
 }
 
 pub struct ChatPanel {
@@ -708,6 +710,15 @@ impl ChatPanel {
         self.focus_input(window, cx);
     }
 
+    /// A handoff from an earlier session (see `keleuo_core::handoff`): into the message box as
+    /// text to read and change before sending, the box focused.
+    pub fn take_handoff(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let text = text.to_string();
+        self.input.update(cx, |s, cx| s.set_value(text, window, cx));
+        self.focus_input(window, cx);
+        cx.notify();
+    }
+
     pub fn focus_input(&self, window: &mut Window, cx: &mut App) {
         self.input.update(cx, |s, cx| s.focus(window, cx));
     }
@@ -894,6 +905,12 @@ impl ChatPanel {
                                     let _ = session.update(cx, |s, cx| s.compact(cx));
                                 },
                             ))
+                        })
+                        .item({
+                            let panel = panel.clone();
+                            gpui_kit::component::menu::PopupMenuItem::new("Start fresh from a summary").on_click(move |_, _, cx| {
+                                let _ = panel.update(cx, |_, cx| cx.emit(ChatPanelEvent::FreshStart));
+                            })
                         })
                         .when_some(sign_in.clone(), |menu, label| {
                             let (panel, session) = (panel.clone(), session.clone());
