@@ -522,6 +522,11 @@ impl ChatPanel {
         cx.notify();
     }
 
+    /// Tests: files dropped on the box.
+    pub fn test_take_files(&mut self, paths: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
+        self.take_files(paths, window, cx);
+    }
+
     /// Tests: attach an image file.
     pub fn test_attach(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         self.attach([path], cx);
@@ -530,15 +535,22 @@ impl ChatPanel {
     /// Add image files to the next message.
     pub(super) fn attach(&mut self, paths: impl IntoIterator<Item = PathBuf>, cx: &mut Context<Self>) {
         for p in paths {
-            let image = matches!(
-                p.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase()).as_deref(),
-                Some("png" | "jpg" | "jpeg" | "gif" | "webp")
-            );
-            if image && !self.attachments.contains(&p) {
+            if is_image(&p) && !self.attachments.contains(&p) {
                 self.attachments.push(p);
             }
         }
         cx.notify();
+    }
+
+    /// Files pasted or dropped on the box: images are attached; anything else (a PDF, a zip, a
+    /// folder) can't be sent as it is, so its path goes in the text at the cursor instead.
+    pub(super) fn take_files(&mut self, paths: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
+        let (images, others): (Vec<PathBuf>, Vec<PathBuf>) = paths.into_iter().partition(|p| is_image(p));
+        self.attach(images, cx);
+        if !others.is_empty() {
+            let text = paths_text(&others);
+            self.input.update(cx, |s, cx| s.insert(text, window, cx));
+        }
     }
 
     /// A pasted image (bytes from the clipboard): kept in the session's image folder.
@@ -604,7 +616,7 @@ impl ChatPanel {
                     .border_color(border)
                     .bg(field)
                     .drag_over::<ExternalPaths>(move |d, _, _, _| d.border_color(accent))
-                    .on_drop(cx.listener(|p, paths: &ExternalPaths, _, cx| p.attach(paths.paths().to_vec(), cx)))
+                    .on_drop(cx.listener(|p, paths: &ExternalPaths, window, cx| p.take_files(paths.paths().to_vec(), window, cx)))
                     // Shift+Enter on a list item: before the box puts in its plain new line.
                     // Enter with the `/` list up takes the highlighted name.
                     .capture_action(cx.listener(|p, action: &Enter, window, cx| {
@@ -1349,8 +1361,12 @@ fn take_paste(item: &ClipboardItem, paste_target: &WeakEntity<ChatPanel>, window
                 took = true;
             }
             ClipboardEntry::ExternalPaths(paths) => {
-                let paths = paths.paths().to_vec();
-                let _ = paste_target.update(cx, |p, cx| p.attach(paths, cx));
+                // Images attached, other files' paths typed in (after this paste is done
+                // changing the box).
+                let (paths, target) = (paths.paths().to_vec(), paste_target.clone());
+                window.defer(cx, move |window, cx| {
+                    let _ = target.update(cx, |p, cx| p.take_files(paths, window, cx));
+                });
                 took = true;
             }
             _ => {}
@@ -1369,6 +1385,23 @@ fn take_paste(item: &ClipboardItem, paste_target: &WeakEntity<ChatPanel>, window
         took = true;
     }
     took
+}
+
+/// Whether `path` is an image the message can carry.
+fn is_image(path: &std::path::Path) -> bool {
+    matches!(
+        path.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase()).as_deref(),
+        Some("png" | "jpg" | "jpeg" | "gif" | "webp")
+    )
+}
+
+/// Paths as they go in a message: one after another, a path with spaces in quotes.
+fn paths_text(paths: &[PathBuf]) -> String {
+    let one = |p: &PathBuf| {
+        let s = p.display().to_string();
+        if s.chars().any(char::is_whitespace) { format!("\"{s}\"") } else { s }
+    };
+    format!("{} ", paths.iter().map(one).collect::<Vec<_>>().join(" "))
 }
 
 /// Keep a typed model name among the recent ones, saved.
@@ -1488,6 +1521,13 @@ pub(super) fn capitalize(s: &str) -> String {
 #[cfg(test)]
 mod model_list_tests {
     use super::*;
+
+    #[::core::prelude::v1::test]
+    fn files_that_cant_be_attached_go_in_as_their_paths() {
+        assert!(is_image(std::path::Path::new("/a/shot.PNG")) && !is_image(std::path::Path::new("/a/notes.pdf")) && !is_image(std::path::Path::new("/a/folder")));
+        let paths = [PathBuf::from("/games/dragon/Boss.cs"), PathBuf::from("/Volumes/Extreme SSD/build.zip")];
+        assert_eq!(paths_text(&paths), "/games/dragon/Boss.cs \"/Volumes/Extreme SSD/build.zip\" ");
+    }
 
     #[::core::prelude::v1::test]
     fn variants_show_as_one_model() {
