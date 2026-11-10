@@ -2494,10 +2494,14 @@ impl Render for Shell {
             .font_family(crate::fonts::ui(cx))
             // A touch heavier than regular, as Codex sets SF Pro (430): denser, still not bold.
             .font_weight(crate::fonts::weight(&crate::fonts::ui(cx)))
-            // An image opened full size: Esc closes it, wherever the keyboard is.
+            // An image opened full size: Esc closes it and Cmd+C copies it, wherever the
+            // keyboard is.
             .capture_key_down(cx.listener(|_, ev: &KeyDownEvent, _, cx| {
                 if ev.keystroke.key == "escape" && crate::image_view::is_open(cx) {
                     crate::image_view::close(cx);
+                    cx.stop_propagation();
+                } else if ev.keystroke.key == "c" && ev.keystroke.modifiers.secondary() && crate::image_view::copy(cx) {
+                    // Cmd+C with an image open copies the image.
                     cx.stop_propagation();
                 } else if ev.keystroke.key == "escape" && crate::skill_installer::is_open(cx) {
                     crate::skill_installer::close(cx);

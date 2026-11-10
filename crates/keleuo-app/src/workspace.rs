@@ -1454,6 +1454,12 @@ impl Workspace {
                 let Some(web) = self.webs.last().cloned() else { return "no web page".into() };
                 web.update(cx, |w, _| w.send_to_chat());
             }
+            "drop-files" => {
+                // Tests: files dropped on the message box (paths separated by `|`).
+                let paths: Vec<PathBuf> = arg.split('|').filter(|p| !p.is_empty()).map(PathBuf::from).collect();
+                self.claude.update(cx, |p, cx| p.test_take_files(paths, window, cx));
+                return "ok".into();
+            }
             "composer" => {
                 // Tests: the message box's text (a token as its marker), and what it would send.
                 return self.claude.read(cx).test_composer(cx);
