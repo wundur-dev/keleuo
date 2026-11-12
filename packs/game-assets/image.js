@@ -51,12 +51,12 @@ export default async function (args, kx) {
       try { form.mask = kx.readFile(args.mask); } catch (e) { return kx.fail(`Couldn't read the mask: ${e.message}`); }
     }
     kx.progress(`edit_image: ${args.prompt.slice(0, 60)}`);
-    res = kx.fetch(base + "edits" + query, { method: "POST", headers, form });
+    res = patiently(() => kx.fetch(base + "edits" + query, { method: "POST", headers, form }));
   } else {
     const body = { prompt, size, quality, background, output_format: "png", n: 1 };
     if (model) body.model = model;
     kx.progress(`make_image: ${args.prompt.slice(0, 60)}`);
-    res = kx.fetch(base + "generations" + query, { method: "POST", headers, json: body });
+    res = patiently(() => kx.fetch(base + "generations" + query, { method: "POST", headers, json: body }));
   }
   if (!res.ok) {
     let why = res.text();
@@ -70,4 +70,20 @@ export default async function (args, kx) {
   const name = kx.slug(args.name || from);
   const file = kx.writeFile(`${kx.setting("output_folder")}/${name}.png`, kx.base64(image));
   return { text: `Saved ${file} (${size}, ${quality}${args.transparent ? ", transparent" : ""}).`, images: [file] };
+}
+
+// A request, tried again while the service says it is busy (429: Azure deployments with a small
+// quota take only a couple of images at a time), waiting as long as it asks (Retry-After), up to
+// about two minutes in all.
+function patiently(send) {
+  let res = send();
+  for (let waited = 0, i = 0; res.status === 429 && waited < 120 && i < 8; i++) {
+    const asked = Number((res.headers || {})["retry-after"]);
+    const wait = Math.min(30, asked > 0 ? asked : 5 * (i + 1));
+    kx.progress(`The image service is busy; trying again in ${wait}s`);
+    kx.sleep(wait * 1000);
+    waited += wait;
+    res = send();
+  }
+  return res;
 }

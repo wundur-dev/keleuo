@@ -15,11 +15,29 @@ pub struct Entry {
     pub asset: Asset,
     /// The project it is in (the session's folder).
     pub project: PathBuf,
-    /// What is being made now ("a concept", "the front view").
-    pub busy: Option<String>,
+    /// What is being made now: several at once (the three views).
+    pub busy: Vec<Job>,
     pub error: Option<String>,
     /// The concept picked to change or approve.
     pub picked: Option<String>,
+}
+
+/// What is being made for an asset: one of each at a time.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Job {
+    Concept,
+    View(View),
+    Model,
+}
+
+impl Job {
+    pub fn of(what: &Make) -> Self {
+        match what {
+            Make::Concept { .. } | Make::Change { .. } => Job::Concept,
+            Make::View(v) => Job::View(*v),
+            Make::Model => Job::Model,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -148,11 +166,12 @@ fn pack() -> Option<keleuo_core::packs::Pack> {
 }
 
 /// Make `what` for the asset in `dir`, off the UI thread, through the game-assets pack with the
-/// person's keys; `label` is what the card says meanwhile. `then` runs when it's done (on the
-/// UI thread), with whether it worked.
-pub fn make(dir: &Path, what: Make, label: String, cx: &mut App, then: impl FnOnce(bool, &mut App) + 'static) {
+/// person's keys (several kinds at once; one of each). `then` runs when it's done (on the UI
+/// thread), with whether it worked.
+pub fn make(dir: &Path, what: Make, cx: &mut App, then: impl FnOnce(bool, &mut App) + 'static) {
     let Some(e) = entry(dir, cx) else { return };
-    if e.busy.is_some() {
+    let job = Job::of(&what);
+    if e.busy.contains(&job) {
         return;
     }
     let Some(pack) = pack() else {
@@ -162,7 +181,7 @@ pub fn make(dir: &Path, what: Make, label: String, cx: &mut App, then: impl FnOn
     let settings = cx.global::<crate::AppSettings>().0.borrow().pack_settings.get(assets::PACK).cloned().unwrap_or_default();
     let (project, dir, mut asset) = (e.project.clone(), dir.to_path_buf(), e.asset.clone());
     update(&dir, false, cx, |e| {
-        e.busy = Some(label);
+        e.busy.push(job);
         e.error = None;
     });
     // Test copies (KELEUO_TEST_BACKENDS) may use a stand-in service on this machine, with a
@@ -179,21 +198,21 @@ pub fn make(dir: &Path, what: Make, label: String, cx: &mut App, then: impl FnOn
         let (extra_hosts, allow_http) = if test { (vec!["127.0.0.1".to_string()], true) } else { (Vec::new(), false) };
         let grant = keleuo_core::packs::Grant { cwd: &project, secret: &secret, settings: &settings, extra_hosts, allow_http };
         let made = assets::make(&worker_dir, &mut asset, &what, &pack, &grant);
-        let _ = tx.send_blocking((made, asset));
+        let _ = tx.send_blocking(made);
     });
     cx.spawn(async move |cx: &mut AsyncApp| {
-        let Ok((made, asset)) = rx.recv().await else { return };
+        let Ok(made) = rx.recv().await else { return };
         cx.update(|cx| {
             let ok = made.is_ok();
             update(&dir, ok, cx, |e| {
-                e.busy = None;
+                e.busy.retain(|j| *j != job);
                 match made {
+                    // Added to the record as it is now: others may have come back meanwhile.
                     Ok(attempt) => {
-                        e.asset = asset;
-                        // A new concept is the one picked (not a view or a model).
-                        if attempt.view.is_none() && attempt.preview.is_none() && !attempt.file.ends_with(".glb") {
-                            e.picked = Some(attempt.file);
+                        if job == Job::Concept {
+                            e.picked = Some(attempt.file.clone());
                         }
+                        e.asset.record(attempt);
                     }
                     Err(why) => e.error = Some(why),
                 }
@@ -204,16 +223,12 @@ pub fn make(dir: &Path, what: Make, label: String, cx: &mut App, then: impl FnOn
     .detach();
 }
 
-/// The views not made yet, one after another (each its own request).
+/// The views not made yet, all at once (each its own request).
 pub fn make_views(dir: &Path, cx: &mut App) {
     let Some(e) = entry(dir, cx) else { return };
-    let Some(view) = View::ALL.into_iter().find(|v| !e.asset.views.iter().any(|a| a.view == Some(*v))) else { return };
-    let next = dir.to_path_buf();
-    make(dir, Make::View(view), format!("the {} view", view.label().to_lowercase()), cx, move |ok, cx| {
-        if ok {
-            make_views(&next, cx);
-        }
-    });
+    for view in View::ALL.into_iter().filter(|v| !e.asset.views.iter().any(|a| a.view == Some(*v))) {
+        make(dir, Make::View(view), cx, |_, _| {});
+    }
 }
 
 /// The assets in `project` started in the chat of session `id`: their folders and the turn

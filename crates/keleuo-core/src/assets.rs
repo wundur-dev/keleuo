@@ -315,6 +315,17 @@ pub fn model_cents(version: &str) -> f32 {
 }
 
 impl Asset {
+    /// Keep `attempt` with the others of its kind (a view, a model, else a concept).
+    pub fn record(&mut self, attempt: Attempt) {
+        if attempt.view.is_some() {
+            self.views.push(attempt);
+        } else if attempt.file.ends_with(".glb") {
+            self.models.push(attempt);
+        } else {
+            self.concepts.push(attempt);
+        }
+    }
+
     /// Approve the model `file`: on to the rig.
     pub fn approve_model(&mut self, file: &str) {
         self.model = Some(file.to_string());

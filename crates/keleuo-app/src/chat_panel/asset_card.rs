@@ -23,10 +23,6 @@ pub(super) struct NewAssetForm {
 
 const KINDS: [&str; 4] = ["character", "creature", "prop", "environment"];
 
-fn money(cents: f32) -> String {
-    let cents = cents.max(0.0) + 0.0;
-    if cents < 100.0 { format!("{cents:.0}¢") } else { format!("${:.2}", cents / 100.0) }
-}
 
 fn capitalize(s: &str) -> String {
     let mut c = s.chars();
@@ -68,14 +64,14 @@ impl ChatPanel {
         let view = |arg: &str| View::ALL.into_iter().find(|v| v.label().eq_ignore_ascii_case(arg));
         match cmd {
             "new" | "state" => {}
-            "concept" => asset_store::make(&dir, Make::Concept { prompt: String::new() }, "a concept".into(), cx, |_, _| {}),
+            "concept" => asset_store::make(&dir, Make::Concept { prompt: String::new() }, cx, |_, _| {}),
             "change" => {
                 if let Some(from) = asset_store::entry(&dir, cx).and_then(|e| e.picked) {
-                    asset_store::make(&dir, Make::Change { from, note: arg.to_string() }, "the change".into(), cx, |_, _| {});
+                    asset_store::make(&dir, Make::Change { from, note: arg.to_string() }, cx, |_, _| {});
                 }
             }
             "approve" => asset_store::approve_concept(&dir, cx),
-            "model" => asset_store::make(&dir, Make::Model, "the model".into(), cx, |_, _| {}),
+            "model" => asset_store::make(&dir, Make::Model, cx, |_, _| {}),
             "approve-model" => {
                 if let Some(f) = asset_store::entry(&dir, cx).and_then(|e| e.asset.models.last().map(|m| m.file.clone())) {
                     asset_store::approve_model(&dir, &f, cx);
@@ -92,7 +88,7 @@ impl ChatPanel {
             "views" => asset_store::make_views(&dir, cx),
             "view" => {
                 if let Some(v) = view(arg) {
-                    asset_store::make(&dir, Make::View(v), format!("the {arg} view"), cx, |_, _| {});
+                    asset_store::make(&dir, Make::View(v), cx, |_, _| {});
                 }
             }
             "approve-view" => {
@@ -106,7 +102,7 @@ impl ChatPanel {
         }
         let Some(e) = asset_store::entry(&dir, cx) else { return "gone".into() };
         format!(
-            "{}: stage {:?}, {} concepts, {} views, {} models, picked {:?}, busy {:?}, error {:?}, {}",
+            "{}: stage {:?}, {} concepts, {} views, {} models, picked {:?}, busy {:?}, error {:?}",
             e.asset.name,
             e.asset.stage,
             e.asset.concepts.len(),
@@ -115,7 +111,6 @@ impl ChatPanel {
             e.picked,
             e.busy,
             e.error,
-            money(e.asset.cents())
         )
     }
 
@@ -362,11 +357,11 @@ impl ChatPanel {
             return self.asset_frame(id("card"), "Asset not found".into(), None, None, None, body, cx);
         };
         let a = e.asset.clone();
-        let busy = e.busy.clone();
-        let making = busy.is_some();
+        let job = |j: asset_store::Job| e.busy.contains(&j);
         let mut body = div().flex().flex_col().gap_3();
         match a.stage {
             Stage::Concept => {
+                let making = job(asset_store::Job::Concept);
                 let mut tiles = div().flex().flex_wrap().gap_2();
                 for (i, t) in a.concepts.iter().enumerate() {
                     let (d, f) = (dir.to_path_buf(), t.file.clone());
@@ -387,7 +382,7 @@ impl ChatPanel {
                                 .primary()
                                 .icon(gpui_kit::assets::IconName::Sparkles)
                                 .label("Make a concept")
-                                .on_click(move |_, _, cx| asset_store::make(&d, Make::Concept { prompt: String::new() }, "a concept".into(), cx, |_, _| {})),
+                                .on_click(move |_, _, cx| asset_store::make(&d, Make::Concept { prompt: String::new() }, cx, |_, _| {})),
                         ),
                     );
                 } else {
@@ -402,7 +397,7 @@ impl ChatPanel {
                             }
                             if let Some(from) = picked.clone() {
                                 n.update(cx, |i, cx| i.set_value("", window, cx));
-                                asset_store::make(&d1, Make::Change { from, note: text }, "the change".into(), cx, |_, _| {});
+                                asset_store::make(&d1, Make::Change { from, note: text }, cx, |_, _| {});
                             }
                         };
                         body = body
@@ -420,7 +415,7 @@ impl ChatPanel {
                                     .items_center()
                                     .gap_2()
                                     .child(Button::new(id("another")).small().ghost().icon(gpui_kit::assets::IconName::RefreshCw).label("Another").disabled(making).on_click(move |_, _, cx| {
-                                        asset_store::make(&d2, Make::Concept { prompt: String::new() }, "a concept".into(), cx, |_, _| {})
+                                        asset_store::make(&d2, Make::Concept { prompt: String::new() }, cx, |_, _| {})
                                     }))
                                     .child(div().flex_1())
                                     .child(Button::new(id("approve")).small().primary().icon(IconName::Check).label("Use this one").disabled(making || e.picked.is_none()).on_click(move |_, _, cx| asset_store::approve_concept(&d3, cx))),
@@ -429,13 +424,14 @@ impl ChatPanel {
                 }
             }
             Stage::Views => {
-                let busy_view = busy.as_deref().and_then(|b| View::ALL.into_iter().find(|v| b.contains(&v.label().to_lowercase())));
+                let any_view = View::ALL.iter().any(|v| job(asset_store::Job::View(*v)));
                 let mut row = div().flex().flex_wrap().gap_3();
                 for v in View::ALL {
                     let tries: Vec<_> = a.views.iter().filter(|t| t.view == Some(v)).collect();
                     let approved = a.approved_view(v).map(str::to_string);
                     let shown = approved.clone().or_else(|| tries.last().map(|t| t.file.clone()));
-                    let tile = if busy_view == Some(v) {
+                    let making = job(asset_store::Job::View(v));
+                    let tile = if making {
                         self.asset_making(118., None, cx)
                     } else {
                         match &shown {
@@ -458,7 +454,7 @@ impl ChatPanel {
                                     .child(div().flex_1().text_xs().text_color(muted).child(v.label()))
                                     .when(!tries.is_empty(), |d| {
                                         d.child(Button::new(id(&format!("vm-{}", v.label()))).xsmall().ghost().icon(gpui_kit::assets::IconName::RefreshCw).tooltip("Another").disabled(making).on_click(move |_, _, cx| {
-                                            asset_store::make(&d1, Make::View(v), format!("the {} view", v.label().to_lowercase()), cx, |_, _| {})
+                                            asset_store::make(&d1, Make::View(v), cx, |_, _| {})
                                         }))
                                     })
                                     .when(approved.is_none() && f.is_some(), |d| {
@@ -474,13 +470,14 @@ impl ChatPanel {
                 }
                 let missing = View::ALL.iter().any(|v| !a.views.iter().any(|t| t.view == Some(*v)));
                 let d = dir.to_path_buf();
-                body = body.child(row).when(missing && !making, |b| {
+                body = body.child(row).when(missing && !any_view, |b| {
                     b.child(div().flex().justify_end().child(
                         Button::new(id("views")).small().primary().icon(gpui_kit::assets::IconName::Sparkles).label("Make the views").on_click(move |_, _, cx| asset_store::make_views(&d, cx)),
                     ))
                 });
             }
             Stage::Model => {
+                let making = job(asset_store::Job::Model);
                 let me = cx.entity().downgrade();
                 let mut row = div().flex().flex_wrap().gap_3();
                 for (i, t) in a.models.iter().enumerate() {
@@ -523,7 +520,7 @@ impl ChatPanel {
                                 .small()
                                 .when(first, |b| b.primary().icon(gpui_kit::assets::IconName::Sparkles).label("Make the model"))
                                 .when(!first, |b| b.ghost().icon(gpui_kit::assets::IconName::RefreshCw).label("Another"))
-                                .on_click(move |_, _, cx| asset_store::make(&d, Make::Model, "the model".into(), cx, |_, _| {})),
+                                .on_click(move |_, _, cx| asset_store::make(&d, Make::Model, cx, |_, _| {})),
                         ))
                     });
             }

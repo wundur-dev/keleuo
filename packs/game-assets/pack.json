@@ -1,7 +1,7 @@
 {
   "id": "wundur/game-assets",
   "name": "Game assets",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "Images, sound, music, voices and 3D models for games, with your own keys.",
   "homepage": "https://github.com/wundur-dev/keleuo",
   "services": [
