@@ -4,6 +4,12 @@
 use super::*;
 use keleuo_core::questions::Question;
 
+
+/// How many lines of a diff the chat shows; and with Show all, the most it draws (the rest is
+/// in the diff view).
+const DIFF_SHOWN: usize = 40;
+const DIFF_ALL: usize = 400;
+
 impl ChatPanel {
     /// The line on a tool card that failed in a known way.
     pub(super) fn render_issue_notice(&self, tool_id: &str, issue: &Issue, cx: &mut Context<Self>) -> AnyElement {
@@ -147,6 +153,9 @@ impl ChatPanel {
         )
     }
 
+    /// A diff in the chat: its first lines, with Show all for the rest. Each line is drawn
+    /// (and its click handled) on every frame the card is on screen, so a big new file (one
+    /// long green block) shown whole made the chat slow while it streamed.
     pub(super) fn render_diff(&self, key: &str, diff: &FileDiff, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
         let (green, red, muted, border) =
@@ -157,9 +166,15 @@ impl ChatPanel {
             .font_family(crate::fonts::code(cx))
             .text_size(px(11.5))
             .line_height(px(16.));
-        let max_lines = 400;
+        let total: usize = diff.hunks.iter().map(|h| h.lines.len()).sum();
+        let all_key = format!("{key}:all");
+        let all = self.toggled.contains(&all_key);
+        let max_lines = if all { DIFF_ALL } else { DIFF_SHOWN };
         let mut shown = 0;
         for hunk in &diff.hunks {
+            if shown >= max_lines {
+                break;
+            }
             if diff.hunks.len() > 1 || hunk.old_start > 0 {
                 col = col.child(
                     div()
@@ -219,12 +234,31 @@ impl ChatPanel {
                 );
             }
         }
-        if shown > max_lines {
+        // The rest: Show all (up to DIFF_ALL), and past that the diff view.
+        let hidden = total.saturating_sub(max_lines);
+        if hidden > 0 || all {
+            let (fg, hover) = (cx.theme().foreground, cx.theme().secondary_hover);
+            let label = match (all, hidden) {
+                (false, _) => format!("Show all {total} lines"),
+                (true, 0) => "Show fewer".to_string(),
+                (true, n) => format!("Show fewer · {n} more in the diff view"),
+            };
             col = col.child(
                 div()
+                    .id(SharedString::from(format!("{key}-more")))
                     .px_1()
+                    .py(px(3.))
                     .text_color(muted)
-                    .child(format!("... {} more lines", shown - max_lines)),
+                    .cursor_pointer()
+                    .hover(move |d| d.bg(hover).text_color(fg))
+                    .child(label)
+                    .on_click(cx.listener(move |p, _, _, cx| {
+                        if !p.toggled.remove(&all_key) {
+                            p.toggled.insert(all_key.clone());
+                        }
+                        p.list.remeasure();
+                        cx.notify();
+                    })),
             );
         }
         col.into_any_element()
