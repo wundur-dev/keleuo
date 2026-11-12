@@ -110,6 +110,11 @@ pub enum Item {
     AgentMessage { from: String, agent: Option<String>, title: String, text: String },
     /// The files the turn just ended changed: the end-of-turn card.
     TurnChanges(Vec<crate::changes::FileChange>),
+    /// A game asset being made (its folder): its card, where the person approves each step
+    /// (see `crate::assets`). Keleuo's own, not the agent's.
+    Asset(std::path::PathBuf),
+    /// The form for a new game asset, in the chat until it's filled in or dismissed.
+    NewAsset,
     /// A turn's summary (see [`crate::summary`]), at the end of its turn, above its card of
     /// changes. `key`: the turn's (see [`crate::summary::TurnText::key`]).
     Summary { key: String, state: crate::summary::State },
@@ -565,6 +570,23 @@ impl Conversation {
     }
 
     /// Show the kept summaries of the turns they belong to (a session read back from its file).
+    /// Put the cards of the assets started in this chat back (`found`: each asset's folder and
+    /// the turn it was started in, by key): after that turn, or at the end when it isn't here.
+    pub fn attach_assets(&mut self, found: &[(std::path::PathBuf, Option<String>)]) {
+        for (dir, turn) in found {
+            if self.items.iter().any(|i| matches!(i, Item::Asset(d) if d == dir)) {
+                continue;
+            }
+            let starts: Vec<usize> = self.items.iter().enumerate().filter(|(_, i)| matches!(i, Item::User(_))).map(|(ix, _)| ix).collect();
+            let at = turn
+                .as_ref()
+                .and_then(|key| starts.into_iter().find(|from| crate::summary::TurnText::key_at(self, *from).as_ref() == Some(key)))
+                .map_or(self.items.len(), |from| self.turn_end(from));
+            self.items.insert(at, Item::Asset(dir.clone()));
+            self.revision += 1;
+        }
+    }
+
     pub fn attach_summaries(&mut self, kept: &std::collections::BTreeMap<String, crate::summary::TurnSummary>) {
         if kept.is_empty() {
             return;
@@ -1098,8 +1120,9 @@ pub fn to_markdown(items: &[Item], agent: &str) -> String {
             Item::Earlier { messages, .. } => format!("*[{} earlier not loaded]*", plural(*messages, "message")),
             Item::Outgoing { to, text, .. } => format!("**To {to}:** {}", text.trim()),
             Item::ToolRun { tool, command, .. } => format!("**Tool {tool}:** `{command}`"),
-            // Keleuo's own card, not part of the conversation.
-            Item::SignIn(_) => continue,
+            // Keleuo's own cards, not part of the conversation.
+            Item::SignIn(_) | Item::NewAsset => continue,
+            Item::Asset(dir) => format!("*[Game asset: {}]*", dir.display()),
             Item::Compacted { trigger, tokens, .. } => {
                 let mut facts: Vec<String> = trigger.iter().cloned().collect();
                 if let Some(t) = tokens {

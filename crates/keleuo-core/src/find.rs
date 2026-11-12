@@ -26,7 +26,8 @@ pub fn item_text(item: &Item) -> Cow<'_, str> {
         Item::AgentMessage { title, text, .. } => Cow::Owned(format!("{title}\n{text}")),
         Item::Outgoing { to, text, .. } => Cow::Owned(format!("{to}\n{text}")),
         Item::ToolRun { tool, command, .. } => Cow::Owned(format!("{tool}\n{command}")),
-        Item::SignIn(_) => Cow::Borrowed(""),
+        Item::SignIn(_) | Item::NewAsset => Cow::Borrowed(""),
+        Item::Asset(dir) => Cow::Owned(dir.display().to_string()),
         Item::TurnChanges(changes) => {
             Cow::Owned(changes.iter().map(|c| c.path.display().to_string()).collect::<Vec<_>>().join("\n"))
         }

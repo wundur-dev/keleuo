@@ -92,6 +92,15 @@ pub struct Attempt {
     pub at: u64,
 }
 
+/// Where an asset was started: the session (its conversation's id) and the turn (its key, see
+/// `summary::TurnText::key`), so its card comes back in that chat after that turn.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Origin {
+    pub session: String,
+    pub turn: Option<String>,
+}
+
 /// An asset's record.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -110,6 +119,8 @@ pub struct Asset {
     pub approved_views: Vec<(View, String)>,
     pub models: Vec<Attempt>,
     pub model: Option<String>,
+    /// Where it was started (its card's place in a chat).
+    pub origin: Option<Origin>,
 }
 
 impl Asset {

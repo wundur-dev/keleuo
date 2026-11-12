@@ -1023,6 +1023,8 @@ impl ChatPanel {
                 Item::SignIn(state) => self.render_sign_in(*state, cx),
                 Item::TurnChanges(changes) => self.render_turn_changes(ix, changes, cx),
                 Item::Summary { state, .. } => self.render_summary(state, cx),
+                Item::Asset(dir) => self.render_asset_card(dir, cx),
+                Item::NewAsset => self.render_new_asset(cx),
             };
             out.push(el);
         }

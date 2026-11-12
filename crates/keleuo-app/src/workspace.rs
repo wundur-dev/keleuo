@@ -138,7 +138,8 @@ pub fn register_panels(cx: &mut App) {
             PanelInfo::Panel(v) => v.get("dir").and_then(|d| d.as_str()).filter(|d| !d.is_empty()).map(PathBuf::from),
             _ => None,
         };
-        let view = cx.new(|cx| crate::asset_panel::AssetPanel::new(f.root.clone(), dir, window, cx));
+        let _ = (&f.root, &window);
+        let view = cx.new(|cx| crate::asset_panel::AssetPanel::new(dir.unwrap_or_default(), cx));
         f.made.borrow_mut().push(Made::Asset(view.clone()));
         panel_handle(view)
     });
@@ -282,7 +283,7 @@ impl Workspace {
                 ChatPanelEvent::RunCommand(command) => ws.run_in_terminal(command.clone(), window, cx),
                 ChatPanelEvent::ShowChanges => ws.show_changes(window, cx),
                 ChatPanelEvent::FreshStart => cx.emit(WorkspaceEvent::FreshStart),
-                ChatPanelEvent::NewAsset => ws.open_asset(None, window, cx),
+                ChatPanelEvent::OpenAsset(dir) => ws.open_asset(Some(dir.clone()), window, cx),
                 ChatPanelEvent::Closed | ChatPanelEvent::Activated => {}
             },
         ));
@@ -783,7 +784,8 @@ impl Workspace {
                 ChatPanelEvent::RunCommand(command) => ws.run_in_terminal(command.clone(), window, cx),
                 ChatPanelEvent::ShowChanges => ws.show_changes(window, cx),
                 ChatPanelEvent::Activated => ws.touch_code(panel.entity_id()),
-                ChatPanelEvent::FreshStart | ChatPanelEvent::NewAsset => {}
+                ChatPanelEvent::FreshStart => {}
+                ChatPanelEvent::OpenAsset(dir) => ws.open_asset(Some(dir.clone()), window, cx),
                 ChatPanelEvent::Closed => {
                     ws.agent_views.retain(|v| v.entity_id() != panel.entity_id());
                     ws.panel_subs.remove(&panel.entity_id());
@@ -1128,16 +1130,18 @@ impl Workspace {
 
     /// A web page among the files and terminals; with no address, the address field waits for
     /// one.
-    /// Show the asset in `dir` (a folder with its record) in a tab, or the form for a new one.
+    /// Show the asset in `dir` (a folder with its record) in a tab: its history and model. With
+    /// no folder, the chat shows the form for a new one.
     pub fn open_asset(&mut self, dir: Option<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(d) = &dir
-            && let Some(view) = self.assets.iter().find(|a| &a.read(cx).dir == d).cloned()
-        {
+        let Some(dir) = dir else {
+            self.claude.update(cx, |p, cx| p.start_asset_form(cx));
+            return;
+        };
+        if let Some(view) = self.assets.iter().find(|a| a.read(cx).dir == dir).cloned() {
             self.show_panel(PanelId::from(view.entity_id()), window, cx);
             return;
         }
-        let root = self.root.clone();
-        let view = cx.new(|cx| crate::asset_panel::AssetPanel::new(root, dir, window, cx));
+        let view = cx.new(|cx| crate::asset_panel::AssetPanel::new(dir, cx));
         self.adopt_asset(view.clone(), window, cx);
         self.place_code(panel_handle(view.clone()), window, cx);
         let handle = view.read(cx).focus_handle(cx);
@@ -1147,12 +1151,8 @@ impl Workspace {
     fn adopt_asset(&mut self, view: Entity<crate::asset_panel::AssetPanel>, window: &mut Window, cx: &mut Context<Self>) {
         use crate::asset_panel::AssetEvent;
         let id = view.entity_id();
-        let sub = cx.subscribe_in(&view, window, |ws, view, ev: &AssetEvent, window, cx| match ev {
+        let sub = cx.subscribe_in(&view, window, |ws, view, ev: &AssetEvent, _, cx| match ev {
             AssetEvent::Activated => ws.touch_code(view.entity_id()),
-            AssetEvent::Changed => {
-                ws.schedule_save(window, cx);
-                cx.notify();
-            }
             AssetEvent::Closed => {
                 ws.assets.retain(|a| a != view);
                 ws.panel_subs.remove(&view.entity_id());
@@ -1433,9 +1433,8 @@ impl Workspace {
             "web" => self.open_web(arg.to_string(), window, cx),
             "new-asset" => self.open_asset(None, window, cx),
             "asset" => {
-                // Tests: a command for the newest asset tab (see AssetPanel::test_command).
-                let Some(view) = self.assets.last().cloned() else { return "no asset tab".into() };
-                return view.update(cx, |a, cx| a.test_command(arg, window, cx));
+                // Tests: a command for this chat's latest asset card (see ChatPanel::asset_command).
+                return self.claude.update(cx, |p, cx| p.asset_command(arg, window, cx));
             }
             "diff" => self.open_diff(PathBuf::from(arg), None, window, cx),
             "run" => self.run_in_terminal(arg.to_string(), window, cx),

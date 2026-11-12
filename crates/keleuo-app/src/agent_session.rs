@@ -1793,10 +1793,14 @@ impl AgentSession {
         .detach();
     }
 
-    /// Show the kept summaries of this session's turns.
+    /// Show the kept summaries of this session's turns, and the cards of the game assets
+    /// started in its chat.
     pub fn attach_summaries(&mut self) {
         if let Some(id) = self.chat.session_id.clone() {
             self.chat.attach_summaries(&summary::cached(&id));
+            if !self.host.is_remote() {
+                self.chat.attach_assets(&crate::asset_store::started_in(&self.cwd, &id));
+            }
         }
     }
 

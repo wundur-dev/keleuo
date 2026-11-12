@@ -23,6 +23,7 @@ use keleuo_core::settings::Settings;
 
 mod about;
 mod asset_panel;
+mod asset_store;
 mod actions;
 mod app_icon;
 mod attention;
