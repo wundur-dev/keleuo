@@ -1249,7 +1249,9 @@ impl Shell {
             .separator()
             .when(!remote, |m| {
                 let (w2, f, f2) = (weak.clone(), folder.clone(), folder.clone());
-                m.item(PopupMenuItem::new("Reveal in Finder").on_click(move |_, _, cx| cx.reveal_path(&f2)))
+                let f3 = folder.clone();
+                m.item(PopupMenuItem::new("Make a project of this folder").on_click(move |_, _, cx| add_project(f3.clone(), cx)))
+                    .item(PopupMenuItem::new("Reveal in Finder").on_click(move |_, _, cx| cx.reveal_path(&f2)))
                     .item(PopupMenuItem::new("Rename folder…").on_click(move |_, window, cx| {
                         let _ = w2.update(cx, |s, cx| s.ask_rename_folder(f.clone(), window, cx));
                     }))
@@ -1564,6 +1566,11 @@ impl Shell {
                     None => "no session".into(),
                 }
             }
+            "project-add" => {
+                // Tests: make a folder a project.
+                add_project(PathBuf::from(arg), cx);
+                "ok".into()
+            }
             "show-image" => {
                 // Tests: open an image full size, as a click on one in the chat does.
                 crate::image_view::show(PathBuf::from(arg), cx);
@@ -1794,174 +1801,279 @@ impl Shell {
         }
     }
 
+    /// A session's row in the list: its dot, name, folder, what it's doing; rename and close on
+    /// hover; drag to reorder.
+    fn session_row(&self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let (fg, muted, border, hover, ring, sel) =
+            (crate::theme::list_text(cx), theme.muted_foreground, theme.border, theme.secondary_hover, theme.ring, theme.secondary);
+        let (yellow, red, blue) = (theme.yellow, theme.red, theme.blue);
+        let active = ix == self.active && self.browser.is_none();
+        let number = self.tabs[ix].number;
+        let row = &self.tabs[ix].row;
+        let place = row.place.clone();
+        let worktree = row.worktree.then_some(());
+        let activity = row.activity.clone();
+        // Once a turn is over and summarised: its headline, how it ended when it needs the
+        // person or went wrong.
+        let summary = row.summary.clone().filter(|_| crate::summaries_on(cx));
+        // A context filling up shows amber, then red, as in the session's header.
+        let cost = row.spend(cx).map(|sp| {
+            let color = match sp {
+                Spend::Context { fill: Fill::Filling, .. } => cx.theme().warning,
+                Spend::Context { fill: Fill::Nearly, .. } => cx.theme().danger,
+                _ => cx.theme().muted_foreground,
+            };
+            (sp.short(), color)
+        });
+        let short_id = row.short_id.clone();
+        let dot = self.dot(ix, cx);
+        let key = self.key(ix);
+        let auto = self.list_name(ix, cx);
+        let current = self.name(ix, cx);
+        let title = panels::session_title(&key, auto.clone(), cx);
+        let drag = SessionDrag { number, name: current.clone().into() };
+        let (k1, a1, c1) = (key, auto, current);
+        let menu = self.session_menu(ix, cx);
+                        div()
+                .id(("session-row", number))
+                .group(SharedString::from(format!("session-row-{number}")))
+                .relative()
+                .mx(px(6.))
+                .px_2()
+                .py(px(6.))
+                .flex()
+                .gap_2()
+                .rounded(px(8.))
+                .cursor_pointer()
+                // The shown session: a rounded highlight.
+                .when(active, |d| d.bg(sel))
+                .when(!active, |d| d.hover(|d| d.bg(hover)))
+                .child(
+                    div()
+                        .pt(px(5.))
+                        .flex_none()
+                        .w(px(10.))
+                        .flex()
+                        .justify_center()
+                        .child(match dot {
+                            Some((c, _)) => div().size(px(8.)).rounded_full().bg(c),
+                            None => div().size(px(8.)).rounded_full().border_1().border_color(muted.opacity(0.6)),
+                        }),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .gap(px(1.))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .child(div().flex_1().min_w_0().truncate().text_sm().text_color(fg).child(title))
+                                .children(cost.map(|(c, color)| div().flex_none().text_size(px(10.5)).text_color(color).child(c))),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .text_size(px(11.))
+                                .text_color(muted)
+                                .child(crate::theme::pressed(div().min_w_0().truncate(), place, cx))
+                                .children(short_id.map(|id| panels::short_id(id, ("session-id", number), cx)))
+                                .children(worktree.map(|_| {
+                                    div().flex_none().px_1().rounded_sm().bg(border).text_size(px(10.)).child("worktree")
+                                })),
+                        )
+                        .children(match summary {
+                            Some((status, needs_you, headline)) => {
+                                use keleuo_core::summary::Status;
+                                // How the work went when it is not plainly done, else that
+                                // something waits on the person.
+                                let (label, tone) = match status {
+                                    Status::Done if needs_you => (Some("Needs you"), yellow),
+                                    Status::Done => (None, yellow),
+                                    Status::Waiting => (Some(status.label()), yellow),
+                                    Status::Failed => (Some(status.label()), red),
+                                    Status::Partial => (Some(status.label()), blue),
+                                };
+                                Some(
+                                    div()
+                                        .flex()
+                                        .gap_1()
+                                        .text_size(px(11.))
+                                        .children(label.map(|l| div().flex_none().text_color(tone).child(l)))
+                                        .child(crate::theme::pressed(div().min_w_0().truncate().text_color(muted.opacity(0.9)), headline, cx)),
+                                )
+                            }
+                            None => activity.map(|a| div().flex().text_size(px(11.)).text_color(muted.opacity(0.8)).child(crate::theme::pressed(div().min_w_0().truncate(), a, cx))),
+                        }),
+                )
+                // Rename and close, on hover (right-click is easy to miss on a Mac).
+                .child({
+                    let (k2, a2, c2) = (k1.clone(), a1.clone(), c1.clone());
+                    div()
+                        .absolute()
+                        .top(px(4.))
+                        .right(px(4.))
+                        .flex()
+                        .rounded(px(6.))
+                        .bg(if active { sel } else { hover })
+                        .invisible()
+                        .group_hover(SharedString::from(format!("session-row-{number}")), |d| d.visible())
+                        .child(
+                            Button::new(("session-rename", number))
+                                .icon(gpui_kit::assets::IconName::Pencil)
+                                .xsmall()
+                                .ghost()
+                                .tooltip("Rename")
+                                .on_click(move |_, window, cx| {
+                                    cx.stop_propagation();
+                                    start_tab_rename(k2.clone(), a2.clone(), c2.clone(), window, cx);
+                                }),
+                        )
+                        .child(
+                            Button::new(("session-close", number))
+                                .icon(IconName::Close)
+                                .xsmall()
+                                .ghost()
+                                .tooltip("Close the session (its history stays)")
+                                .on_click(cx.listener(move |s, _, window, cx| {
+                                    cx.stop_propagation();
+                                    if let Some(ix) = s.tabs.iter().position(|t| t.number == number) {
+                                        s.request_close(ix, window, cx);
+                                    }
+                                })),
+                        )
+                })
+                .on_click(cx.listener(move |s, ev: &ClickEvent, window, cx| {
+                    if ev.click_count() >= 2 {
+                        start_tab_rename(k1.clone(), a1.clone(), c1.clone(), window, cx);
+                    } else if let Some(ix) = s.tabs.iter().position(|t| t.number == number) {
+                        s.activate(ix, window, cx);
+                    }
+                }))
+                .on_drag(drag, |d: &SessionDrag, _, _, cx| {
+                    let name = d.name.clone();
+                    cx.new(|_| DragLabel(name))
+                })
+                .drag_over::<SessionDrag>(move |d, _, _, _| d.border_t_2().border_color(ring))
+                .on_drop(cx.listener(move |s, d: &SessionDrag, _, cx| {
+                    let to = s.tabs.iter().position(|t| t.number == number).unwrap_or(0);
+                    s.reorder(d.number, to, cx)
+                }))
+                .context_menu(menu)
+                .into_any_element()
+    }
+
+    /// Ask for a folder and make it a project (named after it; renamed in the list).
+    fn new_project(&mut self, cx: &mut Context<Self>) {
+        let picked = cx.prompt_for_paths(PathPromptOptions { files: false, directories: true, multiple: false, prompt: Some("Make project".into()) });
+        cx.spawn(async move |_, cx: &mut AsyncApp| {
+            let Ok(Ok(Some(paths))) = picked.await else { return };
+            let Some(root) = paths.into_iter().next() else { return };
+            cx.update(|cx| add_project(root, cx));
+        })
+        .detach();
+    }
+
+    /// A project's row: fold, its name (renamed like a session), what its sessions are doing,
+    /// New session in its folder, and a menu.
+    fn project_header(&self, pi: usize, project: &keleuo_core::settings::Project, members: &[usize], cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let (fg, muted, hover, yellow, green) = (crate::theme::list_text(cx), theme.muted_foreground, theme.secondary_hover, theme.yellow, theme.green);
+        let waiting = members.iter().filter(|ix| matches!(self.tabs[**ix].row.dot, Some(Dot::Permission | Dot::Asking))).count();
+        let working = members.iter().filter(|ix| matches!(self.tabs[**ix].row.dot, Some(Dot::Working | Dot::Agents))).count();
+        let key = project_key(&project.root);
+        let title = panels::session_title(&key, project.name.clone(), cx);
+        let (root, root2, root3, k1, a1) = (project.root.clone(), project.root.clone(), project.root.clone(), key.clone(), project.name.clone());
+        let folded = project.folded;
+        div()
+            .id(("project-row", pi))
+            .group(SharedString::from(format!("project-row-{pi}")))
+            .mx(px(6.))
+            .mt_2()
+            .px_1()
+            .h(px(28.))
+            .flex()
+            .items_center()
+            .gap_1()
+            .rounded(px(8.))
+            .cursor_pointer()
+            .hover(|d| d.bg(hover))
+            .child(Icon::new(if folded { IconName::ChevronRight } else { IconName::ChevronDown }).xsmall().text_color(muted))
+            .child(Icon::new(gpui_kit::assets::IconName::Folder).small().text_color(muted))
+            .child(div().flex_1().min_w_0().truncate().text_sm().font_weight(FontWeight::SEMIBOLD).text_color(fg).child(title))
+            .when(waiting > 0, |d| d.child(div().flex_none().text_size(px(10.5)).text_color(yellow).child(format!("{waiting} waiting"))))
+            .when(working > 0, |d| d.child(div().flex_none().text_size(px(10.5)).text_color(green).child(format!("{working} working"))))
+            .when(waiting == 0 && working == 0, |d| d.child(div().flex_none().text_size(px(10.5)).text_color(muted).child(members.len().to_string())))
+            .child(
+                Button::new(("project-session", pi))
+                    .icon(IconName::Plus)
+                    .xsmall()
+                    .ghost()
+                    .tooltip("New session in this project")
+                    .on_click(cx.listener(move |s, _, window, cx| {
+                        cx.stop_propagation();
+                        s.open_browser(Arc::new(LocalHost), root.clone(), None, window, cx);
+                    })),
+            )
+            .on_click(move |_, _, cx| {
+                let r = root2.clone();
+                crate::settings_window::change(cx, move |s| {
+                    if let Some(p) = s.projects.iter_mut().find(|p| p.root == r) {
+                        p.folded = !p.folded;
+                    }
+                });
+            })
+            .context_menu(move |menu, _, _| {
+                let (k, a, r) = (k1.clone(), a1.clone(), root3.clone());
+                menu.item(PopupMenuItem::new("Rename").on_click(move |_, window, cx| start_tab_rename(k.clone(), a.clone(), a.clone(), window, cx)))
+                    .item(PopupMenuItem::new("Remove project (its sessions stay)").on_click(move |_, _, cx| {
+                        let r = r.clone();
+                        crate::settings_window::change(cx, move |s| s.projects.retain(|p| p.root != r));
+                    }))
+            })
+            .into_any_element()
+    }
+
     fn render_list(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
-        let (fg, muted, border, hover, ring, bg, sel) =
-            (crate::theme::list_text(cx), theme.muted_foreground, theme.border, theme.secondary_hover, theme.ring, theme.sidebar, theme.secondary);
-        let (yellow, red, blue) = (theme.yellow, theme.red, theme.blue);
+        let (fg, muted, hover, ring, bg) = (crate::theme::list_text(cx), theme.muted_foreground, theme.secondary_hover, theme.ring, theme.sidebar);
         let mut col = div().id("session-list").flex_1().min_h_0().flex().flex_col().overflow_y_scroll();
-        for ix in 0..self.tabs.len() {
-            let active = ix == self.active && self.browser.is_none();
-            let number = self.tabs[ix].number;
-            let row = &self.tabs[ix].row;
-            let place = row.place.clone();
-            let worktree = row.worktree.then_some(());
-            let activity = row.activity.clone();
-            // Once a turn is over and summarised: its headline, how it ended when it needs the
-            // person or went wrong.
-            let summary = row.summary.clone().filter(|_| crate::summaries_on(cx));
-            // A context filling up shows amber, then red, as in the session's header.
-            let cost = row.spend(cx).map(|sp| {
-                let color = match sp {
-                    Spend::Context { fill: Fill::Filling, .. } => cx.theme().warning,
-                    Spend::Context { fill: Fill::Nearly, .. } => cx.theme().danger,
-                    _ => cx.theme().muted_foreground,
-                };
-                (sp.short(), color)
-            });
-            let short_id = row.short_id.clone();
-            let dot = self.dot(ix, cx);
-            let key = self.key(ix);
-            let auto = self.list_name(ix, cx);
-            let current = self.name(ix, cx);
-            let title = panels::session_title(&key, auto.clone(), cx);
-            let drag = SessionDrag { number, name: current.clone().into() };
-            let (k1, a1, c1) = (key, auto, current);
-            let menu = self.session_menu(ix, cx);
-            col = col.child(
-                div()
-                    .id(("session-row", number))
-                    .group(SharedString::from(format!("session-row-{number}")))
-                    .relative()
-                    .mx(px(6.))
-                    .px_2()
-                    .py(px(6.))
-                    .flex()
-                    .gap_2()
-                    .rounded(px(8.))
-                    .cursor_pointer()
-                    // The shown session: a rounded highlight.
-                    .when(active, |d| d.bg(sel))
-                    .when(!active, |d| d.hover(|d| d.bg(hover)))
-                    .child(
-                        div()
-                            .pt(px(5.))
-                            .flex_none()
-                            .w(px(10.))
-                            .flex()
-                            .justify_center()
-                            .child(match dot {
-                                Some((c, _)) => div().size(px(8.)).rounded_full().bg(c),
-                                None => div().size(px(8.)).rounded_full().border_1().border_color(muted.opacity(0.6)),
-                            }),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .flex()
-                            .flex_col()
-                            .gap(px(1.))
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap_1()
-                                    .child(div().flex_1().min_w_0().truncate().text_sm().text_color(fg).child(title))
-                                    .children(cost.map(|(c, color)| div().flex_none().text_size(px(10.5)).text_color(color).child(c))),
-                            )
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap_1()
-                                    .text_size(px(11.))
-                                    .text_color(muted)
-                                    .child(crate::theme::pressed(div().min_w_0().truncate(), place, cx))
-                                    .children(short_id.map(|id| panels::short_id(id, ("session-id", number), cx)))
-                                    .children(worktree.map(|_| {
-                                        div().flex_none().px_1().rounded_sm().bg(border).text_size(px(10.)).child("worktree")
-                                    })),
-                            )
-                            .children(match summary {
-                                Some((status, needs_you, headline)) => {
-                                    use keleuo_core::summary::Status;
-                                    // How the work went when it is not plainly done, else that
-                                    // something waits on the person.
-                                    let (label, tone) = match status {
-                                        Status::Done if needs_you => (Some("Needs you"), yellow),
-                                        Status::Done => (None, yellow),
-                                        Status::Waiting => (Some(status.label()), yellow),
-                                        Status::Failed => (Some(status.label()), red),
-                                        Status::Partial => (Some(status.label()), blue),
-                                    };
-                                    Some(
-                                        div()
-                                            .flex()
-                                            .gap_1()
-                                            .text_size(px(11.))
-                                            .children(label.map(|l| div().flex_none().text_color(tone).child(l)))
-                                            .child(crate::theme::pressed(div().min_w_0().truncate().text_color(muted.opacity(0.9)), headline, cx)),
-                                    )
-                                }
-                                None => activity.map(|a| div().flex().text_size(px(11.)).text_color(muted.opacity(0.8)).child(crate::theme::pressed(div().min_w_0().truncate(), a, cx))),
-                            }),
-                    )
-                    // Rename and close, on hover (right-click is easy to miss on a Mac).
-                    .child({
-                        let (k2, a2, c2) = (k1.clone(), a1.clone(), c1.clone());
-                        div()
-                            .absolute()
-                            .top(px(4.))
-                            .right(px(4.))
-                            .flex()
-                            .rounded(px(6.))
-                            .bg(if active { sel } else { hover })
-                            .invisible()
-                            .group_hover(SharedString::from(format!("session-row-{number}")), |d| d.visible())
-                            .child(
-                                Button::new(("session-rename", number))
-                                    .icon(gpui_kit::assets::IconName::Pencil)
-                                    .xsmall()
-                                    .ghost()
-                                    .tooltip("Rename")
-                                    .on_click(move |_, window, cx| {
-                                        cx.stop_propagation();
-                                        start_tab_rename(k2.clone(), a2.clone(), c2.clone(), window, cx);
-                                    }),
-                            )
-                            .child(
-                                Button::new(("session-close", number))
-                                    .icon(IconName::Close)
-                                    .xsmall()
-                                    .ghost()
-                                    .tooltip("Close the session (its history stays)")
-                                    .on_click(cx.listener(move |s, _, window, cx| {
-                                        cx.stop_propagation();
-                                        if let Some(ix) = s.tabs.iter().position(|t| t.number == number) {
-                                            s.request_close(ix, window, cx);
-                                        }
-                                    })),
-                            )
-                    })
-                    .on_click(cx.listener(move |s, ev: &ClickEvent, window, cx| {
-                        if ev.click_count() >= 2 {
-                            start_tab_rename(k1.clone(), a1.clone(), c1.clone(), window, cx);
-                        } else if let Some(ix) = s.tabs.iter().position(|t| t.number == number) {
-                            s.activate(ix, window, cx);
-                        }
-                    }))
-                    .on_drag(drag, |d: &SessionDrag, _, _, cx| {
-                        let name = d.name.clone();
-                        cx.new(|_| DragLabel(name))
-                    })
-                    .drag_over::<SessionDrag>(move |d, _, _, _| d.border_t_2().border_color(ring))
-                    .on_drop(cx.listener(move |s, d: &SessionDrag, _, cx| {
-                        let to = s.tabs.iter().position(|t| t.number == number).unwrap_or(0);
-                        s.reorder(d.number, to, cx)
-                    }))
-                    .context_menu(menu),
-            );
+        // With projects: each project's sessions under it (a session in its folder or inside
+        // it), then the rest under Other. Without: the plain list.
+        let projects = cx.global::<AppSettings>().0.borrow().projects.clone();
+        if projects.is_empty() {
+            for ix in 0..self.tabs.len() {
+                col = col.child(self.session_row(ix, cx));
+            }
+        } else {
+            let home = |ix: usize| {
+                let row = &self.tabs[ix].row;
+                if row.remote { None } else { keleuo_core::settings::project_of(&projects, &row.root).map(|p| p.root.clone()) }
+            };
+            let homes: Vec<Option<PathBuf>> = (0..self.tabs.len()).map(home).collect();
+            for (pi, project) in projects.iter().enumerate() {
+                let members: Vec<usize> = (0..self.tabs.len()).filter(|ix| homes[*ix].as_ref() == Some(&project.root)).collect();
+                col = col.child(self.project_header(pi, project, &members, cx));
+                if !project.folded {
+                    for ix in members {
+                        col = col.child(div().pl(px(12.)).child(self.session_row(ix, cx)));
+                    }
+                }
+            }
+            let others: Vec<usize> = (0..self.tabs.len()).filter(|ix| homes[*ix].is_none()).collect();
+            if !others.is_empty() {
+                col = col.child(div().px(px(14.)).pt_3().pb_1().text_size(px(11.)).text_color(muted).child("Other"));
+                for ix in others {
+                    col = col.child(self.session_row(ix, cx));
+                }
+            }
         }
         // Room below the last row: dropping there moves a session to the end.
         let end = self.tabs.len();
@@ -1994,7 +2106,16 @@ impl Shell {
                     .text_size(px(18.))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(fg)
-                    .child("Sessions"),
+                    .child("Sessions")
+                    .child(div().flex_1())
+                    .child(
+                        Button::new("project-new")
+                            .icon(gpui_kit::assets::IconName::FolderPlus)
+                            .xsmall()
+                            .ghost()
+                            .tooltip("New project: a folder, its sessions grouped under it")
+                            .on_click(cx.listener(|s, _, _, cx| s.new_project(cx))),
+                    ),
             )
             .child(
                 div()
@@ -2706,4 +2827,19 @@ pub fn loading_skeleton(cx: &App) -> AnyElement {
                 ),
         )
         .into_any_element()
+}
+
+/// The name store's key for a project (its name, renamed in the list as a session's is).
+fn project_key(root: &Path) -> String {
+    format!("project:{}", root.display())
+}
+
+/// Make `root` a project, named after its folder (once).
+pub fn add_project(root: PathBuf, cx: &mut App) {
+    let name = root.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| root.display().to_string());
+    crate::settings_window::change(cx, move |s| {
+        if !s.projects.iter().any(|p| p.root == root) {
+            s.projects.push(keleuo_core::settings::Project { name, root, folded: false });
+        }
+    });
 }

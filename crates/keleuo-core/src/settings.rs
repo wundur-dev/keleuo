@@ -172,11 +172,38 @@ pub struct SavedSession {
     pub writable: Vec<PathBuf>,
 }
 
+
+/// A project: a name for a folder. Sessions whose folder is it or inside it show under it in
+/// the session list; a new session from it starts there.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Project {
+    pub name: String,
+    pub root: PathBuf,
+    /// Its sessions hidden in the list.
+    pub folded: bool,
+}
+
+impl Project {
+    /// Whether a session in `folder` belongs to it.
+    pub fn holds(&self, folder: &std::path::Path) -> bool {
+        !self.root.as_os_str().is_empty() && folder.starts_with(&self.root)
+    }
+}
+
+/// The project a session in `folder` belongs to: the one with the deepest folder holding it.
+pub fn project_of<'a>(projects: &'a [Project], folder: &std::path::Path) -> Option<&'a Project> {
+    projects.iter().filter(|p| p.holds(folder)).max_by_key(|p| p.root.components().count())
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
     /// Most recent first.
     pub recent: Vec<PathBuf>,
+    /// Projects: named folders whose sessions are grouped under them in the session list
+    /// (see [`Project`]), in the order shown.
+    pub projects: Vec<Project>,
     pub layout: Layout,
     /// How new sessions show: `"chat"` (the default) or `"terminal"` (the agent's own
     /// interface, for backends that have one).
@@ -352,6 +379,18 @@ pub fn encode_folder(folder: &std::path::Path) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_session_belongs_to_the_deepest_project_holding_its_folder() {
+        let p = |name: &str, root: &str| Project { name: name.into(), root: root.into(), folded: false };
+        let projects = [p("Games", "/work/games"), p("Jurassic Rampage", "/work/games/jurassic"), p("Empty", "")];
+        let of = |f: &str| project_of(&projects, std::path::Path::new(f)).map(|p| p.name.as_str());
+        assert_eq!(of("/work/games/jurassic"), Some("Jurassic Rampage"));
+        assert_eq!(of("/work/games/jurassic/art"), Some("Jurassic Rampage"));
+        assert_eq!(of("/work/games/other"), Some("Games"));
+        assert_eq!(of("/work/gamesx"), None, "a folder whose name starts the same isn't inside");
+        assert_eq!(of("/elsewhere"), None);
+    }
+
     #[test]
     fn settings_from_a_newer_build_survive_a_save() {
         let path = std::env::temp_dir().join(format!("keleuo-settings-unknown-{}.json", std::process::id()));
