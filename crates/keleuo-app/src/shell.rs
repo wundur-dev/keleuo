@@ -40,6 +40,8 @@ const CONTINUE_MESSAGE: &str = "Keleuo was restarted while you were working. Con
 const RAIL_NEW: f32 = 30.;
 const RAIL_ROW: f32 = 32.;
 const RAIL_GAP: f32 = 4.;
+/// A project's mark in the folded list (and its row in the list peeking out, as tall).
+const RAIL_MARK: f32 = 22.;
 /// How wide the list that peeks out over the rail is.
 const PEEK_WIDTH: f32 = 260.;
 /// How long the pointer rests on the rail before the whole list peeks out.
@@ -191,6 +193,8 @@ pub struct Shell {
     peek_held: bool,
     /// The folder being renamed, asked for its new name.
     folder_rename: Option<FolderRename>,
+    /// A folder being made a project: the name asked for first.
+    project_form: Option<ProjectForm>,
     /// Sessions from the last run are being opened again: the saved list is not touched.
     restoring: bool,
     /// The open sessions as last saved (written again only when they change).
@@ -235,6 +239,7 @@ impl Shell {
             peek_held: false,
             rail_hover: false,
             folder_rename: None,
+            project_form: None,
             restoring: false,
             saved: None,
             focus: cx.focus_handle(),
@@ -1250,7 +1255,10 @@ impl Shell {
             .when(!remote, |m| {
                 let (w2, f, f2) = (weak.clone(), folder.clone(), folder.clone());
                 let f3 = folder.clone();
-                m.item(PopupMenuItem::new("Make a project of this folder").on_click(move |_, _, cx| add_project(f3.clone(), cx)))
+                let w3 = weak.clone();
+                m.item(PopupMenuItem::new("Make a project of this folder…").on_click(move |_, window, cx| {
+                    let _ = w3.update(cx, |s, cx| s.ask_new_project(f3.clone(), window, cx));
+                }))
                     .item(PopupMenuItem::new("Reveal in Finder").on_click(move |_, _, cx| cx.reveal_path(&f2)))
                     .item(PopupMenuItem::new("Rename folder…").on_click(move |_, window, cx| {
                         let _ = w2.update(cx, |s, cx| s.ask_rename_folder(f.clone(), window, cx));
@@ -1569,6 +1577,15 @@ impl Shell {
             "project-add" => {
                 // Tests: make a folder a project.
                 add_project(PathBuf::from(arg), cx);
+                "ok".into()
+            }
+            "project-ask" => {
+                // Tests: the New project dialog for a folder.
+                self.ask_new_project(PathBuf::from(arg), window, cx);
+                "ok".into()
+            }
+            "project-create" => {
+                self.create_project(cx);
                 "ok".into()
             }
             "show-image" => {
@@ -1970,15 +1987,103 @@ impl Shell {
                 .into_any_element()
     }
 
-    /// Ask for a folder and make it a project (named after it; renamed in the list).
-    fn new_project(&mut self, cx: &mut Context<Self>) {
+    /// Ask for a folder, then for the project's name.
+    fn new_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let picked = cx.prompt_for_paths(PathPromptOptions { files: false, directories: true, multiple: false, prompt: Some("Make project".into()) });
-        cx.spawn(async move |_, cx: &mut AsyncApp| {
+        cx.spawn_in(window, async move |this, cx| {
             let Ok(Ok(Some(paths))) = picked.await else { return };
             let Some(root) = paths.into_iter().next() else { return };
-            cx.update(|cx| add_project(root, cx));
+            let _ = this.update_in(cx, |s, window, cx| s.ask_new_project(root, window, cx));
         })
         .detach();
+    }
+
+    /// Ask what to call the project made of `root` (its folder's name to start with).
+    pub fn ask_new_project(&mut self, root: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let input = cx.new(|cx| InputState::new(window, cx).default_value(folder_name(&root)));
+        input.update(cx, |i, cx| {
+            i.focus(window, cx);
+            i.select_all(window, cx);
+        });
+        let sub = cx.subscribe_in(&input, window, |s, _, ev: &InputEvent, _, cx| {
+            if let InputEvent::PressEnter { .. } = ev {
+                s.create_project(cx);
+            }
+        });
+        self.project_form = Some(ProjectForm { root, input, _sub: sub });
+        cx.notify();
+    }
+
+    /// Make the asked-about folder a project under the name typed (its folder's name if none).
+    fn create_project(&mut self, cx: &mut Context<Self>) {
+        let Some(f) = self.project_form.take() else { return };
+        let typed = f.input.read(cx).value().trim().to_string();
+        let name = if typed.is_empty() { folder_name(&f.root) } else { typed };
+        // Named here, not by a rename left over from an earlier project of the same folder.
+        let _ = cx.global::<panels::Names>().0.borrow_mut().set(&project_key(&f.root), "");
+        name_project(f.root, name, cx);
+        cx.notify();
+    }
+
+    fn render_project_form(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let f = self.project_form.as_ref()?;
+        let theme = cx.theme();
+        let (fg, muted, border, bg) = (theme.foreground, theme.muted_foreground, theme.border, theme.background);
+        Some(
+            div()
+                .id("project-form")
+                .absolute()
+                .inset_0()
+                .flex()
+                .justify_center()
+                .items_start()
+                .pt(px(90.))
+                .bg(gpui_kit::black().opacity(0.25))
+                .occlude()
+                .capture_key_down(cx.listener(|s, ev: &KeyDownEvent, _, cx| {
+                    if ev.keystroke.key == "escape" {
+                        s.project_form = None;
+                        cx.stop_propagation();
+                        cx.notify();
+                    }
+                }))
+                .child(
+                    div()
+                        .w(px(440.))
+                        .p_4()
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .rounded_lg()
+                        .border_1()
+                        .border_color(border)
+                        .bg(bg)
+                        .shadow_lg()
+                        .child(div().text_base().font_weight(FontWeight::SEMIBOLD).text_color(fg).child("New project"))
+                        .child(div().text_xs().text_color(muted).child(f.root.display().to_string()))
+                        .child(Input::new(&f.input).small())
+                        .child(
+                            div()
+                                .text_xs()
+                                .line_height(rems(1.4))
+                                .text_color(muted)
+                                .child("Its sessions (in this folder or inside it) are listed under this name."),
+                        )
+                        .child(
+                            div()
+                                .pt_1()
+                                .flex()
+                                .justify_end()
+                                .gap_2()
+                                .child(Button::new("project-form-cancel").small().ghost().label("Cancel").on_click(cx.listener(|s, _, _, cx| {
+                                    s.project_form = None;
+                                    cx.notify();
+                                })))
+                                .child(Button::new("project-form-go").small().primary().label("Create").on_click(cx.listener(|s, _, _, cx| s.create_project(cx)))),
+                        ),
+                )
+                .into_any_element(),
+        )
     }
 
     /// A project's row: fold, its name (renamed like a session), what its sessions are doing,
@@ -2022,14 +2127,7 @@ impl Shell {
                         s.open_browser(Arc::new(LocalHost), root.clone(), None, window, cx);
                     })),
             )
-            .on_click(move |_, _, cx| {
-                let r = root2.clone();
-                crate::settings_window::change(cx, move |s| {
-                    if let Some(p) = s.projects.iter_mut().find(|p| p.root == r) {
-                        p.folded = !p.folded;
-                    }
-                });
-            })
+            .on_click(move |_, _, cx| Self::toggle_project(root2.clone(), cx))
             .context_menu(move |menu, _, _| {
                 let (k, a, r) = (k1.clone(), a1.clone(), root3.clone());
                 menu.item(PopupMenuItem::new("Rename").on_click(move |_, window, cx| start_tab_rename(k.clone(), a.clone(), a.clone(), window, cx)))
@@ -2041,37 +2139,164 @@ impl Shell {
             .into_any_element()
     }
 
+    /// The sessions as the lists show them: with projects, each project (by its index) and the
+    /// sessions in its folder or inside it, then the rest (`None`, Other) when there are any.
+    /// Without projects, one group of them all.
+    fn groups(&self, cx: &App) -> (Vec<keleuo_core::settings::Project>, Vec<Group>) {
+        let projects = cx.global::<AppSettings>().0.borrow().projects.clone();
+        if projects.is_empty() {
+            return (projects, vec![(None, (0..self.tabs.len()).collect())]);
+        }
+        let homes: Vec<Option<PathBuf>> = (0..self.tabs.len())
+            .map(|ix| {
+                let row = &self.tabs[ix].row;
+                if row.remote { None } else { keleuo_core::settings::project_of(&projects, &row.root).map(|p| p.root.clone()) }
+            })
+            .collect();
+        let mut groups: Vec<Group> = projects
+            .iter()
+            .enumerate()
+            .map(|(pi, p)| (Some(pi), (0..self.tabs.len()).filter(|ix| homes[*ix].as_ref() == Some(&p.root)).collect()))
+            .collect();
+        let others: Vec<usize> = (0..self.tabs.len()).filter(|ix| homes[*ix].is_none()).collect();
+        if !others.is_empty() {
+            groups.push((None, others));
+        }
+        (projects, groups)
+    }
+
+    /// What a folded project's sessions are doing, for its mark: the first one waiting, else
+    /// the first one working.
+    fn group_dot(&self, members: &[usize], cx: &mut Context<Self>) -> Option<(Hsla, &'static str)> {
+        let waiting = members.iter().find(|ix| matches!(self.tabs[**ix].row.dot, Some(Dot::Permission | Dot::Asking)));
+        match waiting {
+            Some(ix) => self.dot(*ix, cx),
+            None => members.iter().find_map(|ix| self.dot(*ix, cx)),
+        }
+    }
+
+    /// The folded list's order: each project's mark and (unless it is folded) its sessions,
+    /// then a divider and the rest. Without projects, just the sessions.
+    fn rail_order(&self, cx: &App) -> (Vec<keleuo_core::settings::Project>, Vec<RailItem>) {
+        let (projects, groups) = self.groups(cx);
+        let mut order = Vec::new();
+        for (group, members) in groups {
+            match group {
+                Some(pi) => {
+                    order.push(RailItem::Project(pi, members.clone()));
+                    if !projects[pi].folded {
+                        order.extend(members.into_iter().map(RailItem::Session));
+                    }
+                }
+                None => {
+                    if !projects.is_empty() {
+                        order.push(RailItem::Other);
+                    }
+                    order.extend(members.into_iter().map(RailItem::Session));
+                }
+            }
+        }
+        (projects, order)
+    }
+
+    /// A project's mark in the folded list (`wide`: in the list peeking out): its folder, its
+    /// initials (its name, when wide) and, folded, what its sessions are doing. Click: fold.
+    fn rail_mark(&self, pi: usize, project: &keleuo_core::settings::Project, members: &[usize], wide: bool, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let (fg, muted, hover, bg) = (theme.foreground, theme.muted_foreground, theme.secondary_hover, theme.sidebar);
+        let name = panels::tab_label(&project_key(&project.root), project.name.clone(), cx);
+        let dot = if project.folded { self.group_dot(members, cx) } else { None };
+        let root = project.root.clone();
+        let count = members.len();
+        let tip = format!("{name}\n{count} session{}{}", if count == 1 { "" } else { "s" }, if project.folded { " (folded)" } else { "" });
+        let inset = px((RAIL_WIDTH - RAIL_ROW) / 2.);
+        let mark = div()
+            .id((if wide { "peek-project" } else { "rail-project" }, pi))
+            .relative()
+            .h(px(RAIL_MARK))
+            .flex()
+            .items_center()
+            .rounded_md()
+            .cursor_pointer()
+            .hover(|d| d.bg(hover))
+            .on_click(move |_, _, cx| Self::toggle_project(root.clone(), cx));
+        let mark = if wide {
+            mark.mx(px(4.))
+                .pl(inset - px(4.))
+                .pr_2()
+                .gap_2()
+                .child(
+                    div()
+                        .flex_none()
+                        .w(px(RAIL_ROW))
+                        .flex()
+                        .justify_center()
+                        .child(Icon::new(if project.folded { IconName::ChevronRight } else { IconName::ChevronDown }).xsmall().text_color(muted)),
+                )
+                .child(div().flex_1().min_w_0().truncate().text_size(px(11.5)).font_weight(FontWeight::SEMIBOLD).text_color(fg).child(name))
+                .child(div().flex_none().text_size(px(10.5)).text_color(muted).child(count.to_string()))
+        } else {
+            mark.w(px(RAIL_ROW))
+                .justify_center()
+                .gap(px(2.))
+                .child(Icon::new(gpui_kit::assets::IconName::Folder).xsmall().text_color(muted))
+                .child(div().text_size(px(9.5)).font_weight(FontWeight::SEMIBOLD).text_color(muted).child(initials(&name)))
+                .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(w, cx))
+        };
+        mark.children(dot.map(|(c, _)| div().absolute().top(px(1.)).right(px(1.)).size(px(7.)).rounded_full().border_1().border_color(bg).bg(c)))
+            .into_any_element()
+    }
+
+    /// The divider before the sessions in no project (with "Other" beside it when wide), as
+    /// tall as a project's mark.
+    fn rail_other(wide: bool, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let (muted, border) = (theme.muted_foreground, theme.border);
+        let row = div().h(px(RAIL_MARK)).flex().items_center();
+        if wide {
+            row.mx(px(4.)).pl(px((RAIL_WIDTH - RAIL_ROW) / 2. - 4.)).gap_2()
+                .child(div().flex_none().w(px(RAIL_ROW)).flex().justify_center().child(div().w(px(16.)).h(px(1.)).bg(border)))
+                .child(div().text_size(px(11.)).text_color(muted).child("Other"))
+                .into_any_element()
+        } else {
+            row.w(px(RAIL_ROW)).justify_center().child(div().w(px(16.)).h(px(1.)).bg(border)).into_any_element()
+        }
+    }
+
+    /// Fold or unfold the project at `root`.
+    fn toggle_project(root: PathBuf, cx: &mut App) {
+        crate::settings_window::change(cx, move |s| {
+            if let Some(p) = s.projects.iter_mut().find(|p| p.root == root) {
+                p.folded = !p.folded;
+            }
+        });
+    }
+
     fn render_list(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
         let (fg, muted, hover, ring, bg) = (crate::theme::list_text(cx), theme.muted_foreground, theme.secondary_hover, theme.ring, theme.sidebar);
         let mut col = div().id("session-list").flex_1().min_h_0().flex().flex_col().overflow_y_scroll();
         // With projects: each project's sessions under it (a session in its folder or inside
         // it), then the rest under Other. Without: the plain list.
-        let projects = cx.global::<AppSettings>().0.borrow().projects.clone();
-        if projects.is_empty() {
-            for ix in 0..self.tabs.len() {
-                col = col.child(self.session_row(ix, cx));
-            }
-        } else {
-            let home = |ix: usize| {
-                let row = &self.tabs[ix].row;
-                if row.remote { None } else { keleuo_core::settings::project_of(&projects, &row.root).map(|p| p.root.clone()) }
-            };
-            let homes: Vec<Option<PathBuf>> = (0..self.tabs.len()).map(home).collect();
-            for (pi, project) in projects.iter().enumerate() {
-                let members: Vec<usize> = (0..self.tabs.len()).filter(|ix| homes[*ix].as_ref() == Some(&project.root)).collect();
-                col = col.child(self.project_header(pi, project, &members, cx));
-                if !project.folded {
-                    for ix in members {
-                        col = col.child(div().pl(px(12.)).child(self.session_row(ix, cx)));
+        let (projects, groups) = self.groups(cx);
+        for (group, members) in groups {
+            match group {
+                Some(pi) => {
+                    let project = &projects[pi];
+                    col = col.child(self.project_header(pi, project, &members, cx));
+                    if !project.folded {
+                        for ix in members {
+                            col = col.child(div().pl(px(12.)).child(self.session_row(ix, cx)));
+                        }
                     }
                 }
-            }
-            let others: Vec<usize> = (0..self.tabs.len()).filter(|ix| homes[*ix].is_none()).collect();
-            if !others.is_empty() {
-                col = col.child(div().px(px(14.)).pt_3().pb_1().text_size(px(11.)).text_color(muted).child("Other"));
-                for ix in others {
-                    col = col.child(self.session_row(ix, cx));
+                None => {
+                    if !projects.is_empty() {
+                        col = col.child(div().px(px(14.)).pt_3().pb_1().text_size(px(11.)).text_color(muted).child("Other"));
+                    }
+                    for ix in members {
+                        col = col.child(self.session_row(ix, cx));
+                    }
                 }
             }
         }
@@ -2114,7 +2339,7 @@ impl Shell {
                             .xsmall()
                             .ghost()
                             .tooltip("New project: a folder, its sessions grouped under it")
-                            .on_click(cx.listener(|s, _, _, cx| s.new_project(cx))),
+                            .on_click(cx.listener(|s, _, window, cx| s.new_project(window, cx))),
                     ),
             )
             .child(
@@ -2196,7 +2421,19 @@ impl Shell {
                     .detach();
                 }
             }));
-        for ix in 0..self.tabs.len() {
+        let (projects, order) = self.rail_order(cx);
+        for item in order {
+            let ix = match item {
+                RailItem::Project(pi, members) => {
+                    col = col.child(self.rail_mark(pi, &projects[pi], &members, false, cx));
+                    continue;
+                }
+                RailItem::Other => {
+                    col = col.child(Self::rail_other(false, cx));
+                    continue;
+                }
+                RailItem::Session(ix) => ix,
+            };
             let active = ix == self.active && self.browser.is_none();
             let number = self.tabs[ix].number;
             let name = self.name(ix, cx);
@@ -2273,7 +2510,19 @@ impl Shell {
                     .child("New session")
                     .on_click(cx.listener(|s, _, window, cx| s.new_session(window, cx))),
             );
-        for ix in 0..self.tabs.len() {
+        let (projects, order) = self.rail_order(cx);
+        for item in order {
+            let ix = match item {
+                RailItem::Project(pi, members) => {
+                    col = col.child(self.rail_mark(pi, &projects[pi], &members, true, cx));
+                    continue;
+                }
+                RailItem::Other => {
+                    col = col.child(Self::rail_other(true, cx));
+                    continue;
+                }
+                RailItem::Session(ix) => ix,
+            };
             let active = ix == self.active && self.browser.is_none();
             let number = self.tabs[ix].number;
             let name = self.name(ix, cx);
@@ -2588,9 +2837,10 @@ impl Render for Shell {
         };
         let list_shown = list.is_some();
         let folder_rename = self.render_folder_rename(cx);
+        let project_form = self.render_project_form(cx);
         // Web pages are native views over the window: they hide while an overlay is open.
         crate::web_panel::set_covered(
-            self.folder_rename.is_some() || (self.folded && self.peek && !self.tabs.is_empty()) || crate::image_view::is_open(cx)
+            self.folder_rename.is_some() || self.project_form.is_some() || (self.folded && self.peek && !self.tabs.is_empty()) || crate::image_view::is_open(cx)
                 || crate::skill_installer::is_open(cx),
         );
         // The folded list, peeking out over the content until the pointer leaves it.
@@ -2711,6 +2961,7 @@ impl Render for Shell {
                     .children(peek),
             )
             .children(folder_rename)
+            .children(project_form)
             .children(crate::skill_installer::render(cx))
             .children(crate::image_view::render(cx))
     }
@@ -2718,6 +2969,25 @@ impl Render for Shell {
 
 /// A session closed for a folder rename, to open again: where, with what, and its id.
 type Reopen = (Arc<dyn Host>, PathBuf, Arc<dyn Backend>, Option<String>);
+
+/// A group of the session list: a project (by its index), or none (Other), and its sessions.
+type Group = (Option<usize>, Vec<usize>);
+
+/// One entry of the folded list, in order.
+enum RailItem {
+    /// A project's mark (by its index), with its sessions.
+    Project(usize, Vec<usize>),
+    /// The divider before the sessions in no project.
+    Other,
+    Session(usize),
+}
+
+/// A folder about to be made a project, and the name asked for it.
+struct ProjectForm {
+    root: PathBuf,
+    input: Entity<InputState>,
+    _sub: Subscription,
+}
 
 /// A folder being renamed: its new name in the input, and what is wrong with it, if anything.
 struct FolderRename {
@@ -2836,10 +3106,14 @@ fn project_key(root: &Path) -> String {
 
 /// Make `root` a project, named after its folder (once).
 pub fn add_project(root: PathBuf, cx: &mut App) {
-    let name = root.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| root.display().to_string());
-    crate::settings_window::change(cx, move |s| {
-        if !s.projects.iter().any(|p| p.root == root) {
-            s.projects.push(keleuo_core::settings::Project { name, root, folded: false });
-        }
+    let name = folder_name(&root);
+    name_project(root, name, cx);
+}
+
+/// Make `root` a project called `name`, or rename it when it is one already.
+fn name_project(root: PathBuf, name: String, cx: &mut App) {
+    crate::settings_window::change(cx, move |s| match s.projects.iter_mut().find(|p| p.root == root) {
+        Some(p) => p.name = name,
+        None => s.projects.push(keleuo_core::settings::Project { name, root, folded: false }),
     });
 }
