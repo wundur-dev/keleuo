@@ -36,6 +36,8 @@ use crate::web_panel::{WebEvent, WebPanel};
 /// Bumped when the saved layout format changes; older files are ignored.
 /// 5: the tool panels left the session's layout for the window's column under the sessions.
 const LAYOUT_VERSION: usize = 5;
+/// The narrowest the chat gets beside the documents and terminals.
+const CHAT_MIN_WIDTH: f32 = 460.;
 
 /// What the panel registry needs to rebuild a saved layout for one window.
 struct Factory {
@@ -235,6 +237,9 @@ impl Workspace {
         let (dock, skin) = crate::perf::step("workspace dock", || crate::dock_skin::KeleuoSkin::dock_area("keleuo", Some(LAYOUT_VERSION), window, cx));
         skin.set_panel_style(PanelStyle::TabBar, cx);
         skin.set_close_button_visible(true, cx);
+        // The chat never narrower than its message box's buttons and a code block's need: a
+        // narrower window squeezes the documents and terminals beside it instead.
+        dock.update(cx, |a, _| a.set_panel_min_width(PanelId::from(claude.entity_id()), px(CHAT_MIN_WIDTH)));
 
         let mut subs = Vec::new();
         subs.push(cx.subscribe_in(

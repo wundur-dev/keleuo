@@ -108,6 +108,8 @@ pub struct DockArea {
     groups: HashMap<NodeId, Cached<TabGroup>>,
     splits: HashMap<NodeId, CachedSplit>,
     panels: HashMap<PanelId, Arc<dyn PanelView>>,
+    /// Keleuo patch: the narrowest a panel's slot in a side-by-side split may be.
+    min_widths: HashMap<PanelId, Pixels>,
 
     locked: bool,
     zoomed: Option<Zoomed>,
@@ -140,6 +142,7 @@ impl DockArea {
             docks: HashMap::new(),
             groups: HashMap::new(),
             splits: HashMap::new(),
+            min_widths: HashMap::new(),
             panels: HashMap::new(),
             locked: false,
             zoomed: None,
@@ -1289,6 +1292,23 @@ impl DockArea {
     }
 }
 
+/// Keleuo patch: panel minimum widths.
+impl DockArea {
+    /// Never let the slot holding `panel` in a side-by-side split be narrower than `width`
+    /// (dragging the divider stops there; a narrower window squeezes the other slots first).
+    pub fn set_panel_min_width(&mut self, panel: PanelId, width: Pixels) {
+        self.min_widths.insert(panel, width);
+    }
+
+    /// The widest minimum of the panels in `node`, if any has one.
+    fn node_min_width(&self, node: &PaneNode) -> Option<Pixels> {
+        match node.kind() {
+            PaneRef::Split { children, .. } => children.iter().filter_map(|c| self.node_min_width(c)).reduce(|a, b| a.max(b)),
+            PaneRef::Tabs { panels: ids, .. } => ids.iter().filter_map(|id| self.min_widths.get(id).copied()).reduce(|a, b| a.max(b)),
+        }
+    }
+}
+
 /// Rendering.
 impl DockArea {
     /// Lower one container to an element.
@@ -1323,6 +1343,10 @@ impl DockArea {
                     .map(|(ix, (child, size))| {
                         resizable_panel()
                             .visible(shown[ix])
+                            .when_some(
+                                (axis == Axis::Horizontal).then(|| self.node_min_width(child)).flatten(),
+                                |panel, min| panel.size_range(min..Pixels::MAX),
+                            )
                             .child(self.render_node(child, window, cx))
                             // `flex_none` is what makes the size stick.
                             // `ResizablePanel` sets `flex_grow: 1` on itself,
