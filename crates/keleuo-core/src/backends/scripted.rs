@@ -165,7 +165,12 @@ impl Turn {
         let tool = format!("tool-{n}");
         let agent = format!("agent-{n}");
         let path = Path::new(&self.cwd).join("notes.txt");
-        let file_diff = FileDiff { path: path.clone(), created: false, hunks: vec![diff::text_hunk("old line", "new line")] };
+        // "bigedit N": the edit adds N lines (to see a big diff in the chat).
+        let new_text = match self.text.strip_prefix("bigedit ").and_then(|r| r.split_whitespace().next()?.parse::<usize>().ok()) {
+            Some(n) => (1..=n).map(|i| format!("let line_{i} = {i};")).collect::<Vec<_>>().join("\n"),
+            None => "new line".to_string(),
+        };
+        let file_diff = FileDiff { path: path.clone(), created: false, hunks: vec![diff::text_hunk("old line", &new_text)] };
         let input = json!({ "path": path, "old": "old line", "new": "new line" });
 
         send(Event::Status("thinking".into()));
