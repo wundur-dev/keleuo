@@ -40,8 +40,6 @@ pub struct Layout {
     /// The tool panels (files, skills, the agent's subagents) are hidden: the default, so
     /// the conversation has the room; Cmd+B shows them.
     pub sidebar_folded: bool,
-    /// The height of the chat's pane of latest messages (shown while scrolled up).
-    pub latest_height: f32,
 }
 
 impl Default for Layout {
@@ -50,7 +48,6 @@ impl Default for Layout {
             sidebar_width: 240.0,
             claude_width: 640.0,
             sidebar_folded: true,
-            latest_height: 220.0,
         }
     }
 }
@@ -106,8 +103,6 @@ pub struct Prefs {
     /// life, Chat drawing from its session file, so switching views is instant. Off: Chat runs
     /// the agent headless and Terminal its interface, one at a time, switching between turns.
     pub hybrid_views: bool,
-    /// Scrolled up in a chat, the latest messages stay in view in a pane under it.
-    pub latest_pane: bool,
     /// Agents write only inside their session's folder (and their own state, caches and
     /// temporary folders); they read anywhere. See [`crate::sandbox`].
     pub sandbox_writes: bool,
@@ -134,7 +129,6 @@ impl Default for Prefs {
             terminal_font_size: TERMINAL_FONT_SIZE,
             agent_font_size: AGENT_FONT_SIZE,
             hybrid_views: false,
-            latest_pane: true,
             sandbox_writes: true,
         }
     }

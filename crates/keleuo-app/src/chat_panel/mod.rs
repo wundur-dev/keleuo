@@ -149,7 +149,7 @@ pub struct ChatPanel {
     /// While a row draws with the find bar open: the marks for its text (see `find_marks`).
     marking: Option<gpui_kit::base::text::FindMarks>,
     pending_find: Option<(u64, usize, usize)>,
-    /// The latest messages, kept in view under the conversation while it is scrolled up.
+    /// Go to latest, over the conversation while it is scrolled up (see `latest`).
     latest: latest::Latest,
     /// The Chat and Terminal view tabs.
     views: Rc<StripState>,
@@ -334,9 +334,7 @@ impl ChatPanel {
             found: None,
             marking: None,
             pending_find: None,
-            latest: latest::Latest::new(
-                cx.try_global::<crate::AppSettings>().map_or(latest::DEFAULT_HEIGHT, |s| s.0.borrow().layout.latest_height),
-            ),
+            latest: Default::default(),
             ticker: None,
             on_screen: Default::default(),
             views: Rc::new(StripState::default()),
@@ -414,8 +412,6 @@ impl ChatPanel {
             self.list_len = new.len();
             self.rows = new;
             self.synced_items = items;
-            self.latest.from.set(usize::MAX);
-            self.sync_latest(0, cx);
             return;
         }
         let old_len = self.rows.len();
@@ -433,9 +429,8 @@ impl ChatPanel {
         self.list_len = new_len;
         self.rows = new;
         self.synced_items = items;
-        self.sync_latest(from, cx);
         // Scrolled up and the conversation changed: something new may be past what shows, so
-        // the pane shows even inside the latest turn (until the newest row is in view again).
+        // Go to latest says New messages (until the newest row is in view again).
         if !self.list.is_following_tail() {
             self.latest.news.set(true);
         }
@@ -481,7 +476,6 @@ impl ChatPanel {
                 p.list_len = rows.len();
                 p.rows = rows;
                 p.synced_items = items;
-                p.sync_latest(0, cx);
                 // Reached by scrolling up: carry on from its newest item. Jumped to the very top:
                 // stay at its start.
                 if top.item_ix == at && at > 0 && added > 0 {
@@ -1152,9 +1146,11 @@ impl Render for ChatPanel {
                     .when(!empty, |d| d.child(
                         list(self.list.clone(), cx.processor(|this, ix, _window, cx| this.render_entry(ix, cx)))
                             .size_full(),
-                    )),
+                    ))
+                    // Floating over the bottom of the conversation: showing it resizes nothing.
+                    .relative()
+                    .children(self.render_latest(cx)),
             )
-            .children(self.render_latest(cx))
             .children(self.render_working_line(cx))
             .children(self.render_asking(cx))
             .child({
