@@ -29,6 +29,7 @@ use keleuo_core::summary;
 use keleuo_core::conversation::{one_line, to_markdown};
 
 mod agents;
+mod asset_card;
 mod composer;
 mod items;
 mod tools;
@@ -57,6 +58,8 @@ pub enum ChatPanelEvent {
     ShowChanges,
     /// Carry on in a new session from a summary of this one.
     FreshStart,
+    /// Show a game asset in its tab (its folder).
+    OpenAsset(PathBuf),
 }
 
 pub struct ChatPanel {
@@ -125,6 +128,11 @@ pub struct ChatPanel {
     fixed: std::collections::HashSet<String>,
     /// Tool cards the user opened (or closed, for diffs which start open).
     toggled: HashSet<String>,
+    /// The asset cards' note fields, by asset folder; the new-asset form; the asset store's
+    /// revision last drawn (see `asset_card`).
+    asset_notes: HashMap<PathBuf, Entity<InputState>>,
+    new_asset: Option<asset_card::NewAssetForm>,
+    asset_revision: u64,
     pub index: Arc<FileIndex>,
     last_revision: u64,
     /// Turns the spinners and the clocks while something runs, a few steps a second; slower,
@@ -323,6 +331,9 @@ impl ChatPanel {
             fixing: None,
             fixed: Default::default(),
             toggled: HashSet::new(),
+            asset_notes: HashMap::new(),
+            new_asset: None,
+            asset_revision: 0,
             index: Arc::new(FileIndex::default()),
             last_revision: 0,
             busy_since: None,
@@ -902,6 +913,12 @@ impl ChatPanel {
                         })
                         .item({
                             let panel = panel.clone();
+                            gpui_kit::component::menu::PopupMenuItem::new("New game asset…").on_click(move |_, _, cx| {
+                                let _ = panel.update(cx, |p, cx| p.start_asset_form(cx));
+                            })
+                        })
+                        .item({
+                            let panel = panel.clone();
                             gpui_kit::component::menu::PopupMenuItem::new("Start fresh from a summary").on_click(move |_, _, cx| {
                                 let _ = panel.update(cx, |_, cx| cx.emit(ChatPanelEvent::FreshStart));
                             })
@@ -1063,6 +1080,7 @@ impl Focusable for ChatPanel {
 
 impl Render for ChatPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.ensure_asset_fields(window, cx);
         crate::perf::count(crate::perf::Count::Chat);
         // Laid out again below, if the working line shows.
         self.working_slot.set(None);

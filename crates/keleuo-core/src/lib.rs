@@ -23,6 +23,7 @@
 
 pub mod acp;
 pub mod agent;
+pub mod assets;
 pub mod backends;
 pub mod changes;
 pub mod cli_tools;

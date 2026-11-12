@@ -1,5 +1,5 @@
-// model_from_text and model_from_image: Tripo. Starts a job, waits for it, and saves the GLB
-// and its preview image (returned so the agent can look).
+// model_from_text, model_from_image and model_from_views: Tripo. Starts a job, waits for it,
+// and saves the GLB and its preview image (returned so the agent can look).
 export default async function (args, kx) {
   const key = kx.secret("TRIPO_API_KEY");
   if (!key) return kx.fail("No Tripo key: add it in Settings > Tools > Packs.");
@@ -12,7 +12,36 @@ export default async function (args, kx) {
   };
   const model = kx.setting("model_version") || "v3.1-20260211";
   let start, body, what;
-  if (kx.tool === "model_from_image") {
+  // Upload a project image: its file token.
+  const upload = (path) => {
+    const file = kx.readFile(path);
+    const up = kx.fetch(`${api}/files`, { method: "POST", headers: auth, form: { file } });
+    if (!up.ok) throw new Error(`Tripo said ${up.status} to the upload of ${path}`);
+    const token = (up.json().data || {}).file_token;
+    if (!token) throw new Error(`Tripo sent no file token for ${path}.`);
+    return { token, filename: file.filename };
+  };
+  if (kx.tool === "model_from_views") {
+    // The front and at least one more; the side view is the subject's right.
+    if (!args.front) return kx.fail("model_from_views needs the front view.");
+    const views = [["front", args.front], ["right", args.side], ["back", args.back], ["left", args.left]].filter(([, p]) => p);
+    if (views.length < 2) return kx.fail("model_from_views needs the front and at least one more view.");
+    const inputs = [];
+    let front;
+    try {
+      for (const [name, path] of views) {
+        kx.progress(`Tripo: uploading the ${name} view`);
+        const up = upload(path);
+        if (name === "front") front = up;
+        inputs.push({ [name]: up.token });
+      }
+    } catch (e) {
+      return kx.fail(e.message);
+    }
+    start = `${api}/generation/multiview-to-model`;
+    body = { inputs, model };
+    what = args.name || front.filename.replace(/\.[^.]+$/, "");
+  } else if (kx.tool === "model_from_image") {
     if (!args.image) return kx.fail("model_from_image needs the image.");
     let file;
     try { file = kx.readFile(args.image); } catch (e) { return kx.fail(`Couldn't read the image: ${e.message}`); }
