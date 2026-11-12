@@ -34,7 +34,8 @@ use crate::terminal_view::{TerminalEvent, TerminalView};
 use crate::web_panel::{WebEvent, WebPanel};
 
 /// Bumped when the saved layout format changes; older files are ignored.
-const LAYOUT_VERSION: usize = 4;
+/// 5: the tool panels left the session's layout for the window's column under the sessions.
+const LAYOUT_VERSION: usize = 5;
 
 /// What the panel registry needs to rebuild a saved layout for one window.
 struct Factory {
@@ -160,6 +161,9 @@ pub enum WorkspaceEvent {
     AgentEdited(PathBuf),
     /// Carry on in a new session from a summary of this one.
     FreshStart,
+    /// Show one of its tool panels (Files, Changes, Agent, Skills), drawn by the window under
+    /// the list of sessions.
+    ShowTool(&'static str),
 }
 
 impl EventEmitter<WorkspaceEvent> for Workspace {}
@@ -404,10 +408,6 @@ impl Workspace {
         window.push_notification(format!("{name} was just edited by Claude in the session \"{by}\", which shares this folder."), cx);
     }
 
-    pub fn toggle_sidebar_pub(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.toggle_sidebar(window, cx);
-    }
-
     pub fn split_right(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.split(Placement::Right, window, cx);
     }
@@ -444,33 +444,9 @@ impl Workspace {
         let center = DockLayout::h_split()
             .child(claude, Some(px(settings.claude_width)))
             .child(code, None);
-        // Two groups of tool panels: the folder (files, changes), and the agent (its subagents,
-        // then its skills; terminals are tabs among the documents). Panels the
-        // backend has no use for are left out.
-        let caps = self.session.read(cx).backend.capabilities();
-        let look = DockLayout::tabs()
-            .panel_view(panel_handle(self.files.clone()), cx)
-            .panel_view(panel_handle(self.changes.clone()), cx);
-        let mut running = DockLayout::tabs();
-        if caps.subagents {
-            running = running.panel_view(panel_handle(self.agent_side.clone()), cx);
-        }
-        if caps.skills {
-            running = running.panel_view(panel_handle(self.skills.clone()), cx);
-        }
-        let left = if caps.subagents || caps.skills {
-            DockLayout::v_split().child(look, None).child(running, Some(px(300.)))
-        } else {
-            DockLayout::v_split().child(look, None)
-        };
-        self.dock.update(cx, |a, cx| {
-            a.set_center(center, window, cx);
-            a.set_dock(DockPlacement::Left, left, window, cx);
-            a.set_dock_size(DockPlacement::Left, px(settings.sidebar_width), window, cx);
-            if settings.sidebar_folded && a.is_dock_open(DockPlacement::Left) {
-                a.toggle_dock(DockPlacement::Left, window, cx);
-            }
-        });
+        // The tool panels (files, changes, the agent's subagents and skills) are not in it: the
+        // window draws them under the list of sessions (see `tools`).
+        self.dock.update(cx, |a, cx| a.set_center(center, window, cx));
         self.loading = false;
         self.claude.update(cx, |p, cx| p.focus_input(window, cx));
     }
@@ -704,8 +680,13 @@ impl Workspace {
         self.show_panel(PanelId::from(self.changes.entity_id()), window, cx);
     }
 
-    /// Show a panel, unfolding the sidebar if it is in there and folded.
+    /// Show a panel: a tool panel through the window (under the sessions), else in the layout,
+    /// unfolding the sidebar if it is in there and folded.
     pub fn show_panel(&mut self, id: PanelId, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some((name, _)) = self.tools(cx).into_iter().find(|(_, v)| PanelId::from(v.entity_id()) == id) {
+            cx.emit(WorkspaceEvent::ShowTool(name));
+            return;
+        }
         let left_closed = self
             .dock
             .read(cx)
@@ -1290,19 +1271,6 @@ impl Workspace {
 
     // ----- actions -----
 
-    fn toggle_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.dock.update(cx, |a, cx| {
-            if a.has_dock(DockPlacement::Left) {
-                a.toggle_dock(DockPlacement::Left, window, cx);
-            }
-        });
-        let open = self.dock.read(cx).is_dock_open(DockPlacement::Left);
-        let settings = cx.global::<AppSettings>().0.clone();
-        settings.borrow_mut().layout.sidebar_folded = !open;
-        let _ = settings.borrow().save();
-        cx.notify();
-    }
-
     /// Zoom the group of the given panel (or zoom out when something is zoomed).
     fn toggle_zoom(&mut self, id: Option<PanelId>, window: &mut Window, cx: &mut Context<Self>) {
         if self.dock.read(cx).is_zoomed() {
@@ -1615,7 +1583,6 @@ impl Workspace {
                 let src = (!arg.is_empty()).then(|| arg.to_string());
                 self.skills.update(cx, |p, cx| p.install_from_git(src, window, cx));
             }
-            "fold" => self.toggle_sidebar(window, cx),
             "reset" => self.reset_layout(window, cx),
             "zoom" => {
                 let id = match arg {
@@ -1739,17 +1706,20 @@ impl Workspace {
     /// The tool panels this session's layout has, by name, for the title bar's Tool panels
     /// menu: the way to one of them in one step while the sidebar is folded (the icon strip
     /// that used to stand beside the folded sidebar is gone).
-    pub fn tool_panels(&self, cx: &App) -> Vec<(&'static str, PanelId)> {
-        [
-            ("Files", PanelId::from(self.files.entity_id())),
-            ("Skills", PanelId::from(self.skills.entity_id())),
-            ("Changes", PanelId::from(self.changes.entity_id())),
-            ("Agent", PanelId::from(self.agent_side.entity_id())),
-        ]
-        .into_iter()
-        .filter(|(_, id)| self.in_dock(*id, cx))
-        .collect()
+    /// Its tool panels, for the window to draw under the sessions: the folder's (Files,
+    /// Changes), then the agent's (Agent, Skills) when its backend has them.
+    pub fn tools(&self, cx: &App) -> Vec<(&'static str, AnyView)> {
+        let caps = self.session.read(cx).backend.capabilities();
+        let mut tools: Vec<(&'static str, AnyView)> = vec![("Files", self.files.clone().into()), ("Changes", self.changes.clone().into())];
+        if caps.subagents {
+            tools.push(("Agent", self.agent_side.clone().into()));
+        }
+        if caps.skills {
+            tools.push(("Skills", self.skills.clone().into()));
+        }
+        tools
     }
+
 }
 
 impl Render for Workspace {
@@ -1788,7 +1758,6 @@ impl Render for Workspace {
             .text_color(fg)
             .key_context("Workspace")
             .track_focus(&self.focus)
-            .on_action(cx.listener(|ws, _: &ToggleSidebar, w, cx| ws.toggle_sidebar(w, cx)))
             .on_action(cx.listener(|ws, _: &FocusRight, w, cx| {
                 let id = ws.recent_code_panel(cx);
                 ws.toggle_zoom(id, w, cx)

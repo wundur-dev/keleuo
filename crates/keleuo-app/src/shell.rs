@@ -13,6 +13,7 @@ use std::sync::Arc;
 
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::resizable::{resizable_panel, v_resizable};
 use gpui_kit::component::menu::{ContextMenuExt, PopupMenu, PopupMenuItem};
 use gpui_kit::component::menu::DropdownMenu as _;
 use gpui_kit::component::{ActiveTheme, Icon, IconName, Sizable, TitleBar, WindowExt};
@@ -31,7 +32,9 @@ use crate::browser::{Browser, BrowserEvent, OpenSession};
 use crate::panels::{self, start_tab_rename};
 use crate::workspace::{Workspace, WorkspaceEvent};
 
-const LIST_WIDTH: f32 = 250.;
+const LIST_WIDTH: f32 = 280.;
+/// The tool panels' share of the column under the sessions, to start with.
+const TOOLS_HEIGHT: f32 = 340.;
 const RAIL_WIDTH: f32 = 44.;
 /// What a session that was working when Keleuo quit is told when it starts again.
 const CONTINUE_MESSAGE: &str = "Keleuo was restarted while you were working. Continue where you left off.";
@@ -206,6 +209,8 @@ pub struct Shell {
     project_form: Option<ProjectForm>,
     /// Go to session (Cmd+K): what is typed, and the match picked.
     switcher: Option<Switcher>,
+    /// The tool panel shown under the sessions (Files, Changes, Agent, Skills).
+    tools_tab: &'static str,
     /// Sessions from the last run are being opened again: the saved list is not touched.
     restoring: bool,
     /// The open sessions as last saved (written again only when they change).
@@ -261,6 +266,7 @@ impl Shell {
             folder_rename: None,
             project_form: None,
             switcher: None,
+            tools_tab: "Files",
             restoring: false,
             saved: None,
             focus: cx.focus_handle(),
@@ -1111,6 +1117,12 @@ impl Shell {
             cx.subscribe_in(&ws, window, |shell, ws, ev: &WorkspaceEvent, window, cx| match ev {
                 WorkspaceEvent::AgentEdited(path) => shell.edited(ws.clone(), path.clone(), window, cx),
                 WorkspaceEvent::FreshStart => shell.fresh_from_summary(ws.clone(), window, cx),
+                WorkspaceEvent::ShowTool(name) => {
+                    // Only the shown session's tools are drawn.
+                    if shell.active_workspace().as_ref() == Some(ws) {
+                        shell.show_tool(name, cx);
+                    }
+                }
             }),
             // The row's name, dot, activity and cost follow the session and its workspace (drawn
             // again only when the row changed); its conversation id, once it has one, is kept
@@ -1621,6 +1633,17 @@ impl Shell {
                     input.update(cx, |i, cx| i.set_value(arg.to_string(), window, cx));
                 }
                 "ok".into()
+            }
+            "tools" => {
+                // Tests: `tools` toggles the tool panels; `tools <name>` shows that one.
+                match arg {
+                    "" => self.toggle_tools(cx),
+                    "Files" => self.show_tool("Files", cx),
+                    "Changes" => self.show_tool("Changes", cx),
+                    "Agent" => self.show_tool("Agent", cx),
+                    _ => self.show_tool("Skills", cx),
+                }
+                format!("tools={} tab={}", Self::tools_shown(cx), self.tools_tab)
             }
             "switch" => {
                 // Tests: Go to session, typing `arg`.
@@ -2204,6 +2227,63 @@ impl Shell {
         )
     }
 
+    /// Whether the tool panels show under the sessions (Cmd+B hides them).
+    fn tools_shown(cx: &App) -> bool {
+        !cx.global::<AppSettings>().0.borrow().layout.sidebar_folded
+    }
+
+    /// Show the tool panels under the sessions, or hide them (Cmd+B).
+    fn toggle_tools(&mut self, cx: &mut Context<Self>) {
+        let settings = cx.global::<AppSettings>().0.clone();
+        let folded = !settings.borrow().layout.sidebar_folded;
+        settings.borrow_mut().layout.sidebar_folded = folded;
+        let _ = settings.borrow().save();
+        cx.notify();
+    }
+
+    /// Show tool panel `name` under the sessions (unfolding them).
+    fn show_tool(&mut self, name: &'static str, cx: &mut Context<Self>) {
+        self.tools_tab = name;
+        if !Self::tools_shown(cx) {
+            self.toggle_tools(cx);
+        }
+        cx.notify();
+    }
+
+    /// The shown session's tool panels under the sessions: a row of tabs, then the one picked.
+    fn render_tools(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let ws = self.active_workspace()?;
+        let tools = ws.read(cx).tools(cx);
+        let picked = tools.iter().position(|(n, _)| *n == self.tools_tab).unwrap_or(0);
+        let theme = cx.theme();
+        let (fg, muted, hover, sel, border) = (crate::theme::list_text(cx), theme.muted_foreground, theme.secondary_hover, theme.secondary, theme.border);
+        let mut tabs = div().flex_none().h(px(34.)).px(px(8.)).flex().items_center().gap_1().border_t_1().border_color(border);
+        for (i, (name, _)) in tools.iter().enumerate() {
+            let name: &'static str = name;
+            tabs = tabs.child(
+                div()
+                    .id(SharedString::from(format!("tool-tab-{name}")))
+                    .h(px(26.))
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .rounded(px(6.))
+                    .text_size(px(12.5))
+                    .cursor_pointer()
+                    .text_color(if i == picked { fg } else { muted })
+                    .when(i == picked, |d| d.bg(sel))
+                    .when(i != picked, |d| d.hover(|d| d.bg(hover)))
+                    .child(name)
+                    .on_click(cx.listener(move |s, _, _, cx| {
+                        s.tools_tab = name;
+                        cx.notify();
+                    })),
+            );
+        }
+        let view = tools.into_iter().nth(picked).map(|(_, v)| v)?;
+        Some(div().size_full().flex().flex_col().child(tabs).child(div().flex_1().min_h_0().child(view)).into_any_element())
+    }
+
     /// Ask for a folder, then for the project's name.
     fn new_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let picked = cx.prompt_for_paths(PathPromptOptions { files: false, directories: true, multiple: false, prompt: Some("Make project".into()) });
@@ -2613,7 +2693,13 @@ impl Shell {
                     .child(div().text_xs().text_color(muted.opacity(0.7)).child("Cmd+N"))
                     .on_click(cx.listener(|s, _, window, cx| s.new_session(window, cx))),
             )
-            .child(col)
+            .child(match Self::tools_shown(cx).then(|| self.render_tools(cx)).flatten() {
+                Some(tools) => v_resizable("list-and-tools")
+                    .child(resizable_panel().size_range(px(120.)..Pixels::MAX).child(col))
+                    .child(resizable_panel().size(px(TOOLS_HEIGHT)).size_range(px(140.)..Pixels::MAX).child(tools))
+                    .into_any_element(),
+                None => col.into_any_element(),
+            })
             .child(crate::dock_skin::corner_cap(true, true, bg))
             .into_any_element()
     }
@@ -2966,15 +3052,14 @@ impl Render for Shell {
         // the folded sidebar did.
         let tools_menu = {
             let ws = self.active_workspace().map(|w| w.downgrade());
+            let me = cx.entity().downgrade();
             // Read when the menu opens, not on every frame.
             move |mut menu: PopupMenu, _: &mut Window, cx: &mut Context<PopupMenu>| {
-                let tools = ws.as_ref().and_then(|w| w.upgrade()).map(|w| w.read(cx).tool_panels(cx)).unwrap_or_default();
-                for (name, id) in tools.iter().copied() {
-                    let ws = ws.clone();
-                    menu = menu.item(PopupMenuItem::new(name).on_click(move |_, window, cx| {
-                        if let Some(ws) = ws.as_ref() {
-                            let _ = ws.update(cx, |w, cx| w.show_panel(id, window, cx));
-                        }
+                let tools = ws.as_ref().and_then(|w| w.upgrade()).map(|w| w.read(cx).tools(cx)).unwrap_or_default();
+                for (name, _) in tools {
+                    let me = me.clone();
+                    menu = menu.item(PopupMenuItem::new(name).on_click(move |_, _, cx| {
+                        let _ = me.update(cx, |s, cx| s.show_tool(name, cx));
                     }));
                 }
                 menu
@@ -3041,7 +3126,7 @@ impl Render for Shell {
                             )
                             .child(
                                 button("t-sidebar", Icon::new(IconName::PanelLeft), "Tool panels (Cmd+B; right-click for one)")
-                                    .on_click(to_ws(|w, win, cx| w.toggle_sidebar_pub(win, cx)))
+                                    .on_click(cx.listener(|s, _, _, cx| s.toggle_tools(cx)))
                                     .context_menu(tools_menu),
                             )
                             .child(
@@ -3131,6 +3216,7 @@ impl Render for Shell {
             .track_focus(&self.focus)
             .on_action(cx.listener(|s, _: &NewSession, w, cx| s.new_session(w, cx)))
             .on_action(cx.listener(|s, _: &SwitchSession, w, cx| s.open_switcher(w, cx)))
+            .on_action(cx.listener(|s, _: &ToggleSidebar, _, cx| s.toggle_tools(cx)))
             .on_action(cx.listener(|s, _: &ToggleSessions, _, cx| s.toggle_folded(cx)))
             .on_action(cx.listener(|s, _: &CloseSession, w, cx| {
                 let ix = s.active;
