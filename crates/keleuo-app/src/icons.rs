@@ -56,6 +56,8 @@ icon_assets!(
         Redo,
         // Send page to chat, in the web panel.
         MessageSquareShare,
+        // An asset card's Open.
+        Maximize2,
         // Settings > Tools > Packs: a pack, its services, where keys are kept.
         Package,
         Image,

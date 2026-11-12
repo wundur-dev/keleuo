@@ -60,14 +60,7 @@ impl AssetPanel {
                             .child(img(path).size_full().object_fit(ObjectFit::Contain))
                             .on_click(move |_, _, cx| crate::image_view::show(full.clone(), cx)),
                     )
-                    .child(
-                        div()
-                            .flex()
-                            .gap_2()
-                            .text_xs()
-                            .child(div().text_color(muted).child(format!("≈ {}", money(t.cents))))
-                            .when(ok, |d| d.child(div().text_color(green).child("✓ Approved"))),
-                    )
+                    .when(ok, |d| d.child(div().text_xs().text_color(green).child("✓ Approved")))
                     .child(div().text_xs().text_color(muted).line_clamp(2).child(t.asked.clone())),
             );
         }
@@ -99,7 +92,7 @@ impl AssetPanel {
                         Some(p) => div().size(px(180.)).rounded_md().overflow_hidden().border_1().border_color(border).child(img(self.dir.join(p)).size_full().object_fit(ObjectFit::Contain)),
                         None => div().size(px(180.)).rounded_md().border_1().border_color(border),
                     })
-                    .child(div().flex().gap_2().text_xs().child(div().text_color(muted).child(format!("≈ {}", money(m.cents)))).when(ok, |d| d.child(div().text_color(green).child("✓ Approved"))))
+                    .when(ok, |d| d.child(div().text_xs().text_color(green).child("✓ Approved")))
                     .child(div().flex().child(
                         gpui_kit::component::button::Button::new(SharedString::from(format!("hist-3d-{i}")))
                             .xsmall()
@@ -120,11 +113,6 @@ impl AssetPanel {
             .child(div().font_weight(FontWeight::SEMIBOLD).child("Models"))
             .child(if models.is_empty() { div().text_sm().text_color(muted).child("Nothing yet.") } else { row })
     }
-}
-
-fn money(cents: f32) -> String {
-    let cents = cents.max(0.0) + 0.0;
-    if cents < 100.0 { format!("{cents:.0}¢") } else { format!("${:.2}", cents / 100.0) }
 }
 
 fn capitalize(s: &str) -> String {
@@ -159,8 +147,7 @@ impl Render for AssetPanel {
                 .gap_3()
                 .child(div().text_lg().font_weight(FontWeight::SEMIBOLD).child(a.name.clone()))
                 .child(div().text_sm().text_color(muted).child(format!("{} · {}", capitalize(&a.kind), a.stage.label())))
-                .child(div().flex_1())
-                .child(div().text_sm().text_color(muted).child(format!("≈ {} so far", money(a.cents())))),
+                .child(div().flex_1()),
         )
         .child(div().text_sm().text_color(muted).child(a.brief.clone()))
         .child(div().text_xs().text_color(muted).child("Decide in the asset's card in the chat. Click a picture to see it full size."))
