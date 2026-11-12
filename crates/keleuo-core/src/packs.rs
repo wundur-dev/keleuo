@@ -1168,6 +1168,40 @@ mod tests {
     }
 
     #[test]
+    fn a_model_is_made_from_three_views() {
+        let cwd = scratch("views3d");
+        for v in ["front", "side", "back"] {
+            std::fs::write(cwd.join(format!("{v}.png")), format!("\x7fPNG {v}")).unwrap();
+        }
+        let uploads = std::sync::atomic::AtomicUsize::new(0);
+        let (port, seen) = stand_in(7, move |port, line, _| {
+            let json = "application/json";
+            let m = format!("http://127.0.0.1:{port}/m/knight");
+            match line.split_whitespace().take(2).collect::<Vec<_>>()[..] {
+                ["POST", "/v3/files"] => {
+                    let n = uploads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    (200, json, format!(r#"{{"code":0,"data":{{"file_token":"tok-{n}"}}}}"#).into_bytes())
+                }
+                ["POST", "/v3/generation/multiview-to-model"] => (200, json, br#"{"code":0,"data":{"task_id":"task_mv"}}"#.to_vec()),
+                ["GET", "/v3/tasks/task_mv"] => (200, json, format!(r#"{{"code":0,"data":{{"status":"success","output":{{"model_url":"{m}.glb","rendered_image_url":"{m}.webp"}}}}}}"#).into_bytes()),
+                ["GET", p] if p.starts_with("/m/knight.glb") => (200, "model/gltf-binary", b"glTF knight".to_vec()),
+                ["GET", p] if p.starts_with("/m/knight.webp") => (200, "image/webp", b"RIFF knight".to_vec()),
+                _ => (404, json, b"{}".to_vec()),
+            }
+        });
+        let settings = [("tripo_url", format!("http://127.0.0.1:{port}/v3")), ("poll_ms", "1".to_string())];
+        let out = run_game_tool("model_from_views", json!({ "front": "front.png", "side": "side.png", "back": "back.png", "name": "knight" }), &settings, &cwd);
+        assert!(!out.failed, "{}", out.text);
+        assert_eq!(out.files, [cwd.join("assets/generated/knight.glb")]);
+        let requests = seen.join().unwrap();
+        let start = requests.iter().find(|r| r.starts_with("POST /v3/generation/multiview-to-model")).unwrap();
+        assert!(start.contains(r#""inputs":[{"front":"tok-0"},{"right":"tok-1"},{"back":"tok-2"}]"#), "{start}");
+        // Two views at least.
+        assert!(run_game_tool("model_from_views", json!({ "front": "front.png" }), &[], &cwd).failed);
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
     fn a_script_that_runs_too_long_is_stopped() {
         let dir = std::env::temp_dir().join(format!("keleuo-pack-slow-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();

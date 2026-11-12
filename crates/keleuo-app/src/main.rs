@@ -22,6 +22,7 @@ use keleuo_core::host::{Host, LocalHost, SshHost};
 use keleuo_core::settings::Settings;
 
 mod about;
+mod asset_panel;
 mod actions;
 mod app_icon;
 mod attention;

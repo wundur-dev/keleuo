@@ -1,7 +1,7 @@
 {
   "id": "wundur/game-assets",
   "name": "Game assets",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Images, sound, music, voices and 3D models for games, with your own keys.",
   "homepage": "https://github.com/wundur-dev/keleuo",
   "services": [
@@ -510,6 +510,60 @@
           "name": "name",
           "kind": "text",
           "description": "File name to save as, without extension (default: the image's name)."
+        }
+      ],
+      "needs": [
+        "TRIPO_API_KEY"
+      ],
+      "cost": "uses Tripo credits, per model",
+      "timeout_secs": 600,
+      "service": "models"
+    },
+    {
+      "name": "model_from_views",
+      "description": "Make a 3D model (GLB, textured) with Tripo from views of one subject in the project: the front, and at least one of side (its right), back, left. More reliable than one image: give consistent views of the same design (make_image or edit_image can make them from one image). Saves it with a preview image you can look at. Takes a minute or a few.",
+      "script": "model3d.js",
+      "params": [
+        {
+          "name": "front",
+          "kind": "text",
+          "required": true,
+          "description": "The front view, a path in the project."
+        },
+        {
+          "name": "side",
+          "kind": "text",
+          "description": "The right side view (in profile), a path in the project."
+        },
+        {
+          "name": "back",
+          "kind": "text",
+          "description": "The back view, a path in the project."
+        },
+        {
+          "name": "left",
+          "kind": "text",
+          "description": "The left side view, a path in the project."
+        },
+        {
+          "name": "faces",
+          "kind": "number",
+          "description": "Most faces the mesh may have (lower for games and mobile)."
+        },
+        {
+          "name": "texture_quality",
+          "kind": "choice",
+          "choices": [
+            "fast",
+            "standard",
+            "detailed"
+          ],
+          "description": "Texture detail. Default standard."
+        },
+        {
+          "name": "name",
+          "kind": "text",
+          "description": "File name to save as, without extension (default: the front view's name)."
         }
       ],
       "needs": [

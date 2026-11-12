@@ -46,11 +46,14 @@ struct Factory {
     doc_ctx: DocContext,
     shell: keleuo_core::host::CommandSpec,
     session: Entity<AgentSession>,
+    /// The session's folder (an asset tab's project).
+    root: PathBuf,
     /// Panels made while loading, for the workspace to wire up afterwards.
     made: RefCell<Vec<Made>>,
 }
 
 enum Made {
+    Asset(Entity<crate::asset_panel::AssetPanel>),
     Doc(Entity<DocPanel>),
     Terminal(Entity<TerminalView>),
     Agent(Entity<ChatPanel>),
@@ -129,6 +132,16 @@ pub fn register_panels(cx: &mut App) {
         f.made.borrow_mut().push(Made::Agent(view.clone()));
         panel_handle(view)
     });
+    register_panel(cx, "Asset", |ctx, window, cx| {
+        let f = factory(&ctx, cx).expect("a workspace for this dock");
+        let dir = match ctx.info() {
+            PanelInfo::Panel(v) => v.get("dir").and_then(|d| d.as_str()).filter(|d| !d.is_empty()).map(PathBuf::from),
+            _ => None,
+        };
+        let view = cx.new(|cx| crate::asset_panel::AssetPanel::new(f.root.clone(), dir, window, cx));
+        f.made.borrow_mut().push(Made::Asset(view.clone()));
+        panel_handle(view)
+    });
     register_panel(cx, "Web", |ctx, window, cx| {
         let f = factory(&ctx, cx).expect("a workspace for this dock");
         let url = match ctx.info() {
@@ -171,6 +184,8 @@ pub struct Workspace {
     /// Docked views of subagents, one per subagent watched.
     agent_views: Vec<Entity<ChatPanel>>,
     webs: Vec<Entity<WebPanel>>,
+    /// Game assets being made (see `asset_panel`).
+    assets: Vec<Entity<crate::asset_panel::AssetPanel>>,
     doc_ctx: DocContext,
     /// Docs and terminals, most recently shown first: where new ones open.
     recent_code: Vec<EntityId>,
@@ -267,6 +282,7 @@ impl Workspace {
                 ChatPanelEvent::RunCommand(command) => ws.run_in_terminal(command.clone(), window, cx),
                 ChatPanelEvent::ShowChanges => ws.show_changes(window, cx),
                 ChatPanelEvent::FreshStart => cx.emit(WorkspaceEvent::FreshStart),
+                ChatPanelEvent::NewAsset => ws.open_asset(None, window, cx),
                 ChatPanelEvent::Closed | ChatPanelEvent::Activated => {}
             },
         ));
@@ -330,6 +346,7 @@ impl Workspace {
             panel_subs: HashMap::new(),
             agent_views: Vec::new(),
             webs: Vec::new(),
+            assets: Vec::new(),
             _watch: watch,
             _subs: subs,
         };
@@ -486,6 +503,7 @@ impl Workspace {
             doc_ctx: self.doc_ctx.clone(),
             shell: self.host.shell_command(&self.root),
             session: self.session.clone(),
+            root: self.root.clone(),
             made: RefCell::new(Vec::new()),
         });
         cx.global_mut::<Factories>()
@@ -507,6 +525,7 @@ impl Workspace {
                 Made::Terminal(view) => self.adopt_terminal(view, window, cx),
                 Made::Agent(view) => self.adopt_agent(view, window, cx),
                 Made::Web(view) => self.adopt_web(view, window, cx),
+                Made::Asset(view) => self.adopt_asset(view, window, cx),
             }
         }
         // A layout saved before the Changes panel: it joins the Files group, behind Files.
@@ -764,7 +783,7 @@ impl Workspace {
                 ChatPanelEvent::RunCommand(command) => ws.run_in_terminal(command.clone(), window, cx),
                 ChatPanelEvent::ShowChanges => ws.show_changes(window, cx),
                 ChatPanelEvent::Activated => ws.touch_code(panel.entity_id()),
-                ChatPanelEvent::FreshStart => {}
+                ChatPanelEvent::FreshStart | ChatPanelEvent::NewAsset => {}
                 ChatPanelEvent::Closed => {
                     ws.agent_views.retain(|v| v.entity_id() != panel.entity_id());
                     ws.panel_subs.remove(&panel.entity_id());
@@ -817,6 +836,12 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // An asset's record opens the asset.
+        if crate::asset_panel::is_record(&path)
+            && let Some(dir) = path.parent()
+        {
+            return self.open_asset(Some(dir.to_path_buf()), window, cx);
+        }
         if jump && let Some(here) = self.current_location(cx) {
             self.back.push(here);
             self.forward.clear();
@@ -1103,6 +1128,41 @@ impl Workspace {
 
     /// A web page among the files and terminals; with no address, the address field waits for
     /// one.
+    /// Show the asset in `dir` (a folder with its record) in a tab, or the form for a new one.
+    pub fn open_asset(&mut self, dir: Option<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(d) = &dir
+            && let Some(view) = self.assets.iter().find(|a| &a.read(cx).dir == d).cloned()
+        {
+            self.show_panel(PanelId::from(view.entity_id()), window, cx);
+            return;
+        }
+        let root = self.root.clone();
+        let view = cx.new(|cx| crate::asset_panel::AssetPanel::new(root, dir, window, cx));
+        self.adopt_asset(view.clone(), window, cx);
+        self.place_code(panel_handle(view.clone()), window, cx);
+        let handle = view.read(cx).focus_handle(cx);
+        window.focus(&handle, cx);
+    }
+
+    fn adopt_asset(&mut self, view: Entity<crate::asset_panel::AssetPanel>, window: &mut Window, cx: &mut Context<Self>) {
+        use crate::asset_panel::AssetEvent;
+        let id = view.entity_id();
+        let sub = cx.subscribe_in(&view, window, |ws, view, ev: &AssetEvent, window, cx| match ev {
+            AssetEvent::Activated => ws.touch_code(view.entity_id()),
+            AssetEvent::Changed => {
+                ws.schedule_save(window, cx);
+                cx.notify();
+            }
+            AssetEvent::Closed => {
+                ws.assets.retain(|a| a != view);
+                ws.panel_subs.remove(&view.entity_id());
+                cx.notify();
+            }
+        });
+        self.panel_subs.insert(id, vec![sub]);
+        self.assets.push(view);
+    }
+
     pub fn open_web(&mut self, url: String, window: &mut Window, cx: &mut Context<Self>) {
         let empty = url.trim().is_empty();
         let view = cx.new(|cx| WebPanel::new(url, window, cx));
@@ -1371,6 +1431,12 @@ impl Workspace {
             }
             "term" => self.new_terminal(window, cx),
             "web" => self.open_web(arg.to_string(), window, cx),
+            "new-asset" => self.open_asset(None, window, cx),
+            "asset" => {
+                // Tests: a command for the newest asset tab (see AssetPanel::test_command).
+                let Some(view) = self.assets.last().cloned() else { return "no asset tab".into() };
+                return view.update(cx, |a, cx| a.test_command(arg, window, cx));
+            }
             "diff" => self.open_diff(PathBuf::from(arg), None, window, cx),
             "run" => self.run_in_terminal(arg.to_string(), window, cx),
             "type" => {

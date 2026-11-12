@@ -57,6 +57,8 @@ pub enum ChatPanelEvent {
     ShowChanges,
     /// Carry on in a new session from a summary of this one.
     FreshStart,
+    /// Start a game asset (see `asset_panel`).
+    NewAsset,
 }
 
 pub struct ChatPanel {
@@ -905,6 +907,12 @@ impl ChatPanel {
                                     let _ = session.update(cx, |s, cx| s.compact(cx));
                                 },
                             ))
+                        })
+                        .item({
+                            let panel = panel.clone();
+                            gpui_kit::component::menu::PopupMenuItem::new("New game asset…").on_click(move |_, _, cx| {
+                                let _ = panel.update(cx, |_, cx| cx.emit(ChatPanelEvent::NewAsset));
+                            })
                         })
                         .item({
                             let panel = panel.clone();
