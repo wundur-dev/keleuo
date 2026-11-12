@@ -33,7 +33,9 @@ use crate::browser::{Browser, BrowserEvent, OpenSession};
 use crate::panels::{self, start_tab_rename};
 use crate::workspace::{Workspace, WorkspaceEvent};
 
-const LIST_WIDTH: f32 = 280.;
+/// The left column's width limits (dragged by its right edge; kept in the layout settings).
+const LIST_MIN: f32 = 200.;
+const LIST_MAX: f32 = 520.;
 /// The tool panels' share of the column under the sessions, to start with.
 const TOOLS_HEIGHT: f32 = 340.;
 const RAIL_WIDTH: f32 = 44.;
@@ -212,6 +214,8 @@ pub struct Shell {
     switcher: Option<Switcher>,
     /// The tool panel shown under the sessions (Files, Changes, Agent, Skills).
     tools_tab: &'static str,
+    /// The left column's right edge is being dragged.
+    list_resizing: bool,
     /// Its tabs along the bottom (drawn as the documents' are).
     tools_strip: Rc<crate::sheet_tabs::StripState>,
     /// Sessions from the last run are being opened again: the saved list is not touched.
@@ -270,6 +274,7 @@ impl Shell {
             project_form: None,
             switcher: None,
             tools_tab: "Files",
+            list_resizing: false,
             tools_strip: Rc::new(crate::sheet_tabs::StripState::default()),
             restoring: false,
             saved: None,
@@ -2690,12 +2695,28 @@ impl Shell {
         );
         // A lighter panel set into the window's grey frame, rounded at its top left (as Codex's
         // sidebar is): a heading, then New session as a row of its own.
+        let width = cx.global::<AppSettings>().0.borrow().layout.list_width.clamp(LIST_MIN, LIST_MAX);
         div()
-            .w(px(LIST_WIDTH))
+            .w(px(width))
             .flex_none()
             .h_full()
             .ml(px(6.))
             .relative()
+            // Its right edge: drag to make the column wider or narrower.
+            .child(
+                div()
+                    .id("list-resize")
+                    .absolute()
+                    .top_0()
+                    .right(px(-4.))
+                    .w(px(8.))
+                    .h_full()
+                    .cursor_col_resize()
+                    .on_mouse_down(MouseButton::Left, cx.listener(|s, _, _, cx| {
+                        s.list_resizing = true;
+                        cx.stop_propagation();
+                    })),
+            )
             .flex()
             .flex_col()
             .bg(crate::theme::tool_ground(cx))
@@ -3314,6 +3335,21 @@ impl Render for Shell {
                     .min_h_0()
                     .relative()
                     .flex()
+                    // Dragging the left column's edge: it follows the pointer, and is kept when
+                    // the button comes up.
+                    .when(self.list_resizing, |d| {
+                        d.cursor_col_resize()
+                            .on_mouse_move(cx.listener(|_, ev: &MouseMoveEvent, _, cx| {
+                                let width = (f32::from(ev.position.x) - 6.).clamp(LIST_MIN, LIST_MAX);
+                                cx.global::<AppSettings>().0.borrow_mut().layout.list_width = width;
+                                cx.notify();
+                            }))
+                            .on_mouse_up(MouseButton::Left, cx.listener(|s, _, _, cx| {
+                                s.list_resizing = false;
+                                let _ = cx.global::<AppSettings>().0.borrow().save();
+                                cx.notify();
+                            }))
+                    })
                     .children(list)
                     .child(
                         div()
