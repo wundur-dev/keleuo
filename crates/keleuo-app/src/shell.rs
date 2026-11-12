@@ -57,6 +57,9 @@ struct Tab {
     ws: Entity<Workspace>,
     /// What its row shows, kept up to date as the session changes (see [`Row`]).
     row: Row,
+    /// When it last did something: its transcript's time when it was opened, then each time
+    /// it starts or stops working or does something new.
+    changed: Option<std::time::SystemTime>,
 }
 
 /// What a session's row in the list (and the rail) shows, kept on the tab. The list draws from
@@ -72,6 +75,10 @@ struct Row {
     name: String,
     root: PathBuf,
     remote: bool,
+    /// The machine, for a session on another one.
+    host: Option<String>,
+    /// The folder's git branch, when it has one.
+    branch: Option<String>,
     folder: String,
     /// Folder, branch and machine.
     place: String,
@@ -123,6 +130,8 @@ impl Row {
             name: w.list_name(cx),
             root: w.root().to_path_buf(),
             remote: w.host().is_remote(),
+            host: w.host().is_remote().then(|| w.host().label().to_string()),
+            branch: w.branch().map(|b| b.to_string()),
             folder,
             place,
             worktree: w.worktree.is_some(),
@@ -195,6 +204,8 @@ pub struct Shell {
     folder_rename: Option<FolderRename>,
     /// A folder being made a project: the name asked for first.
     project_form: Option<ProjectForm>,
+    /// Go to session (Cmd+K): what is typed, and the match picked.
+    switcher: Option<Switcher>,
     /// Sessions from the last run are being opened again: the saved list is not touched.
     restoring: bool,
     /// The open sessions as last saved (written again only when they change).
@@ -217,6 +228,15 @@ pub struct Shell {
 impl Shell {
     pub fn new(start: Start, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let folded = cx.global::<AppSettings>().0.borrow().sessions_folded;
+        // The list says how long ago each session did something: drawn again once a minute so
+        // that stays true while nothing else changes.
+        cx.spawn(async move |this, cx| loop {
+            cx.background_executor().timer(std::time::Duration::from_secs(60)).await;
+            if this.update(cx, |_, cx| cx.notify()).is_err() {
+                break;
+            }
+        })
+        .detach();
         // The window's close button: with something to lose, ask (as quitting does) and keep
         // the window until the answer.
         let weak = cx.entity().downgrade();
@@ -240,6 +260,7 @@ impl Shell {
             rail_hover: false,
             folder_rename: None,
             project_form: None,
+            switcher: None,
             restoring: false,
             saved: None,
             focus: cx.focus_handle(),
@@ -1122,7 +1143,8 @@ impl Shell {
         self.subs.insert(ws.entity_id(), subs);
         let row = Row::of(ws.read(cx), cx);
         let at = at.min(self.tabs.len());
-        self.tabs.insert(at, Tab { number, ws, row });
+        let changed = transcript_time(ws.read(cx), &row, cx);
+        self.tabs.insert(at, Tab { number, ws, row, changed });
         if at <= self.active && self.tabs.len() > 1 {
             self.active += 1;
         }
@@ -1216,6 +1238,9 @@ impl Shell {
         let row = Row::of(ws.read(cx), cx);
         if tab.row == row {
             return false;
+        }
+        if tab.row.dot != row.dot || tab.row.activity != row.activity || tab.row.summary != row.summary {
+            tab.changed = Some(std::time::SystemTime::now());
         }
         tab.row = row;
         true
@@ -1597,6 +1622,19 @@ impl Shell {
                 }
                 "ok".into()
             }
+            "switch" => {
+                // Tests: Go to session, typing `arg`.
+                self.open_switcher(window, cx);
+                if let Some(sw) = &self.switcher {
+                    let input = sw.input.clone();
+                    input.update(cx, |i, cx| i.set_value(arg.to_string(), window, cx));
+                }
+                "ok".into()
+            }
+            "switch-go" => {
+                self.switch_to_picked(window, cx);
+                format!("active={}", self.name(self.active, cx))
+            }
             "project-create" => {
                 self.create_project(cx);
                 "ok".into()
@@ -1833,7 +1871,8 @@ impl Shell {
 
     /// A session's row in the list: its dot, name, folder, what it's doing; rename and close on
     /// hover; drag to reorder.
-    fn session_row(&self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
+    /// A session's row in the full list; `project`, the root of the project it is listed under.
+    fn session_row(&self, ix: usize, project: Option<&Path>, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
         let (fg, muted, border, hover, ring, sel) =
             (crate::theme::list_text(cx), theme.muted_foreground, theme.border, theme.secondary_hover, theme.ring, theme.secondary);
@@ -1841,7 +1880,23 @@ impl Shell {
         let active = ix == self.active && self.browser.is_none();
         let number = self.tabs[ix].number;
         let row = &self.tabs[ix].row;
-        let place = row.place.clone();
+        // Under its project: where in it (when deeper), its branch, and when it last did
+        // something. Else its folder, branch and machine.
+        let place = match project {
+            Some(root) => {
+                let key = project_root_of(row);
+                let deeper = key.strip_prefix(root).ok().filter(|r| !r.as_os_str().is_empty()).map(|r| r.display().to_string());
+                let parts: Vec<String> = deeper.into_iter().chain(row.branch.clone()).chain(self.tabs[ix].changed.map(ago)).collect();
+                if parts.is_empty() { row.place.clone() } else { parts.join(" · ") }
+            }
+            None => row.place.clone(),
+        };
+        // What it is doing, in words, where its cost would show.
+        let status = row.dot.map(|d| match d {
+            Dot::Permission | Dot::Asking => ("Needs you", theme.yellow),
+            Dot::Working => ("Working", theme.green),
+            Dot::Agents => ("Agents working", theme.green.opacity(0.8)),
+        });
         let worktree = row.worktree.then_some(());
         let activity = row.activity.clone();
         // Once a turn is over and summarised: its headline, how it ended when it needs the
@@ -1904,7 +1959,10 @@ impl Shell {
                                 .items_center()
                                 .gap_1()
                                 .child(div().flex_1().min_w_0().truncate().text_sm().text_color(fg).child(title))
-                                .children(cost.map(|(c, color)| div().flex_none().text_size(px(10.5)).text_color(color).child(c))),
+                                .children(match status {
+                                    Some((word, color)) => Some(div().flex_none().text_size(px(11.)).font_weight(FontWeight::MEDIUM).text_color(color).child(word)),
+                                    None => cost.map(|(c, color)| div().flex_none().text_size(px(10.5)).text_color(color).child(c)),
+                                }),
                         )
                         .child(
                             div()
@@ -1998,6 +2056,152 @@ impl Shell {
                 }))
                 .context_menu(menu)
                 .into_any_element()
+    }
+
+    /// Go to session (Cmd+K): a field over the window listing the sessions whose name or
+    /// project matches what is typed.
+    pub fn open_switcher(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.tabs.is_empty() {
+            return;
+        }
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder("Go to a session or project…"));
+        input.update(cx, |i, cx| i.focus(window, cx));
+        let sub = cx.subscribe_in(&input, window, |s, _, ev: &InputEvent, window, cx| match ev {
+            InputEvent::PressEnter { .. } => s.switch_to_picked(window, cx),
+            InputEvent::Change => {
+                if let Some(sw) = s.switcher.as_mut() {
+                    sw.picked = 0;
+                }
+                cx.notify();
+            }
+            _ => {}
+        });
+        self.switcher = Some(Switcher { input, picked: 0, _sub: sub });
+        cx.notify();
+    }
+
+    /// The sessions matching what is typed in Go to session, in the list's order, each with
+    /// its project's name. Every word typed must be in the session's name or its project's.
+    fn switcher_matches(&self, cx: &App) -> Vec<(usize, String)> {
+        let Some(sw) = &self.switcher else { return Vec::new() };
+        let query = sw.input.read(cx).value().to_lowercase();
+        let words: Vec<&str> = query.split_whitespace().collect();
+        let (projects, groups) = self.groups(cx);
+        let mut found = Vec::new();
+        for (group, members) in groups {
+            let project = group.map(|pi| panels::tab_label(&project_key(&projects[pi].root), projects[pi].name.clone(), cx)).unwrap_or_default();
+            for ix in members {
+                let hay = format!("{} {}", self.name(ix, cx), project).to_lowercase();
+                if words.iter().all(|w| hay.contains(w)) {
+                    found.push((ix, project.clone()));
+                }
+            }
+        }
+        found
+    }
+
+    fn switch_to_picked(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let picked = self.switcher.as_ref().map_or(0, |s| s.picked);
+        let target = self.switcher_matches(cx).get(picked).map(|(ix, _)| self.tabs[*ix].number);
+        self.switcher = None;
+        if let Some(ix) = target.and_then(|n| self.tabs.iter().position(|t| t.number == n)) {
+            self.activate(ix, window, cx);
+        }
+        cx.notify();
+    }
+
+    fn render_switcher(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let sw = self.switcher.as_ref()?;
+        let matches = self.switcher_matches(cx);
+        let theme = cx.theme();
+        let (fg, muted, border, bg, sel) = (theme.foreground, theme.muted_foreground, theme.border, theme.background, theme.secondary);
+        let picked = sw.picked.min(matches.len().saturating_sub(1));
+        let mut list = div().id("switcher-list").flex().flex_col().max_h(px(360.)).overflow_y_scroll();
+        for (i, (ix, project)) in matches.iter().enumerate() {
+            let number = self.tabs[*ix].number;
+            let status = self.tabs[*ix].row.dot.map(|d| match d {
+                Dot::Permission | Dot::Asking => "Needs you",
+                Dot::Working => "Working",
+                Dot::Agents => "Agents working",
+            });
+            let detail = [Some(project.clone()).filter(|p| !p.is_empty()), status.map(String::from)].into_iter().flatten().collect::<Vec<_>>().join(" · ");
+            list = list.child(
+                div()
+                    .id(("switcher-row", number))
+                    .px_2()
+                    .py(px(5.))
+                    .rounded_md()
+                    .flex()
+                    .flex_col()
+                    .cursor_pointer()
+                    .when(i == picked, |d| d.bg(sel))
+                    .child(div().truncate().text_sm().text_color(fg).child(self.name(*ix, cx)))
+                    .child(div().truncate().text_xs().text_color(muted).child(detail))
+                    .on_click(cx.listener(move |s, _, window, cx| {
+                        s.switcher = None;
+                        if let Some(ix) = s.tabs.iter().position(|t| t.number == number) {
+                            s.activate(ix, window, cx);
+                        }
+                        cx.notify();
+                    })),
+            );
+        }
+        let count = matches.len();
+        Some(
+            div()
+                .id("switcher")
+                .absolute()
+                .inset_0()
+                .flex()
+                .justify_center()
+                .items_start()
+                .pt(px(90.))
+                .bg(gpui_kit::black().opacity(0.25))
+                .occlude()
+                .on_mouse_down(MouseButton::Left, cx.listener(|s, _, _, cx| {
+                    s.switcher = None;
+                    cx.notify();
+                }))
+                .capture_key_down(cx.listener(move |s, ev: &KeyDownEvent, _, cx| {
+                    let step: isize = match ev.keystroke.key.as_str() {
+                        "escape" => {
+                            s.switcher = None;
+                            cx.stop_propagation();
+                            cx.notify();
+                            return;
+                        }
+                        "down" => 1,
+                        "up" => -1,
+                        _ => return,
+                    };
+                    if let Some(sw) = s.switcher.as_mut()
+                        && count > 0
+                    {
+                        sw.picked = (sw.picked as isize + step).rem_euclid(count as isize) as usize;
+                    }
+                    cx.stop_propagation();
+                    cx.notify();
+                }))
+                .child(
+                    div()
+                        .id("switcher-box")
+                        .w(px(480.))
+                        .p_2()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .rounded_lg()
+                        .border_1()
+                        .border_color(border)
+                        .bg(bg)
+                        .shadow_lg()
+                        // A press inside is not a press outside (which closes it).
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .child(Input::new(&sw.input).small())
+                        .child(if count == 0 { div().p_2().text_xs().text_color(muted).child("No session matches.").into_any_element() } else { list.into_any_element() }),
+                )
+                .into_any_element(),
+        )
     }
 
     /// Ask for a folder, then for the project's name.
@@ -2135,7 +2339,7 @@ impl Shell {
             .when(waiting > 0, |d| d.child(div().flex_none().text_size(px(10.5)).text_color(yellow).child(format!("{waiting} waiting"))))
             .when(working > 0, |d| d.child(div().flex_none().text_size(px(10.5)).text_color(green).child(format!("{working} working"))))
             .when(waiting == 0 && working == 0, |d| d.child(div().flex_none().text_size(px(10.5)).text_color(muted).child(members.len().to_string())))
-            .child(
+            .when(!is_remote_project(&project.root), |d| d.child(
                 Button::new(("project-session", pi))
                     .icon(IconName::Plus)
                     .xsmall()
@@ -2145,42 +2349,52 @@ impl Shell {
                         cx.stop_propagation();
                         s.open_browser(Arc::new(LocalHost), root.clone(), None, window, cx);
                     })),
-            )
+            ))
             .on_click(move |_, _, cx| Self::toggle_project(root2.clone(), cx))
-            .context_menu(move |menu, _, _| {
+            .context_menu(move |menu, _, cx| {
                 let (k, a, r) = (k1.clone(), a1.clone(), root3.clone());
+                let saved = cx.global::<AppSettings>().0.borrow().projects.iter().any(|p| p.root == r);
                 menu.item(PopupMenuItem::new("Rename").on_click(move |_, window, cx| start_tab_rename(k.clone(), a.clone(), a.clone(), window, cx)))
-                    .item(PopupMenuItem::new("Remove project (its sessions stay)").on_click(move |_, _, cx| {
-                        let r = r.clone();
-                        crate::settings_window::change(cx, move |s| s.projects.retain(|p| p.root != r));
-                    }))
+                    .when(saved, |m| {
+                        m.item(PopupMenuItem::new("Forget project (its sessions stay)").on_click(move |_, _, cx| {
+                            let r = r.clone();
+                            crate::settings_window::change(cx, move |s| s.projects.retain(|p| p.root != r));
+                        }))
+                    })
             })
             .into_any_element()
     }
 
-    /// The sessions as the lists show them: with projects, each project (by its index) and the
-    /// sessions in its folder or inside it, then the rest (`None`, Other) when there are any.
-    /// Without projects, one group of them all.
+    /// The sessions as the lists show them, by project: the projects kept in the settings
+    /// (named, folded, or with no session open), then one for each other folder with sessions
+    /// (a folder inside another such folder goes under it), and one per folder on each other
+    /// machine. Every session is in exactly one, so there is no Other.
     fn groups(&self, cx: &App) -> (Vec<keleuo_core::settings::Project>, Vec<Group>) {
-        let projects = cx.global::<AppSettings>().0.borrow().projects.clone();
-        if projects.is_empty() {
-            return (projects, vec![(None, (0..self.tabs.len()).collect())]);
+        let mut projects = cx.global::<AppSettings>().0.borrow().projects.clone();
+        let saved = projects.len();
+        // Each session's key: its folder, or `ssh://host/folder` on another machine.
+        let keys: Vec<PathBuf> = self.tabs.iter().map(|t| project_root_of(&t.row)).collect();
+        let mut homes: Vec<Option<usize>> =
+            keys.iter().map(|k| keleuo_core::settings::project_of(&projects, k).and_then(|p| projects.iter().position(|q| q.root == p.root))).collect();
+        // The other folders: the outermost ones become projects, in the order their first
+        // session is in.
+        let loose: Vec<&PathBuf> = keys.iter().zip(&homes).filter(|(_, h)| h.is_none()).map(|(k, _)| k).collect();
+        for ix in 0..self.tabs.len() {
+            if homes[ix].is_some() {
+                continue;
+            }
+            let key = &keys[ix];
+            let outer = loose.iter().filter(|o| key.starts_with(o)).min_by_key(|o| o.components().count()).map(|o| (*o).clone()).unwrap_or_else(|| key.clone());
+            let pi = match projects.iter().skip(saved).position(|p| p.root == outer) {
+                Some(i) => saved + i,
+                None => {
+                    projects.push(keleuo_core::settings::Project { name: project_default_name(&outer), root: outer, folded: false });
+                    projects.len() - 1
+                }
+            };
+            homes[ix] = Some(pi);
         }
-        let homes: Vec<Option<PathBuf>> = (0..self.tabs.len())
-            .map(|ix| {
-                let row = &self.tabs[ix].row;
-                if row.remote { None } else { keleuo_core::settings::project_of(&projects, &row.root).map(|p| p.root.clone()) }
-            })
-            .collect();
-        let mut groups: Vec<Group> = projects
-            .iter()
-            .enumerate()
-            .map(|(pi, p)| (Some(pi), (0..self.tabs.len()).filter(|ix| homes[*ix].as_ref() == Some(&p.root)).collect()))
-            .collect();
-        let others: Vec<usize> = (0..self.tabs.len()).filter(|ix| homes[*ix].is_none()).collect();
-        if !others.is_empty() {
-            groups.push((None, others));
-        }
+        let groups = (0..projects.len()).map(|pi| (Some(pi), (0..self.tabs.len()).filter(|ix| homes[*ix] == Some(pi)).collect())).collect();
         (projects, groups)
     }
 
@@ -2264,15 +2478,18 @@ impl Shell {
                 .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(w, cx))
         };
         mark.children(dot.map(|(c, _)| div().absolute().top(px(1.)).right(px(1.)).size(px(7.)).rounded_full().border_1().border_color(bg).bg(c)))
-            .context_menu(move |menu, _, _| {
+            .context_menu(move |menu, _, cx| {
                 let (w, r, n, r2) = (weak.clone(), r1.clone(), current.clone(), r2.clone());
+                let saved = cx.global::<AppSettings>().0.borrow().projects.iter().any(|p| p.root == r2);
                 menu.item(PopupMenuItem::new("Rename…").on_click(move |_, window, cx| {
                     let _ = w.update(cx, |s, cx| s.ask_project_name(r.clone(), n.clone(), true, window, cx));
                 }))
-                .item(PopupMenuItem::new("Remove project (its sessions stay)").on_click(move |_, _, cx| {
-                    let r = r2.clone();
-                    crate::settings_window::change(cx, move |s| s.projects.retain(|p| p.root != r));
-                }))
+                .when(saved, |m| {
+                    m.item(PopupMenuItem::new("Forget project (its sessions stay)").on_click(move |_, _, cx| {
+                        let r = r2.clone();
+                        crate::settings_window::change(cx, move |s| s.projects.retain(|p| p.root != r));
+                    }))
+                })
             })
             .into_any_element()
     }
@@ -2295,10 +2512,10 @@ impl Shell {
 
     /// Fold or unfold the project at `root`.
     fn toggle_project(root: PathBuf, cx: &mut App) {
-        crate::settings_window::change(cx, move |s| {
-            if let Some(p) = s.projects.iter_mut().find(|p| p.root == root) {
-                p.folded = !p.folded;
-            }
+        crate::settings_window::change(cx, move |s| match s.projects.iter_mut().find(|p| p.root == root) {
+            Some(p) => p.folded = !p.folded,
+            // One made of a folder's sessions: kept from now on, folded.
+            None => s.projects.push(keleuo_core::settings::Project { name: project_default_name(&root), root, folded: true }),
         });
     }
 
@@ -2315,8 +2532,9 @@ impl Shell {
                     let project = &projects[pi];
                     col = col.child(self.project_header(pi, project, &members, cx));
                     if !project.folded {
+                        let root = project.root.clone();
                         for ix in members {
-                            col = col.child(div().pl(px(12.)).child(self.session_row(ix, cx)));
+                            col = col.child(div().pl(px(12.)).child(self.session_row(ix, Some(&root), cx)));
                         }
                     }
                 }
@@ -2325,7 +2543,7 @@ impl Shell {
                         col = col.child(div().px(px(14.)).pt_3().pb_1().text_size(px(11.)).text_color(muted).child("Other"));
                     }
                     for ix in members {
-                        col = col.child(self.session_row(ix, cx));
+                        col = col.child(self.session_row(ix, None, cx));
                     }
                 }
             }
@@ -2361,7 +2579,7 @@ impl Shell {
                     .text_size(px(18.))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(fg)
-                    .child("Sessions")
+                    .child("Projects")
                     .child(div().flex_1())
                     .child(
                         Button::new("project-new")
@@ -2868,9 +3086,10 @@ impl Render for Shell {
         let list_shown = list.is_some();
         let folder_rename = self.render_folder_rename(cx);
         let project_form = self.render_project_form(cx);
+        let switcher = self.render_switcher(cx);
         // Web pages are native views over the window: they hide while an overlay is open.
         crate::web_panel::set_covered(
-            self.folder_rename.is_some() || self.project_form.is_some() || (self.folded && self.peek && !self.tabs.is_empty()) || crate::image_view::is_open(cx)
+            self.folder_rename.is_some() || self.project_form.is_some() || self.switcher.is_some() || (self.folded && self.peek && !self.tabs.is_empty()) || crate::image_view::is_open(cx)
                 || crate::skill_installer::is_open(cx),
         );
         // The folded list, peeking out over the content until the pointer leaves it.
@@ -2911,6 +3130,7 @@ impl Render for Shell {
             }))
             .track_focus(&self.focus)
             .on_action(cx.listener(|s, _: &NewSession, w, cx| s.new_session(w, cx)))
+            .on_action(cx.listener(|s, _: &SwitchSession, w, cx| s.open_switcher(w, cx)))
             .on_action(cx.listener(|s, _: &ToggleSessions, _, cx| s.toggle_folded(cx)))
             .on_action(cx.listener(|s, _: &CloseSession, w, cx| {
                 let ix = s.active;
@@ -2992,6 +3212,7 @@ impl Render for Shell {
             )
             .children(folder_rename)
             .children(project_form)
+            .children(switcher)
             .children(crate::skill_installer::render(cx))
             .children(crate::image_view::render(cx))
     }
@@ -3010,6 +3231,13 @@ enum RailItem {
     /// The divider before the sessions in no project.
     Other,
     Session(usize),
+}
+
+/// Go to session: the field to type in and which match is picked.
+struct Switcher {
+    input: Entity<InputState>,
+    picked: usize,
+    _sub: Subscription,
 }
 
 /// A folder about to be made a project, and the name asked for it.
@@ -3134,6 +3362,49 @@ pub fn loading_skeleton(cx: &App) -> AnyElement {
 /// The name store's key for a project (its name, renamed in the list as a session's is).
 fn project_key(root: &Path) -> String {
     format!("project:{}", root.display())
+}
+
+/// The project key of a session's folder: the folder, or `ssh://host/folder` for one on another
+/// machine (so its projects never mix with this machine's).
+fn project_root_of(row: &Row) -> PathBuf {
+    match &row.host {
+        Some(host) => PathBuf::from(format!("ssh://{host}{}", row.root.display())),
+        None => row.root.clone(),
+    }
+}
+
+/// When a session last wrote its transcript, as its agent can tell.
+fn transcript_time(w: &Workspace, row: &Row, cx: &App) -> Option<std::time::SystemTime> {
+    let id = row.short_id.as_ref()?;
+    w.session.read(cx).backend.session_modified(w.host().as_ref(), &row.root, id)
+}
+
+/// How long ago `t` was, shortly: "just now", "12m", "3h", "2d".
+fn ago(t: std::time::SystemTime) -> String {
+    let secs = t.elapsed().map(|d| d.as_secs()).unwrap_or(0);
+    match secs {
+        0..60 => "just now".into(),
+        60..3600 => format!("{}m", secs / 60),
+        3600..86_400 => format!("{}h", secs / 3600),
+        _ => format!("{}d", secs / 86_400),
+    }
+}
+
+/// Whether a project key is a folder on another machine.
+fn is_remote_project(root: &Path) -> bool {
+    root.to_string_lossy().starts_with("ssh://")
+}
+
+/// A project's name before it is given one: its folder's, with the machine for another one's.
+fn project_default_name(root: &Path) -> String {
+    let text = root.to_string_lossy();
+    match text.strip_prefix("ssh://") {
+        Some(rest) => {
+            let host = rest.split('/').next().unwrap_or(rest);
+            format!("{} ({host})", folder_name(Path::new(rest)))
+        }
+        None => folder_name(root),
+    }
 }
 
 /// Make `root` a project, named after its folder (once).

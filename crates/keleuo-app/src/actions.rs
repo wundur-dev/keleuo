@@ -19,6 +19,7 @@ actions!(
         AskClaude,
         NewTerminal,
         NewSession,
+        SwitchSession,
         CloseSession,
         SplitRight,
         SplitDown,
@@ -69,6 +70,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-l", AskClaude, None),
         KeyBinding::new("cmd-t", NewTerminal, None),
         KeyBinding::new("cmd-n", NewSession, None),
+        KeyBinding::new("cmd-k", SwitchSession, None),
         // In a terminal Tab is the program's (completion, a TUI's fields), not the window's move
         // to the next control: unbound there, it reaches the terminal, which sends it on.
         KeyBinding::new("tab", gpui_kit::NoAction, Some("Terminal")),
@@ -128,6 +130,7 @@ pub fn menus(cx: &App) -> Vec<Menu> {
             MenuItem::action("Rename Tab", RenameTab),
             MenuItem::separator(),
             MenuItem::action("New Session", NewSession),
+            MenuItem::action("Go to Session…", SwitchSession),
             MenuItem::action("Close Session", CloseSession),
             MenuItem::action("Rename Session", RenameSession),
             MenuItem::action("Rename Folder…", RenameFolder),
