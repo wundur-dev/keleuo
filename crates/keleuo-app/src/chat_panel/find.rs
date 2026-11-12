@@ -89,7 +89,6 @@ impl ChatPanel {
             }
             self.toggled.extend(f.closed);
             self.list.remeasure();
-            self.latest.list.remeasure();
         }
         self.found = None;
         self.pending_find = None;
@@ -268,7 +267,6 @@ impl ChatPanel {
         }
         if changed {
             self.list.remeasure();
-            self.latest.list.remeasure();
         }
     }
 

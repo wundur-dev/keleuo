@@ -257,11 +257,6 @@ fn chat() -> SettingPage {
                 |s| s.cost_display.clone(),
                 |s, v| s.cost_display = v.to_string(),
             ),
-            pref(
-                "Keep the latest messages in view",
-                "Scrolled up in a chat, the current turn stays in a pane under it, following it as it grows. Drag the line above it to change its height.",
-                |p| &mut p.latest_pane,
-            ),
             {
                 use keleuo_core::sandbox::{self, Support};
                 let sandbox = sandbox::system();
