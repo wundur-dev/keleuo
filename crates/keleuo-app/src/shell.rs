@@ -1584,6 +1584,19 @@ impl Shell {
                 self.ask_new_project(PathBuf::from(arg), window, cx);
                 "ok".into()
             }
+            "project-rename" => {
+                // Tests: the Rename project dialog for a project's folder.
+                self.ask_project_name(PathBuf::from(arg), folder_name(Path::new(arg)), true, window, cx);
+                "ok".into()
+            }
+            "project-name" => {
+                // Tests: type into the project dialog.
+                if let Some(f) = &self.project_form {
+                    let input = f.input.clone();
+                    input.update(cx, |i, cx| i.set_value(arg.to_string(), window, cx));
+                }
+                "ok".into()
+            }
             "project-create" => {
                 self.create_project(cx);
                 "ok".into()
@@ -2000,7 +2013,13 @@ impl Shell {
 
     /// Ask what to call the project made of `root` (its folder's name to start with).
     pub fn ask_new_project(&mut self, root: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
-        let input = cx.new(|cx| InputState::new(window, cx).default_value(folder_name(&root)));
+        let name = folder_name(&root);
+        self.ask_project_name(root, name, false, window, cx);
+    }
+
+    /// The project dialog: a new project's name, or (`renaming`) a new name for one.
+    fn ask_project_name(&mut self, root: PathBuf, name: String, renaming: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let input = cx.new(|cx| InputState::new(window, cx).default_value(name));
         input.update(cx, |i, cx| {
             i.focus(window, cx);
             i.select_all(window, cx);
@@ -2010,7 +2029,7 @@ impl Shell {
                 s.create_project(cx);
             }
         });
-        self.project_form = Some(ProjectForm { root, input, _sub: sub });
+        self.project_form = Some(ProjectForm { root, input, renaming, _sub: sub });
         cx.notify();
     }
 
@@ -2059,7 +2078,7 @@ impl Shell {
                         .border_color(border)
                         .bg(bg)
                         .shadow_lg()
-                        .child(div().text_base().font_weight(FontWeight::SEMIBOLD).text_color(fg).child("New project"))
+                        .child(div().text_base().font_weight(FontWeight::SEMIBOLD).text_color(fg).child(if f.renaming { "Rename project" } else { "New project" }))
                         .child(div().text_xs().text_color(muted).child(f.root.display().to_string()))
                         .child(Input::new(&f.input).small())
                         .child(
@@ -2079,7 +2098,7 @@ impl Shell {
                                     s.project_form = None;
                                     cx.notify();
                                 })))
-                                .child(Button::new("project-form-go").small().primary().label("Create").on_click(cx.listener(|s, _, _, cx| s.create_project(cx)))),
+                                .child(Button::new("project-form-go").small().primary().label(if f.renaming { "Rename" } else { "Create" }).on_click(cx.listener(|s, _, _, cx| s.create_project(cx)))),
                         ),
                 )
                 .into_any_element(),
@@ -2220,6 +2239,7 @@ impl Shell {
             .cursor_pointer()
             .hover(|d| d.bg(hover))
             .on_click(move |_, _, cx| Self::toggle_project(root.clone(), cx));
+        let (weak, r1, r2, current) = (cx.entity().downgrade(), project.root.clone(), project.root.clone(), name.clone());
         let mark = if wide {
             mark.mx(px(4.))
                 .pl(inset - px(4.))
@@ -2244,6 +2264,16 @@ impl Shell {
                 .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(w, cx))
         };
         mark.children(dot.map(|(c, _)| div().absolute().top(px(1.)).right(px(1.)).size(px(7.)).rounded_full().border_1().border_color(bg).bg(c)))
+            .context_menu(move |menu, _, _| {
+                let (w, r, n, r2) = (weak.clone(), r1.clone(), current.clone(), r2.clone());
+                menu.item(PopupMenuItem::new("Rename…").on_click(move |_, window, cx| {
+                    let _ = w.update(cx, |s, cx| s.ask_project_name(r.clone(), n.clone(), true, window, cx));
+                }))
+                .item(PopupMenuItem::new("Remove project (its sessions stay)").on_click(move |_, _, cx| {
+                    let r = r2.clone();
+                    crate::settings_window::change(cx, move |s| s.projects.retain(|p| p.root != r));
+                }))
+            })
             .into_any_element()
     }
 
@@ -2986,6 +3016,8 @@ enum RailItem {
 struct ProjectForm {
     root: PathBuf,
     input: Entity<InputState>,
+    /// Renaming a project, not making one.
+    renaming: bool,
     _sub: Subscription,
 }
 
