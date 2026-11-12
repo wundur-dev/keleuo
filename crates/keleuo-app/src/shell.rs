@@ -2257,6 +2257,35 @@ impl Shell {
         let picked = tools.iter().position(|(n, _)| *n == self.tools_tab).unwrap_or(0);
         let theme = cx.theme();
         let (fg, muted, hover, sel, border) = (crate::theme::list_text(cx), theme.muted_foreground, theme.secondary_hover, theme.secondary, theme.border);
+        // A title bar: the panel shown and whose it is (the session's folder and branch), and
+        // a button that hides the panels (as Cmd+B does).
+        let row = &self.tabs[self.active].row;
+        let whose = match &row.branch {
+            Some(b) => format!("{} · {b}", row.folder),
+            None => row.folder.clone(),
+        };
+        let title = div()
+            .flex_none()
+            .h(px(32.))
+            .pl(px(12.))
+            .pr(px(6.))
+            .flex()
+            .items_center()
+            .gap_2()
+            .border_t_1()
+            .border_b_1()
+            .border_color(border)
+            .child(div().flex_none().text_size(px(12.5)).font_weight(FontWeight::SEMIBOLD).text_color(fg).child(self.tools_tab_name(&tools, picked)))
+            .child(div().flex_1().min_w_0().truncate().text_size(px(11.5)).text_color(muted).child(whose))
+            .child(
+                Button::new("tools-hide")
+                    .icon(IconName::ChevronDown)
+                    .xsmall()
+                    .ghost()
+                    .tooltip("Hide the panels (Cmd+B)")
+                    .on_click(cx.listener(|s, _, _, cx| s.toggle_tools(cx))),
+            );
+        // The tabs, along the bottom.
         let mut tabs = div().flex_none().h(px(34.)).px(px(8.)).flex().items_center().gap_1().border_t_1().border_color(border);
         for (i, (name, _)) in tools.iter().enumerate() {
             let name: &'static str = name;
@@ -2281,7 +2310,11 @@ impl Shell {
             );
         }
         let view = tools.into_iter().nth(picked).map(|(_, v)| v)?;
-        Some(div().size_full().flex().flex_col().child(tabs).child(div().flex_1().min_h_0().child(view)).into_any_element())
+        Some(div().size_full().flex().flex_col().child(title).child(div().flex_1().min_h_0().child(view)).child(tabs).into_any_element())
+    }
+
+    fn tools_tab_name(&self, tools: &[(&'static str, AnyView)], picked: usize) -> &'static str {
+        tools.get(picked).map_or(self.tools_tab, |(n, _)| *n)
     }
 
     /// Ask for a folder, then for the project's name.
