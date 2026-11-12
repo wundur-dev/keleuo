@@ -1151,8 +1151,9 @@ impl Workspace {
     fn adopt_asset(&mut self, view: Entity<crate::asset_panel::AssetPanel>, window: &mut Window, cx: &mut Context<Self>) {
         use crate::asset_panel::AssetEvent;
         let id = view.entity_id();
-        let sub = cx.subscribe_in(&view, window, |ws, view, ev: &AssetEvent, _, cx| match ev {
+        let sub = cx.subscribe_in(&view, window, |ws, view, ev: &AssetEvent, window, cx| match ev {
             AssetEvent::Activated => ws.touch_code(view.entity_id()),
+            AssetEvent::OpenPage(page) => ws.open_web(keleuo_core::web::file_url(page), window, cx),
             AssetEvent::Closed => {
                 ws.assets.retain(|a| a != view);
                 ws.panel_subs.remove(&view.entity_id());

@@ -15,6 +15,8 @@ use crate::asset_store;
 /// What the workspace hears from an asset tab.
 pub enum AssetEvent {
     Activated,
+    /// Show a page (the 3D viewer's) in a web tab.
+    OpenPage(PathBuf),
     Closed,
 }
 
@@ -78,6 +80,48 @@ impl AssetPanel {
     }
 }
 
+impl AssetPanel {
+    /// The models: each try's preview, with View in 3D (the viewer in a web tab beside it).
+    fn models(&self, models: &[Attempt], approved: Option<&str>, cx: &mut Context<Self>) -> Div {
+        let theme = cx.theme();
+        let (muted, green, border) = (theme.muted_foreground, theme.green, theme.border);
+        let mut row = div().flex().flex_wrap().gap_3();
+        for (i, m) in models.iter().enumerate() {
+            let (dir, file) = (self.dir.clone(), m.file.clone());
+            let ok = approved == Some(m.file.as_str());
+            row = row.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .w(px(180.))
+                    .child(match &m.preview {
+                        Some(p) => div().size(px(180.)).rounded_md().overflow_hidden().border_1().border_color(border).child(img(self.dir.join(p)).size_full().object_fit(ObjectFit::Contain)),
+                        None => div().size(px(180.)).rounded_md().border_1().border_color(border),
+                    })
+                    .child(div().flex().gap_2().text_xs().child(div().text_color(muted).child(format!("≈ {}", money(m.cents)))).when(ok, |d| d.child(div().text_color(green).child("✓ Approved"))))
+                    .child(div().flex().child(
+                        gpui_kit::component::button::Button::new(SharedString::from(format!("hist-3d-{i}")))
+                            .xsmall()
+                            .label("View in 3D")
+                            .on_click(cx.listener(move |_, _, _, cx| {
+                                let me = cx.entity().downgrade();
+                                asset_store::view_3d(&dir, &file, cx, move |page, cx| {
+                                    let _ = me.update(cx, |_, cx| cx.emit(AssetEvent::OpenPage(page)));
+                                });
+                            })),
+                    )),
+            );
+        }
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(div().font_weight(FontWeight::SEMIBOLD).child("Models"))
+            .child(if models.is_empty() { div().text_sm().text_color(muted).child("Nothing yet.") } else { row })
+    }
+}
+
 fn money(cents: f32) -> String {
     let cents = cents.max(0.0) + 0.0;
     if cents < 100.0 { format!("{cents:.0}¢") } else { format!("${:.2}", cents / 100.0) }
@@ -122,6 +166,7 @@ impl Render for AssetPanel {
         .child(div().text_xs().text_color(muted).child("Decide in the asset's card in the chat. Click a picture to see it full size."))
         .child(self.section("Concepts", &concepts, &approved_concept, cx))
         .child(self.section("Views", &views, &approved_views, cx))
+        .child(self.models(&a.models, a.model.as_deref(), cx))
     }
 }
 

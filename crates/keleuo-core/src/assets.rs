@@ -84,8 +84,10 @@ pub struct Attempt {
     pub from: Option<String>,
     /// Which view, for a view.
     pub view: Option<View>,
-    /// Its quality as asked of the service (`low`, `medium`).
+    /// Its quality as asked of the service (`low`, `medium`), or the model version for a model.
     pub quality: String,
+    /// For a model: its preview image, relative to the asset's folder.
+    pub preview: Option<String>,
     /// What it cost, in US cents, as estimated from the service's price (not billed back).
     pub cents: f32,
     /// Seconds since 1970.
@@ -203,6 +205,8 @@ pub enum Make {
     Change { from: String, note: String },
     /// One of the views, from the approved concept.
     View(View),
+    /// The 3D model, from the approved views (Tripo).
+    Model,
 }
 
 /// The game-assets pack's id, whose image tools the asset steps use.
@@ -214,7 +218,10 @@ pub const PACK: &str = "wundur/game-assets";
 pub fn make(dir: &Path, asset: &mut Asset, what: &Make, pack: &crate::packs::Pack, grant: &crate::packs::Grant) -> Result<Attempt, String> {
     let project = grant.cwd;
     let rel = |p: &Path| p.strip_prefix(project).unwrap_or(p).to_string_lossy().to_string();
-    let n = asset.concepts.len() + asset.views.len() + 1;
+    let n = asset.concepts.len() + asset.views.len() + asset.models.len() + 1;
+    if *what == Make::Model {
+        return make_model(dir, asset, n, pack, grant);
+    }
     let (tool, args, quality, view, asked, from) = match what {
         Make::Concept { prompt } => {
             let prompt = if prompt.trim().is_empty() { asset.brief.clone() } else { prompt.clone() };
@@ -225,6 +232,7 @@ pub fn make(dir: &Path, asset: &mut Asset, what: &Make, pack: &crate::packs::Pac
             let args = serde_json::json!({ "image": rel(&dir.join(from)), "prompt": note, "quality": "low", "size": "1024x1024", "name": format!("concept-{n}") });
             ("edit_image", args, "low", None, note.clone(), Some(from.clone()))
         }
+        Make::Model => unreachable!(),
         Make::View(v) => {
             let Some(concept) = asset.concept.clone() else { return Err("Approve a concept first.".into()) };
             let args = serde_json::json!({
@@ -253,6 +261,7 @@ pub fn make(dir: &Path, asset: &mut Asset, what: &Make, pack: &crate::packs::Pac
         from,
         view,
         quality: quality.into(),
+        preview: None,
         cents: image_cents(quality),
         at: now(),
     };
@@ -261,6 +270,58 @@ pub fn make(dir: &Path, asset: &mut Asset, what: &Make, pack: &crate::packs::Pac
         None => asset.concepts.push(attempt.clone()),
     }
     Ok(attempt)
+}
+
+/// The model from the approved views, through the pack's `model_from_views` (Tripo).
+fn make_model(dir: &Path, asset: &mut Asset, n: usize, pack: &crate::packs::Pack, grant: &crate::packs::Grant) -> Result<Attempt, String> {
+    let project = grant.cwd;
+    let rel = |p: &Path| p.strip_prefix(project).unwrap_or(p).to_string_lossy().to_string();
+    let view = |v: View| asset.approved_view(v).map(|f| rel(&dir.join(f)));
+    let Some(front) = view(View::Front) else { return Err("Approve the front view first.".into()) };
+    let (side, back) = (view(View::Side), view(View::Back));
+    if side.is_none() && back.is_none() {
+        return Err("Approve the side or the back view too.".into());
+    }
+    let tool = pack.manifest.tools.iter().find(|t| t.name == "model_from_views").ok_or("The game-assets pack has no model_from_views tool (update the pack).")?.clone();
+    let mut settings = grant.settings.clone();
+    settings.insert("output_folder".into(), rel(dir));
+    let version = pack.values(Some(grant.settings)).get("model_version").cloned().unwrap_or_default();
+    let args = serde_json::json!({ "front": front, "side": side, "back": back, "name": format!("model-{n}") });
+    let inner = crate::packs::Grant { cwd: project, secret: grant.secret, settings: &settings, extra_hosts: grant.extra_hosts.clone(), allow_http: grant.allow_http };
+    let out = crate::packs::run(pack, &tool, &args, &inner);
+    if out.failed {
+        return Err(out.text);
+    }
+    let in_dir = |p: &Path| p.strip_prefix(dir).unwrap_or(p).to_string_lossy().to_string();
+    let glb = out.files.iter().find(|f| f.extension().is_some_and(|e| e == "glb")).ok_or_else(|| format!("No model came back ({}).", out.text))?;
+    let attempt = Attempt {
+        file: in_dir(glb),
+        asked: "the model from the approved views".into(),
+        from: None,
+        view: None,
+        quality: version.clone(),
+        preview: out.images.first().map(|p| in_dir(p)),
+        cents: model_cents(&version),
+        at: now(),
+    };
+    asset.models.push(attempt.clone());
+    Ok(attempt)
+}
+
+/// The estimated price of a Tripo model, in cents: about 30¢, a dollar for its P models (the
+/// owner's measured figures).
+pub fn model_cents(version: &str) -> f32 {
+    if version.starts_with('P') { 100.0 } else { 30.0 }
+}
+
+impl Asset {
+    /// Approve the model `file`: on to the rig.
+    pub fn approve_model(&mut self, file: &str) {
+        self.model = Some(file.to_string());
+        if self.stage < Stage::Rig {
+            self.stage = Stage::Rig;
+        }
+    }
 }
 
 /// Seconds since 1970.
@@ -358,6 +419,24 @@ mod tests {
         assert!(sent[2].contains("filename=\"concept-2.png\"") && sent[2].contains("A-pose"), "the view is made from the approved concept");
         assert_eq!((a.concepts.len(), a.views.len(), a.cents()), (2, 1, 12.0));
         let _ = std::fs::remove_dir_all(&project);
+    }
+
+    #[test]
+    fn a_model_needs_approved_views_and_moves_the_asset_on() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packs/game-assets");
+        let manifest = serde_json::from_str(&std::fs::read_to_string(root.join("pack.json")).unwrap()).unwrap();
+        let pack = crate::packs::Pack { manifest, dir: root };
+        let project = std::env::temp_dir();
+        let none = |_: &str| None;
+        let settings = std::collections::BTreeMap::new();
+        let grant = crate::packs::Grant { cwd: &project, secret: &none, settings: &settings, extra_hosts: vec![], allow_http: false };
+        let mut a = Asset::default();
+        assert!(make(&project, &mut a, &Make::Model, &pack, &grant).unwrap_err().contains("front view"));
+        a.approve_view(View::Front, "front.png");
+        assert!(make(&project, &mut a, &Make::Model, &pack, &grant).unwrap_err().contains("side or the back"));
+        a.approve_model("model.glb");
+        assert_eq!((a.stage, a.model.as_deref()), (Stage::Rig, Some("model.glb")));
+        assert_eq!((model_cents("v3.1-20260211"), model_cents("P1-20260311")), (30.0, 100.0));
     }
 
     #[test]

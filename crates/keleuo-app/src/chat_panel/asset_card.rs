@@ -47,7 +47,8 @@ impl ChatPanel {
 
     /// Test commands, as the card's buttons, for this chat's latest asset: `new <name>|<brief>`
     /// (the form, filled in and created), `concept`, `change <note>`, `approve`, `views`,
-    /// `view <front|side|back>`, `approve-view <front|side|back>`, `state`.
+    /// `view <front|side|back>`, `approve-view <front|side|back>`, `model`, `approve-model`,
+    /// `view-3d`, `state`.
     pub fn asset_command(&mut self, line: &str, window: &mut Window, cx: &mut Context<Self>) -> String {
         let (cmd, arg) = line.split_once(' ').unwrap_or((line, ""));
         if cmd == "new" {
@@ -74,6 +75,20 @@ impl ChatPanel {
                 }
             }
             "approve" => asset_store::approve_concept(&dir, cx),
+            "model" => asset_store::make(&dir, Make::Model, "the model".into(), cx, |_, _| {}),
+            "approve-model" => {
+                if let Some(f) = asset_store::entry(&dir, cx).and_then(|e| e.asset.models.last().map(|m| m.file.clone())) {
+                    asset_store::approve_model(&dir, &f, cx);
+                }
+            }
+            "view-3d" => {
+                let me = cx.entity().downgrade();
+                if let Some(f) = asset_store::entry(&dir, cx).and_then(|e| e.asset.models.last().map(|m| m.file.clone())) {
+                    asset_store::view_3d(&dir, &f, cx, move |page, cx| {
+                        let _ = me.update(cx, |_, cx| cx.emit(ChatPanelEvent::OpenWeb(keleuo_core::web::file_url(&page))));
+                    });
+                }
+            }
             "views" => asset_store::make_views(&dir, cx),
             "view" => {
                 if let Some(v) = view(arg) {
@@ -91,11 +106,12 @@ impl ChatPanel {
         }
         let Some(e) = asset_store::entry(&dir, cx) else { return "gone".into() };
         format!(
-            "{}: stage {:?}, {} concepts, {} views, picked {:?}, busy {:?}, error {:?}, {}",
+            "{}: stage {:?}, {} concepts, {} views, {} models, picked {:?}, busy {:?}, error {:?}, {}",
             e.asset.name,
             e.asset.stage,
             e.asset.concepts.len(),
             e.asset.views.len(),
+            e.asset.models.len(),
             e.picked,
             e.busy,
             e.error,
@@ -391,8 +407,61 @@ impl ChatPanel {
                     })
                     .child(slots);
             }
+            Stage::Model => {
+                let me = cx.entity().downgrade();
+                let mut tries = div().flex().flex_wrap().gap_3();
+                for (i, t) in a.models.iter().enumerate() {
+                    let (d1, d2, f1, f2, me) = (dir.to_path_buf(), dir.to_path_buf(), t.file.clone(), t.file.clone(), me.clone());
+                    let thumb = match &t.preview {
+                        Some(p) => self.asset_thumb(id(&format!("m{i}")), dir, p, 128., false, cx).into_any_element(),
+                        None => div().size(px(128.)).rounded_md().border_1().border_color(border).flex().items_center().justify_center().text_xs().text_color(muted).child("No preview").into_any_element(),
+                    };
+                    tries = tries.child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(thumb)
+                            .child(div().text_xs().text_color(muted).child(format!("≈ {}", money(t.cents))))
+                            .child(
+                                div()
+                                    .flex()
+                                    .gap_1()
+                                    .child(Button::new(id(&format!("m3d{i}"))).xsmall().outline().label("View in 3D").on_click(move |_, _, cx| {
+                                        let me = me.clone();
+                                        asset_store::view_3d(&d1, &f1, cx, move |page, cx| {
+                                            let _ = me.update(cx, |_, cx| cx.emit(ChatPanelEvent::OpenWeb(keleuo_core::web::file_url(&page))));
+                                        });
+                                    }))
+                                    .child(Button::new(id(&format!("ma{i}"))).xsmall().primary().label("Approve").disabled(busy).on_click(move |_, _, cx| asset_store::approve_model(&d2, &f2, cx))),
+                            ),
+                    );
+                }
+                let d = dir.to_path_buf();
+                body = body
+                    .child(div().text_xs().text_color(muted).child("A textured 3D model from the three approved views, by Tripo (a minute or a few). About 30¢, or $1 with Tripo's P models."))
+                    .when(!a.models.is_empty(), |b| b.child(tries))
+                    .child(div().flex().child(
+                        Button::new(id("model"))
+                            .xsmall()
+                            .label(if a.models.is_empty() { "Make the model" } else { "Try again" })
+                            .when(a.models.is_empty(), |b| b.primary())
+                            .when(!a.models.is_empty(), |b| b.outline())
+                            .disabled(busy)
+                            .on_click(move |_, _, cx| asset_store::make(&d, Make::Model, "the model (a minute or a few)".into(), cx, |_, _| {})),
+                    ));
+            }
             _ => {
-                body = body.child(div().text_xs().text_color(muted).child("The views are approved. The model step comes next (Tripo from the three views, viewed in 3D in the asset's tab)."));
+                let me = cx.entity().downgrade();
+                let (d, f) = (dir.to_path_buf(), a.model.clone().unwrap_or_default());
+                body = body
+                    .child(div().text_xs().text_color(muted).child("The model is approved. Rigging comes next: Mixamo in the web panel for a character, Tripo's rig for a creature."))
+                    .child(div().flex().child(Button::new(id("view-approved")).xsmall().outline().label("View in 3D").on_click(move |_, _, cx| {
+                        let me = me.clone();
+                        asset_store::view_3d(&d, &f, cx, move |page, cx| {
+                            let _ = me.update(cx, |_, cx| cx.emit(ChatPanelEvent::OpenWeb(keleuo_core::web::file_url(&page))));
+                        });
+                    })));
             }
         }
         self.asset_frame(title, Some(right), body.into_any_element(), cx)

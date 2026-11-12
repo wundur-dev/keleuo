@@ -108,6 +108,39 @@ pub fn approve_view(dir: &Path, view: View, file: &str, cx: &mut App) {
     update(dir, true, cx, |e| e.asset.approve_view(view, &file));
 }
 
+pub fn approve_model(dir: &Path, file: &str, cx: &mut App) {
+    let file = file.to_string();
+    update(dir, true, cx, |e| e.asset.approve_model(&file));
+}
+
+/// The 3D viewer's page for the model `file` of the asset in `dir` (made by the pack's
+/// view_model, here, with no network), then `then` with the page to open.
+pub fn view_3d(dir: &Path, file: &str, cx: &mut App, then: impl FnOnce(PathBuf, &mut App) + 'static) {
+    let Some(e) = entry(dir, cx) else { return };
+    let Some(pack) = pack() else { return };
+    let Some(tool) = pack.manifest.tools.iter().find(|t| t.name == "view_model").cloned() else { return };
+    let project = e.project.clone();
+    let model = dir.join(file).strip_prefix(&project).map(Path::to_path_buf).unwrap_or_else(|_| dir.join(file));
+    let title = e.asset.name.clone();
+    let (tx, rx) = async_channel::bounded(1);
+    std::thread::spawn(move || {
+        let none = |_: &str| None;
+        let settings = std::collections::BTreeMap::new();
+        let grant = keleuo_core::packs::Grant { cwd: &project, secret: &none, settings: &settings, extra_hosts: Vec::new(), allow_http: false };
+        let out = keleuo_core::packs::run(&pack, &tool, &serde_json::json!({ "model": model.to_string_lossy(), "title": title }), &grant);
+        let _ = tx.send_blocking(out);
+    });
+    let dir = dir.to_path_buf();
+    cx.spawn(async move |cx: &mut AsyncApp| {
+        let Ok(out) = rx.recv().await else { return };
+        cx.update(|cx| match out.show {
+            Some(page) if !out.failed => then(page, cx),
+            _ => update(&dir, false, cx, |e| e.error = Some(format!("Couldn't make the viewer: {}", out.text))),
+        });
+    })
+    .detach();
+}
+
 /// The game-assets pack, when installed.
 fn pack() -> Option<keleuo_core::packs::Pack> {
     let dir = keleuo_core::packs::dir()?;
@@ -157,7 +190,8 @@ pub fn make(dir: &Path, what: Make, label: String, cx: &mut App, then: impl FnOn
                 match made {
                     Ok(attempt) => {
                         e.asset = asset;
-                        if attempt.view.is_none() {
+                        // A new concept is the one picked (not a view or a model).
+                        if attempt.view.is_none() && attempt.preview.is_none() && !attempt.file.ends_with(".glb") {
                             e.picked = Some(attempt.file);
                         }
                     }
