@@ -185,39 +185,66 @@ impl ChatPanel {
         }
     }
 
-    /// The card's frame: a header (what it is, the step, the cost, Open) and the body.
-    fn asset_frame(&self, title: AnyElement, right: Option<AnyElement>, body: AnyElement, cx: &App) -> AnyElement {
+    /// The card: a quiet header (its name and kind, how far it has got, Open) and the step.
+    #[allow(clippy::too_many_arguments)]
+    fn asset_frame(&self, id: SharedString, name: String, kind: Option<String>, stage: Option<Stage>, open: Option<PathBuf>, body: AnyElement, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
-        let (border, accent) = (theme.border, theme.cyan);
+        let (fg, muted, border, bg) = (theme.foreground, theme.muted_foreground, theme.border, theme.background);
         div()
             .flex()
             .flex_col()
+            .rounded(px(14.))
             .border_1()
-            .border_color(border)
-            .rounded_md()
-            .bg(accent.opacity(0.04))
+            .border_color(border.opacity(0.8))
+            .bg(bg)
+            .shadow_sm()
             .overflow_hidden()
             .child(
                 div()
-                    .h(px(28.))
-                    .px_2()
+                    .px_3()
+                    .pt_3()
+                    .pb_2()
                     .flex()
                     .items_center()
                     .gap_2()
-                    .text_xs()
-                    .child(Icon::new(gpui_kit::assets::IconName::Box).xsmall().text_color(accent))
-                    .child(div().flex_none().font_weight(FontWeight::SEMIBOLD).text_color(accent).child("asset"))
-                    .child(title)
+                    .child(
+                        div()
+                            .size(px(26.))
+                            .flex_none()
+                            .rounded(px(8.))
+                            .bg(theme.secondary)
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(Icon::new(gpui_kit::assets::IconName::Box).small().text_color(muted)),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .child(div().truncate().text_sm().font_weight(FontWeight::SEMIBOLD).text_color(fg).child(name))
+                            .children(kind.map(|k| div().text_xs().text_color(muted).child(k))),
+                    )
                     .child(div().flex_1())
-                    .children(right),
+                    .children(stage.map(|s| stepper(s, cx)))
+                    .children(open.map(|dir| {
+                        Button::new(SharedString::from(format!("{id}-open")))
+                            .xsmall()
+                            .ghost()
+                            .icon(gpui_kit::assets::IconName::Maximize2)
+                            .tooltip("Open the asset")
+                            .on_click(cx.listener(move |_, _, _, cx| cx.emit(ChatPanelEvent::OpenAsset(dir.clone()))))
+                            .into_any_element()
+                    })),
             )
-            .child(div().p_2().border_t_1().border_color(border).child(body))
+            .child(div().px_3().pb_3().child(body))
             .into_any_element()
     }
 
     pub(super) fn render_new_asset(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
-        let (fg, muted, danger) = (theme.foreground, theme.muted_foreground, theme.danger);
+        let danger = theme.danger;
         let Some(form) = &self.new_asset else { return div().into_any_element() };
         let mut kinds = div().flex().gap_1();
         for k in KINDS {
@@ -227,7 +254,7 @@ impl ChatPanel {
                     .xsmall()
                     .label(capitalize(k))
                     .when(on, |b| b.primary())
-                    .when(!on, |b| b.outline())
+                    .when(!on, |b| b.ghost())
                     .on_click(cx.listener(move |p, _, _, cx| {
                         if let Some(f) = &mut p.new_asset {
                             f.kind = k;
@@ -240,40 +267,58 @@ impl ChatPanel {
             .flex()
             .flex_col()
             .gap_2()
-            .text_sm()
-            .text_color(fg)
-            .child(div().text_xs().text_color(muted).child("Made step by step, you approving each: a concept (cheap tries until it's right), then front, side and back views, then the 3D model and its rig."))
-            .child(Input::new(&form.name).small())
-            .child(Input::new(&form.brief).small())
-            .child(kinds)
+            .child(Input::new(&form.name))
+            .child(Input::new(&form.brief))
             .children(form.error.clone().map(|e| div().text_xs().text_color(danger).child(e)))
             .child(
                 div()
+                    .pt_1()
                     .flex()
+                    .items_center()
                     .gap_2()
-                    .child(Button::new("new-asset-create").xsmall().primary().label("Create").on_click(cx.listener(|p, _, _, cx| p.create_asset(cx))))
-                    .child(Button::new("new-asset-cancel").xsmall().ghost().label("Dismiss").on_click(cx.listener(|p, _, _, cx| p.close_asset_form(cx, None)))),
+                    .child(kinds)
+                    .child(div().flex_1())
+                    .child(Button::new("new-asset-cancel").small().ghost().label("Cancel").on_click(cx.listener(|p, _, _, cx| p.close_asset_form(cx, None))))
+                    .child(Button::new("new-asset-create").small().primary().label("Create").on_click(cx.listener(|p, _, _, cx| p.create_asset(cx)))),
             )
             .into_any_element();
-        self.asset_frame(div().text_color(fg).child("New game asset").into_any_element(), None, body, cx)
+        self.asset_frame("new-asset".into(), "New asset".into(), None, None, None, body, cx)
     }
 
-    /// A thumbnail of a file of the asset in `dir`; double-click: full size.
-    fn asset_thumb(&self, id: SharedString, dir: &Path, file: &str, size: f32, picked: bool, cx: &App) -> Stateful<Div> {
+    /// A picture of the asset in `dir`: rounded, a ring and a check when chosen; double-click
+    /// shows it full size.
+    fn asset_tile(&self, id: SharedString, dir: &Path, file: &str, size: f32, chosen: bool, cx: &App) -> Stateful<Div> {
         let theme = cx.theme();
         let path = dir.join(file);
         let full = path.clone();
         div()
             .id(id)
+            .relative()
             .flex_none()
             .size(px(size))
-            .rounded_md()
+            .rounded(px(12.))
             .overflow_hidden()
-            .border_2()
-            .border_color(if picked { theme.ring } else { theme.border })
             .bg(theme.secondary)
+            .border_2()
+            .border_color(if chosen { theme.ring } else { transparent_black() })
             .cursor_pointer()
-            .child(img(path).size_full().object_fit(ObjectFit::Contain))
+            .hover(|d| d.shadow_md())
+            .child(img(path).size_full().object_fit(ObjectFit::Cover))
+            .when(chosen, |d| {
+                d.child(
+                    div()
+                        .absolute()
+                        .top(px(6.))
+                        .right(px(6.))
+                        .size(px(20.))
+                        .rounded_full()
+                        .bg(theme.ring)
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(Icon::new(IconName::Check).xsmall().text_color(gpui_kit::white())),
+                )
+            })
             .on_mouse_down(MouseButton::Left, move |e: &MouseDownEvent, _, cx| {
                 if e.click_count >= 2 {
                     crate::image_view::show(full.clone(), cx);
@@ -281,189 +326,259 @@ impl ChatPanel {
             })
     }
 
+    /// Where the next picture will be, while it's made.
+    fn asset_making(&self, size: f32, label: Option<&str>, cx: &App) -> AnyElement {
+        let muted = cx.theme().muted_foreground;
+        div()
+            .relative()
+            .flex_none()
+            .size(px(size))
+            .rounded(px(12.))
+            .overflow_hidden()
+            .child(gpui_kit::component::skeleton::Skeleton::new().size_full().rounded(px(12.)))
+            .child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .justify_center()
+                    .gap_1()
+                    .child(gpui_kit::component::spinner::Spinner::new().color(muted))
+                    .children(label.map(|l| div().text_xs().text_color(muted).child(l.to_string()))),
+            )
+            .into_any_element()
+    }
+
     pub(super) fn render_asset_card(&self, dir: &Path, cx: &mut Context<Self>) -> AnyElement {
         let entry = asset_store::entry(dir, cx);
         let theme = cx.theme();
-        let (fg, muted, danger, green, border) = (theme.foreground, theme.muted_foreground, theme.danger, theme.green, theme.border);
-        let Some(e) = entry else {
-            return self.asset_frame(div().text_color(muted).child(format!("{} (gone)", dir.display())).into_any_element(), None, div().into_any_element(), cx);
-        };
-        let a = &e.asset;
-        let busy = e.busy.is_some();
+        let (muted, danger, green) = (theme.muted_foreground, theme.danger, theme.green);
         let key = dir.to_string_lossy().to_string();
         let id = |what: &str| SharedString::from(format!("asset-{what}-{key}"));
-        let open_dir = dir.to_path_buf();
-        let title = div()
-            .flex()
-            .items_center()
-            .gap_2()
-            .child(div().font_weight(FontWeight::SEMIBOLD).text_color(fg).child(a.name.clone()))
-            .child(div().text_color(muted).child(format!("· {}", a.stage.label())))
-            .into_any_element();
-        let right = div()
-            .flex()
-            .items_center()
-            .gap_2()
-            .child(div().text_color(muted).child(format!("≈ {}", money(a.cents()))))
-            .child(Button::new(id("open")).xsmall().ghost().label("Open").on_click(cx.listener(move |_, _, _, cx| cx.emit(ChatPanelEvent::OpenAsset(open_dir.clone())))))
-            .into_any_element();
-
-        let mut body = div().flex().flex_col().gap_2().text_sm().text_color(fg);
-        if let Some(what) = &e.busy {
-            body = body.child(div().flex().items_center().gap_2().text_xs().text_color(muted).child(Icon::new(IconName::Loader).xsmall()).child(format!("Making {what}…")));
-        }
-        if let Some(err) = &e.error {
-            body = body.child(div().text_xs().text_color(danger).child(err.clone()));
-        }
+        let Some(e) = entry else {
+            let body = div().text_xs().text_color(muted).child(dir.display().to_string()).into_any_element();
+            return self.asset_frame(id("card"), "Asset not found".into(), None, None, None, body, cx);
+        };
+        let a = e.asset.clone();
+        let busy = e.busy.clone();
+        let making = busy.is_some();
+        let mut body = div().flex().flex_col().gap_3();
         match a.stage {
             Stage::Concept => {
-                let mut tries = div().flex().flex_wrap().gap_2();
+                let mut tiles = div().flex().flex_wrap().gap_2();
                 for (i, t) in a.concepts.iter().enumerate() {
                     let (d, f) = (dir.to_path_buf(), t.file.clone());
-                    tries = tries.child(
-                        self.asset_thumb(id(&format!("c{i}")), dir, &t.file, 96., e.picked.as_deref() == Some(t.file.as_str()), cx)
+                    tiles = tiles.child(
+                        self.asset_tile(id(&format!("c{i}")), dir, &t.file, 104., e.picked.as_deref() == Some(t.file.as_str()), cx)
                             .on_click(move |_, _, cx| asset_store::pick(&d, &f, cx)),
                     );
                 }
+                if making {
+                    tiles = tiles.child(self.asset_making(104., None, cx));
+                }
                 let d = dir.to_path_buf();
-                let make = Button::new(id("make")).xsmall().label(if a.concepts.is_empty() { "Make a concept" } else { "Make another" }).disabled(busy);
-                let make = if a.concepts.is_empty() { make.primary() } else { make.outline() };
-                body = body
-                    .child(div().text_xs().text_color(muted).child(a.brief.clone()))
-                    .when(!a.concepts.is_empty(), |b| b.child(tries))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .child(make.on_click(move |_, _, cx| asset_store::make(&d, Make::Concept { prompt: String::new() }, "a concept".into(), cx, |_, _| {})))
-                            .child(div().text_xs().text_color(muted).child("about 1¢ each")),
+                if a.concepts.is_empty() && !making {
+                    body = body.child(div().text_sm().text_color(muted).child(a.brief.clone())).child(
+                        div().flex().justify_end().child(
+                            Button::new(id("make"))
+                                .small()
+                                .primary()
+                                .icon(gpui_kit::assets::IconName::Sparkles)
+                                .label("Make a concept")
+                                .on_click(move |_, _, cx| asset_store::make(&d, Make::Concept { prompt: String::new() }, "a concept".into(), cx, |_, _| {})),
+                        ),
                     );
-                if !a.concepts.is_empty()
-                    && let Some(note) = self.asset_notes.get(dir)
-                {
-                    let (d1, d2, n) = (dir.to_path_buf(), dir.to_path_buf(), note.clone());
-                    let picked = e.picked.clone();
-                    body = body
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .child(div().flex_1().child(Input::new(note).small()))
-                                .child(Button::new(id("change")).xsmall().outline().label("Change it").disabled(busy || picked.is_none()).on_click(move |_, window, cx| {
-                                    let text = n.read(cx).value().trim().to_string();
-                                    if text.is_empty() {
-                                        return;
-                                    }
-                                    if let Some(from) = picked.clone() {
-                                        n.update(cx, |i, cx| i.set_value("", window, cx));
-                                        asset_store::make(&d1, Make::Change { from, note: text }, "the change".into(), cx, |_, _| {});
-                                    }
-                                })),
-                        )
-                        .child(div().flex().items_center().gap_2().child(
-                            Button::new(id("approve")).xsmall().primary().icon(IconName::Check).label("Approve the picked one").disabled(busy || e.picked.is_none()).on_click(move |_, _, cx| asset_store::approve_concept(&d2, cx)),
-                        ).child(div().text_xs().text_color(muted).child("Click a try to pick it; double-click to see it full size.")));
+                } else {
+                    body = body.child(tiles);
+                    if let Some(note) = self.asset_notes.get(dir) {
+                        let (d1, d2, d3, n) = (dir.to_path_buf(), dir.to_path_buf(), dir.to_path_buf(), note.clone());
+                        let picked = e.picked.clone();
+                        let change = move |window: &mut Window, cx: &mut App| {
+                            let text = n.read(cx).value().trim().to_string();
+                            if text.is_empty() {
+                                return;
+                            }
+                            if let Some(from) = picked.clone() {
+                                n.update(cx, |i, cx| i.set_value("", window, cx));
+                                asset_store::make(&d1, Make::Change { from, note: text }, "the change".into(), cx, |_, _| {});
+                            }
+                        };
+                        body = body
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(div().flex_1().child(Input::new(note)))
+                                    .child(Button::new(id("change")).small().outline().label("Change").disabled(making || e.picked.is_none()).on_click(move |_, window, cx| change(window, cx))),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(Button::new(id("another")).small().ghost().icon(gpui_kit::assets::IconName::RefreshCw).label("Another").disabled(making).on_click(move |_, _, cx| {
+                                        asset_store::make(&d2, Make::Concept { prompt: String::new() }, "a concept".into(), cx, |_, _| {})
+                                    }))
+                                    .child(div().flex_1())
+                                    .child(Button::new(id("approve")).small().primary().icon(IconName::Check).label("Use this one").disabled(making || e.picked.is_none()).on_click(move |_, _, cx| asset_store::approve_concept(&d3, cx))),
+                            );
+                    }
                 }
             }
             Stage::Views => {
-                let mut slots = div().flex().flex_wrap().gap_3();
+                let busy_view = busy.as_deref().and_then(|b| View::ALL.into_iter().find(|v| b.contains(&v.label().to_lowercase())));
+                let mut row = div().flex().flex_wrap().gap_3();
                 for v in View::ALL {
                     let tries: Vec<_> = a.views.iter().filter(|t| t.view == Some(v)).collect();
                     let approved = a.approved_view(v).map(str::to_string);
                     let shown = approved.clone().or_else(|| tries.last().map(|t| t.file.clone()));
-                    let mut slot = div().flex().flex_col().gap_1().child(div().text_xs().font_weight(FontWeight::MEDIUM).child(v.label()));
-                    slot = match &shown {
-                        Some(f) => slot.child(self.asset_thumb(id(&format!("v-{}", v.label())), dir, f, 112., approved.is_some(), cx)),
-                        None => slot.child(div().size(px(112.)).rounded_md().border_1().border_color(border).flex().items_center().justify_center().text_xs().text_color(muted).child("Not made yet")),
+                    let tile = if busy_view == Some(v) {
+                        self.asset_making(118., None, cx)
+                    } else {
+                        match &shown {
+                            Some(f) => self.asset_tile(id(&format!("v-{}", v.label())), dir, f, 118., approved.is_some(), cx).into_any_element(),
+                            None => div().size(px(118.)).rounded(px(12.)).bg(theme.secondary).into_any_element(),
+                        }
                     };
                     let (d1, d2, f) = (dir.to_path_buf(), dir.to_path_buf(), shown.clone());
-                    slot = slot.child(
-                        div()
-                            .flex()
-                            .gap_1()
-                            .child(Button::new(id(&format!("vm-{}", v.label()))).xsmall().outline().label(if tries.is_empty() { "Make" } else { "Again" }).disabled(busy).on_click(move |_, _, cx| {
-                                asset_store::make(&d1, Make::View(v), format!("the {} view", v.label().to_lowercase()), cx, |_, _| {})
-                            }))
-                            .when(approved.is_none() && f.is_some(), |d| {
-                                d.child(Button::new(id(&format!("va-{}", v.label()))).xsmall().primary().label("Approve").on_click(move |_, _, cx| {
-                                    if let Some(f) = &f {
-                                        asset_store::approve_view(&d2, v, f, cx);
-                                    }
-                                }))
-                            })
-                            .when(approved.is_some(), |d| d.child(div().text_xs().text_color(green).child("✓"))),
-                    );
-                    slots = slots.child(slot);
-                }
-                let d = dir.to_path_buf();
-                body = body
-                    .child(div().flex().items_center().gap_2().children(a.concept.clone().map(|c| self.asset_thumb(id("concept"), dir, &c, 40., false, cx))).child(div().text_xs().text_color(muted).child(
-                        "Front, side and back from the approved concept, for the 3D model. About 10¢ each.",
-                    )))
-                    .when(View::ALL.iter().any(|v| !a.views.iter().any(|t| t.view == Some(*v))), |b| {
-                        b.child(div().flex().child(Button::new(id("views")).xsmall().primary().label("Make the missing views").disabled(busy).on_click(move |_, _, cx| asset_store::make_views(&d, cx))))
-                    })
-                    .child(slots);
-            }
-            Stage::Model => {
-                let me = cx.entity().downgrade();
-                let mut tries = div().flex().flex_wrap().gap_3();
-                for (i, t) in a.models.iter().enumerate() {
-                    let (d1, d2, f1, f2, me) = (dir.to_path_buf(), dir.to_path_buf(), t.file.clone(), t.file.clone(), me.clone());
-                    let thumb = match &t.preview {
-                        Some(p) => self.asset_thumb(id(&format!("m{i}")), dir, p, 128., false, cx).into_any_element(),
-                        None => div().size(px(128.)).rounded_md().border_1().border_color(border).flex().items_center().justify_center().text_xs().text_color(muted).child("No preview").into_any_element(),
-                    };
-                    tries = tries.child(
+                    row = row.child(
                         div()
                             .flex()
                             .flex_col()
                             .gap_1()
-                            .child(thumb)
-                            .child(div().text_xs().text_color(muted).child(format!("≈ {}", money(t.cents))))
+                            .child(tile)
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_1()
+                                    .child(div().flex_1().text_xs().text_color(muted).child(v.label()))
+                                    .when(!tries.is_empty(), |d| {
+                                        d.child(Button::new(id(&format!("vm-{}", v.label()))).xsmall().ghost().icon(gpui_kit::assets::IconName::RefreshCw).tooltip("Another").disabled(making).on_click(move |_, _, cx| {
+                                            asset_store::make(&d1, Make::View(v), format!("the {} view", v.label().to_lowercase()), cx, |_, _| {})
+                                        }))
+                                    })
+                                    .when(approved.is_none() && f.is_some(), |d| {
+                                        d.child(Button::new(id(&format!("va-{}", v.label()))).xsmall().ghost().icon(IconName::Check).tooltip("Use this one").on_click(move |_, _, cx| {
+                                            if let Some(f) = &f {
+                                                asset_store::approve_view(&d2, v, f, cx);
+                                            }
+                                        }))
+                                    })
+                                    .when(approved.is_some(), |d| d.child(Icon::new(IconName::Check).xsmall().text_color(green))),
+                            ),
+                    );
+                }
+                let missing = View::ALL.iter().any(|v| !a.views.iter().any(|t| t.view == Some(*v)));
+                let d = dir.to_path_buf();
+                body = body.child(row).when(missing && !making, |b| {
+                    b.child(div().flex().justify_end().child(
+                        Button::new(id("views")).small().primary().icon(gpui_kit::assets::IconName::Sparkles).label("Make the views").on_click(move |_, _, cx| asset_store::make_views(&d, cx)),
+                    ))
+                });
+            }
+            Stage::Model => {
+                let me = cx.entity().downgrade();
+                let mut row = div().flex().flex_wrap().gap_3();
+                for (i, t) in a.models.iter().enumerate() {
+                    let (d1, d2, f1, f2, me) = (dir.to_path_buf(), dir.to_path_buf(), t.file.clone(), t.file.clone(), me.clone());
+                    let tile = match &t.preview {
+                        Some(p) => self.asset_tile(id(&format!("m{i}")), dir, p, 150., false, cx).into_any_element(),
+                        None => div().size(px(150.)).rounded(px(12.)).bg(theme.secondary).into_any_element(),
+                    };
+                    row = row.child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(tile)
                             .child(
                                 div()
                                     .flex()
                                     .gap_1()
-                                    .child(Button::new(id(&format!("m3d{i}"))).xsmall().outline().label("View in 3D").on_click(move |_, _, cx| {
+                                    .child(Button::new(id(&format!("m3d{i}"))).xsmall().ghost().icon(gpui_kit::assets::IconName::Box).label("3D").tooltip("View in 3D").on_click(move |_, _, cx| {
                                         let me = me.clone();
                                         asset_store::view_3d(&d1, &f1, cx, move |page, cx| {
                                             let _ = me.update(cx, |_, cx| cx.emit(ChatPanelEvent::OpenWeb(keleuo_core::web::file_url(&page))));
                                         });
                                     }))
-                                    .child(Button::new(id(&format!("ma{i}"))).xsmall().primary().label("Approve").disabled(busy).on_click(move |_, _, cx| asset_store::approve_model(&d2, &f2, cx))),
+                                    .child(div().flex_1())
+                                    .child(Button::new(id(&format!("ma{i}"))).xsmall().primary().icon(IconName::Check).label("Use").disabled(making).on_click(move |_, _, cx| asset_store::approve_model(&d2, &f2, cx))),
                             ),
                     );
                 }
+                if making {
+                    row = row.child(self.asset_making(150., Some("A minute or a few"), cx));
+                }
                 let d = dir.to_path_buf();
+                let first = a.models.is_empty();
                 body = body
-                    .child(div().text_xs().text_color(muted).child("A textured 3D model from the three approved views, by Tripo (a minute or a few). About 30¢, or $1 with Tripo's P models."))
-                    .when(!a.models.is_empty(), |b| b.child(tries))
-                    .child(div().flex().child(
-                        Button::new(id("model"))
-                            .xsmall()
-                            .label(if a.models.is_empty() { "Make the model" } else { "Try again" })
-                            .when(a.models.is_empty(), |b| b.primary())
-                            .when(!a.models.is_empty(), |b| b.outline())
-                            .disabled(busy)
-                            .on_click(move |_, _, cx| asset_store::make(&d, Make::Model, "the model (a minute or a few)".into(), cx, |_, _| {})),
-                    ));
+                    .when(!first || making, |b| b.child(row))
+                    .when(!making, |b| {
+                        b.child(div().flex().justify_end().child(
+                            Button::new(id("model"))
+                                .small()
+                                .when(first, |b| b.primary().icon(gpui_kit::assets::IconName::Sparkles).label("Make the model"))
+                                .when(!first, |b| b.ghost().icon(gpui_kit::assets::IconName::RefreshCw).label("Another"))
+                                .on_click(move |_, _, cx| asset_store::make(&d, Make::Model, "the model".into(), cx, |_, _| {})),
+                        ))
+                    });
             }
             _ => {
                 let me = cx.entity().downgrade();
-                let (d, f) = (dir.to_path_buf(), a.model.clone().unwrap_or_default());
-                body = body
-                    .child(div().text_xs().text_color(muted).child("The model is approved. Rigging comes next: Mixamo in the web panel for a character, Tripo's rig for a creature."))
-                    .child(div().flex().child(Button::new(id("view-approved")).xsmall().outline().label("View in 3D").on_click(move |_, _, cx| {
-                        let me = me.clone();
-                        asset_store::view_3d(&d, &f, cx, move |page, cx| {
-                            let _ = me.update(cx, |_, cx| cx.emit(ChatPanelEvent::OpenWeb(keleuo_core::web::file_url(&page))));
-                        });
-                    })));
+                let approved = a.model.clone().unwrap_or_default();
+                let preview = a.models.iter().find(|m| m.file == approved).and_then(|m| m.preview.clone());
+                let d = dir.to_path_buf();
+                body = body.child(
+                    div()
+                        .flex()
+                        .items_end()
+                        .gap_3()
+                        .children(preview.map(|p| self.asset_tile(id("final"), dir, &p, 150., true, cx)))
+                        .child(div().flex_1())
+                        .child(Button::new(id("view-approved")).small().outline().icon(gpui_kit::assets::IconName::Box).label("View in 3D").on_click(move |_, _, cx| {
+                            let me = me.clone();
+                            asset_store::view_3d(&d, &approved, cx, move |page, cx| {
+                                let _ = me.update(cx, |_, cx| cx.emit(ChatPanelEvent::OpenWeb(keleuo_core::web::file_url(&page))));
+                            });
+                        })),
+                );
             }
         }
-        self.asset_frame(title, Some(right), body.into_any_element(), cx)
+        if let Some(err) = &e.error {
+            body = body.child(div().text_xs().text_color(danger).child(err.clone()));
+        }
+        let kind = Some(capitalize(&a.kind));
+        self.asset_frame(id("card"), a.name.clone(), kind, Some(a.stage), Some(dir.to_path_buf()), body.into_any_element(), cx)
     }
+}
+
+/// How far an asset has got: its steps in a row, the done ones ticked, the current one strong.
+fn stepper(stage: Stage, cx: &App) -> AnyElement {
+    let theme = cx.theme();
+    let (fg, muted, green, border) = (theme.foreground, theme.muted_foreground, theme.green, theme.border);
+    let mut row = div().flex().items_center().gap_1().text_xs();
+    for (i, s) in [Stage::Concept, Stage::Views, Stage::Model, Stage::Rig].into_iter().enumerate() {
+        if i > 0 {
+            row = row.child(div().w(px(10.)).h(px(1.)).bg(if stage > s { green.opacity(0.6) } else { border }));
+        }
+        let done = stage > s;
+        let now = stage == s;
+        row = row.child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(3.))
+                .px(px(6.))
+                .py(px(2.))
+                .rounded_full()
+                .when(now, |d| d.bg(theme.secondary))
+                .when(done, |d| d.child(Icon::new(IconName::Check).xsmall().text_color(green)))
+                .child(div().text_color(if now { fg } else { muted }).when(now, |d| d.font_weight(FontWeight::MEDIUM)).child(s.label())),
+        );
+    }
+    row.into_any_element()
 }
