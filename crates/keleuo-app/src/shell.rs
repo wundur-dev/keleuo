@@ -14,6 +14,7 @@ use std::sync::Arc;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::resizable::{resizable_panel, v_resizable};
+use std::rc::Rc;
 use gpui_kit::component::menu::{ContextMenuExt, PopupMenu, PopupMenuItem};
 use gpui_kit::component::menu::DropdownMenu as _;
 use gpui_kit::component::{ActiveTheme, Icon, IconName, Sizable, TitleBar, WindowExt};
@@ -211,6 +212,8 @@ pub struct Shell {
     switcher: Option<Switcher>,
     /// The tool panel shown under the sessions (Files, Changes, Agent, Skills).
     tools_tab: &'static str,
+    /// Its tabs along the bottom (drawn as the documents' are).
+    tools_strip: Rc<crate::sheet_tabs::StripState>,
     /// Sessions from the last run are being opened again: the saved list is not touched.
     restoring: bool,
     /// The open sessions as last saved (written again only when they change).
@@ -267,6 +270,7 @@ impl Shell {
             project_form: None,
             switcher: None,
             tools_tab: "Files",
+            tools_strip: Rc::new(crate::sheet_tabs::StripState::default()),
             restoring: false,
             saved: None,
             focus: cx.focus_handle(),
@@ -2252,13 +2256,25 @@ impl Shell {
 
     /// The shown session's tool panels under the sessions: a row of tabs, then the one picked.
     fn render_tools(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        use crate::sheet_tabs::{Joined, Palette, simple_strip};
         let ws = self.active_workspace()?;
         let tools = ws.read(cx).tools(cx);
         let picked = tools.iter().position(|(n, _)| *n == self.tools_tab).unwrap_or(0);
         let theme = cx.theme();
-        let (fg, muted, hover, sel, border) = (crate::theme::list_text(cx), theme.muted_foreground, theme.secondary_hover, theme.secondary, theme.border);
-        // A title bar: the panel shown and whose it is (the session's folder and branch), and
-        // a button that hides the panels (as Cmd+B does).
+        // As a tool panel in a session's layout looked: its light grey, a title bar that sits
+        // slightly in, and sheet tabs hanging from the panel along the bottom.
+        let (ground, content, border, muted) = (theme.sidebar, crate::theme::tool_ground(cx), theme.border, theme.muted_foreground);
+        let title_fg = crate::sheet_tabs::mix(theme.foreground, muted, 0.55);
+        let inset = BoxShadow {
+            color: gpui_kit::black().opacity(if theme.is_dark() { 0.35 } else { 0.07 }),
+            offset: point(px(0.), px(1.)),
+            blur_radius: px(3.),
+            spread_radius: px(0.),
+            inset: true,
+        };
+        let palette = Palette::new(ground, theme.foreground, content, theme.foreground, border, border);
+        // The title bar: the panel shown and whose it is (the session's folder and branch),
+        // and a button that hides the panels (as Cmd+B does).
         let row = &self.tabs[self.active].row;
         let whose = match &row.branch {
             Some(b) => format!("{} · {b}", row.folder),
@@ -2266,16 +2282,18 @@ impl Shell {
         };
         let title = div()
             .flex_none()
-            .h(px(32.))
+            .h(px(crate::dock_skin::HEADER_HEIGHT))
             .pl(px(12.))
-            .pr(px(6.))
+            .pr(px(8.))
             .flex()
             .items_center()
             .gap_2()
+            .bg(content)
+            .shadow(vec![inset])
             .border_t_1()
             .border_b_1()
             .border_color(border)
-            .child(div().flex_none().text_size(px(12.5)).font_weight(FontWeight::SEMIBOLD).text_color(fg).child(self.tools_tab_name(&tools, picked)))
+            .child(div().flex_none().text_size(px(15.)).text_color(title_fg).child(self.tools_tab_name(&tools, picked)))
             .child(div().flex_1().min_w_0().truncate().text_size(px(11.5)).text_color(muted).child(whose))
             .child(
                 Button::new("tools-hide")
@@ -2285,32 +2303,31 @@ impl Shell {
                     .tooltip("Hide the panels (Cmd+B)")
                     .on_click(cx.listener(|s, _, _, cx| s.toggle_tools(cx))),
             );
-        // The tabs, along the bottom.
-        let mut tabs = div().flex_none().h(px(34.)).px(px(8.)).flex().items_center().gap_1().border_t_1().border_color(border);
-        for (i, (name, _)) in tools.iter().enumerate() {
-            let name: &'static str = name;
-            tabs = tabs.child(
-                div()
-                    .id(SharedString::from(format!("tool-tab-{name}")))
-                    .h(px(26.))
-                    .px_2()
-                    .flex()
-                    .items_center()
-                    .rounded(px(6.))
-                    .text_size(px(12.5))
-                    .cursor_pointer()
-                    .text_color(if i == picked { fg } else { muted })
-                    .when(i == picked, |d| d.bg(sel))
-                    .when(i != picked, |d| d.hover(|d| d.bg(hover)))
-                    .child(name)
-                    .on_click(cx.listener(move |s, _, _, cx| {
-                        s.tools_tab = name;
-                        cx.notify();
-                    })),
-            );
-        }
+        let labels: Vec<SharedString> = tools.iter().map(|(n, _)| SharedString::from(*n)).collect();
+        let names: Vec<&'static str> = tools.iter().map(|(n, _)| *n).collect();
+        let me = cx.entity().downgrade();
+        let select: crate::sheet_tabs::OnSelect = Rc::new(move |ix, _, cx| {
+            let name = names[ix];
+            let _ = me.update(cx, |s, cx| {
+                s.tools_tab = name;
+                cx.notify();
+            });
+        });
+        let tabs = simple_strip(&self.tools_strip, "tool-tab", &labels, picked, Joined::Top, palette, crate::dock_skin::BOTTOM_STRIP, None, select);
         let view = tools.into_iter().nth(picked).map(|(_, v)| v)?;
-        Some(div().size_full().flex().flex_col().child(title).child(div().flex_1().min_h_0().child(view)).child(tabs).into_any_element())
+        Some(
+            div()
+                .size_full()
+                .flex()
+                .flex_col()
+                .bg(content)
+                .child(title)
+                .child(div().flex_1().min_h_0().child(view))
+                .child(div().flex_none().h(px(crate::dock_skin::STRIP_GAP_ABOVE)))
+                .child(tabs)
+                .child(div().flex_none().h(px(crate::dock_skin::STRIP_GAP_BELOW)).bg(ground))
+                .into_any_element(),
+        )
     }
 
     fn tools_tab_name(&self, tools: &[(&'static str, AnyView)], picked: usize) -> &'static str {
