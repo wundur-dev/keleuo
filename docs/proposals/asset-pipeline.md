@@ -9,7 +9,7 @@ try is paid for. The reliable path is the one the owner standardized for his son
 **image** cheaply at low resolution (sending the last image back with notes) until it's right,
 render **three views** (front in an A-pose, side, back) at medium resolution, turn those into a
 **3D model** (Tripo, multiview), and **rig** it (Mixamo for humanoids, free and better than the
-others; Tripo's rigging for creatures). Keleuo makes that path the default, native to the app:
+others; Tripo's rigging for creatures). Wundur makes that path the default, native to the app:
 each stage shows what was made, the person approves or asks for another try, and only approved
 results move on. Every attempt is recorded with what it cost, so the cost of an *approved* model
 is known (the basis of a later paid tier: N approved models a month, see Pricing).
@@ -30,9 +30,9 @@ and which result was approved at each stage.
    the GLB shows in the 3D viewer, turned and lit; approve, or try again (a try counter shows,
    with its cost). 30 cents to $1 a try.
 4. **Rig and animate.**
-   - **Humanoid: Mixamo, guided.** Keleuo asks Tripo for the model as FBX (what Mixamo takes),
+   - **Humanoid: Mixamo, guided.** Wundur asks Tripo for the model as FBX (what Mixamo takes),
      opens Mixamo in the web panel under the person's own Adobe sign-in, and shows a short
-     checklist (upload, place the markers, pick animations, download "with skin"). Keleuo never
+     checklist (upload, place the markers, pick animations, download "with skin"). Wundur never
      drives or reads Mixamo's page: it only handles the download, through the web view's own
      download hooks, saving the file into the asset's folder under a proper name and showing it
      in the viewer. Free.
@@ -64,7 +64,7 @@ approves.
 ## Pricing, later
 
 The owner's plan: a paid tier of N **approved, complete** models a month ($20, $40, $100), with
-Keleuo carrying the failed tries; the image-first path keeps that cost low. From his numbers:
+Wundur carrying the failed tries; the image-first path keeps that cost low. From his numbers:
 about $0.63 an approved model when it goes well, $1.00 to $1.40 typically, about $3.75 at a cap
 of three tries on the $1 model. Tries are capped per stage so a model's cost has a ceiling. The
 records above are what price it: measured on real use before any tier is sold. A paid tier

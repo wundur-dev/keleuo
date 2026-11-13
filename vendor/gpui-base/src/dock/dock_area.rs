@@ -108,7 +108,7 @@ pub struct DockArea {
     groups: HashMap<NodeId, Cached<TabGroup>>,
     splits: HashMap<NodeId, CachedSplit>,
     panels: HashMap<PanelId, Arc<dyn PanelView>>,
-    /// Keleuo patch: the narrowest a panel's slot in a side-by-side split may be.
+    /// Wundur patch: the narrowest a panel's slot in a side-by-side split may be.
     min_widths: HashMap<PanelId, Pixels>,
 
     locked: bool,
@@ -1292,7 +1292,7 @@ impl DockArea {
     }
 }
 
-/// Keleuo patch: panel minimum widths.
+/// Wundur patch: panel minimum widths.
 impl DockArea {
     /// Never let the slot holding `panel` in a side-by-side split be narrower than `width`
     /// (dragging the divider stops there; a narrower window squeezes the other slots first).

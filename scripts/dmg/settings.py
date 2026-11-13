@@ -22,6 +22,6 @@ show_sidebar = False
 icon_size = 112
 text_size = 13
 icon_locations = {
-    "Keleuo.app": (170, 190),
+    "Wundur Studio.app": (170, 190),
     "Applications": (490, 190),
 }

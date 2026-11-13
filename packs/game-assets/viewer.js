@@ -1,4 +1,4 @@
-// The model viewer's page script (runs in the web view or any browser, not in Keleuo's script
+// The model viewer's page script (runs in the web view or any browser, not in Wundur's script
 // engine). view_model writes MODEL_B64 (the GLB) and OPTIONS before it: a studio shot with a
 // backdrop, a ground that catches the shadow, a key and a fill light, a three-quarter camera
 // that can follow the body as it moves, and the model's animations to pick and play.

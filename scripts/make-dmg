@@ -1,33 +1,33 @@
 #!/usr/bin/env bash
-# make-dmg <Keleuo.app> [out-dir]
+# make-dmg <Wundur.app> [out-dir]
 #
-# Wrap Keleuo.app (from scripts/bundle-macos.sh, signed or not) in the installer: a disk image
+# Wrap Wundur.app (from scripts/bundle-macos.sh, signed or not) in the installer: a disk image
 # whose window shows the app and Applications over a night sky, with an arrow between them.
-# Writes <out-dir>/Keleuo-<version>.dmg (out-dir defaults to the app's folder).
+# Writes <out-dir>/Wundur-<version>.dmg (out-dir defaults to the app's folder).
 #
 # Signing and notarizing the image, when set up:
-#   KELEUO_SIGN_IDENTITY   a Developer ID Application identity: the image is signed with it
-#   KELEUO_NOTARY_PROFILE  a notarytool keychain profile: the image is notarized and stapled
+#   WUNDUR_SIGN_IDENTITY   a Developer ID Application identity: the image is signed with it
+#   WUNDUR_NOTARY_PROFILE  a notarytool keychain profile: the image is notarized and stapled
 #
 # The layout is written without Finder (dmgbuild writes the window's settings itself), so
 # nothing opens on screen while it runs. dmgbuild is installed once, in its own environment
 # under ~/Library/Caches.
 set -euo pipefail
 
-APP=${1:?usage: make-dmg <Keleuo.app> [out-dir]}
+APP=${1:?usage: make-dmg <Wundur.app> [out-dir]}
 APP=$(cd "$(dirname "$APP")" && pwd)/$(basename "$APP")
 OUT=${2:-$(dirname "$APP")}
 HERE=$(cd "$(dirname "$0")" && pwd)
 VERSION=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist")
-DMG="$OUT/Keleuo-$VERSION.dmg"
+DMG="$OUT/Wundur-$VERSION.dmg"
 
-VENV="$HOME/Library/Caches/keleuo-dmgbuild"
+VENV="$HOME/Library/Caches/wundur-dmgbuild"
 if [ ! -x "$VENV/bin/dmgbuild" ]; then
   python3 -m venv "$VENV"
   "$VENV/bin/pip" install --quiet dmgbuild
 fi
 
-WORK=$(mktemp -d /tmp/keleuo-dmg.XXXXXX)
+WORK=$(mktemp -d /tmp/wundur-dmg.XXXXXX)
 trap 'rm -rf "$WORK"' EXIT
 
 # The background at both sizes, joined in one image so Retina screens get the sharp one.
@@ -39,13 +39,13 @@ mkdir -p "$OUT"
 rm -f "$DMG"
 "$VENV/bin/dmgbuild" -s "$HERE/dmg/settings.py" \
   -D app="$APP" -D background="$WORK/background.tiff" \
-  "Keleuo" "$DMG"
+  "Wundur Studio" "$DMG"
 
-if [ -n "${KELEUO_SIGN_IDENTITY:-}" ]; then
-  codesign --sign "$KELEUO_SIGN_IDENTITY" --timestamp "$DMG"
+if [ -n "${WUNDUR_SIGN_IDENTITY:-}" ]; then
+  codesign --sign "$WUNDUR_SIGN_IDENTITY" --timestamp "$DMG"
 fi
-if [ -n "${KELEUO_NOTARY_PROFILE:-}" ]; then
-  xcrun notarytool submit "$DMG" --keychain-profile "$KELEUO_NOTARY_PROFILE" --wait
+if [ -n "${WUNDUR_NOTARY_PROFILE:-}" ]; then
+  xcrun notarytool submit "$DMG" --keychain-profile "$WUNDUR_NOTARY_PROFILE" --wait
   xcrun stapler staple "$DMG"
 fi
 

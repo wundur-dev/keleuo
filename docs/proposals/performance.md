@@ -1,4 +1,4 @@
-# Proposal: making Keleuo light on the machine
+# Proposal: making Wundur light on the machine
 
 Status (2026-10-16): much of it built and measured: idle and hidden-work frames (part 1), the
 working line drawn apart and its spinner turned by Core Animation, one frame per streamed piece,
@@ -27,14 +27,14 @@ is most of the gain: fewer frames, and cheaper frames.
 ## Measured now
 
 The running build, this session working: about 316 MB (66 MB of it the window's drawing buffers),
-9-15% CPU while streaming. `KELEUO_PERF=1` already times terminal and chat paints and startup;
+9-15% CPU while streaming. `WUNDUR_PERF=1` already times terminal and chat paints and startup;
 step 0 extends it so each change below is measured before and after, not guessed.
 
 ## The plan, in order
 
 ### 0. Measure (small)
 
-Count frames per second and renders per view under `KELEUO_PERF=1`, and log CPU, memory and idle
+Count frames per second and renders per view under `WUNDUR_PERF=1`, and log CPU, memory and idle
 wakeups every few seconds. A fixed scene to compare: one session streaming, three idle, one busy
 terminal in a hidden tab, the app in the background.
 
@@ -175,7 +175,7 @@ the UI thread; animations (scroll, fades) stop by themselves; closed sessions re
   change gets a test that the view updates.
 - Shared per-folder indexes change who owns the file tree; sessions over SSH and in worktrees are
   separate folders and stay separate.
-- Changing `Item` to `Arc<Item>` touches much of `keleuo-core`; done in one step, by the tests.
+- Changing `Item` to `Arc<Item>` touches much of `wundur-core`; done in one step, by the tests.
 
 ## Order of work, as pull requests
 

@@ -1,5 +1,5 @@
 // The installer window's background: a night sky over rolling meadows, and an arrow from
-// where Keleuo's icon sits to where Applications sits.
+// where Wundur's icon sits to where Applications sits.
 //
 //   swift scripts/dmg/background.swift <out.png> <scale>
 //
@@ -183,7 +183,7 @@ for _ in 0..<70 {
     ctx.fillEllipse(in: CGRect(x: x - 0.7, y: y - 0.7, width: 1.4, height: 1.4))
 }
 
-// The arrow from Keleuo to Applications: a gentle arc of dashes, and its head.
+// The arrow from Wundur to Applications: a gentle arc of dashes, and its head.
 let from = CGPoint(x: APP_AT.x + 70, y: APP_AT.y)
 let to = CGPoint(x: APPLICATIONS_AT.x - 70, y: APPLICATIONS_AT.y)
 let lift = 26.0
@@ -212,9 +212,9 @@ ctx.setLineWidth(2.6)
 ctx.strokePath()
 ctx.restoreGState()
 
-// "Drag Keleuo to Applications", over the arrow.
+// "Drag Wundur to Applications", over the arrow.
 let words = NSAttributedString(
-    string: "Drag Keleuo to Applications",
+    string: "Drag Wundur to Applications",
     attributes: [
         .font: NSFont.systemFont(ofSize: 13, weight: .medium),
         .foregroundColor: NSColor(srgbRed: 0.88, green: 0.90, blue: 1.0, alpha: 0.8),

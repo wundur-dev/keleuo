@@ -3850,60 +3850,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "keleuo-app"
-version = "0.2.3"
-dependencies = [
- "alacritty_terminal",
- "anyhow",
- "async-channel",
- "base64 0.22.1",
- "block2 0.6.2",
- "chrono",
- "dirs 6.0.0",
- "gpui-kit",
- "interprocess",
- "keleuo-core",
- "libc",
- "lsp-types",
- "objc2 0.6.5",
- "objc2-app-kit 0.3.2",
- "objc2-avf-audio",
- "objc2-foundation 0.3.2",
- "objc2-speech",
- "raw-window-handle",
- "serde_json",
- "tree-sitter",
- "tree-sitter-c-sharp",
- "tree-sitter-cmake",
- "tree-sitter-swift",
- "windows 0.62.2",
- "wry",
-]
-
-[[package]]
-name = "keleuo-core"
-version = "0.2.3"
-dependencies = [
- "anyhow",
- "base64 0.22.1",
- "dirs 6.0.0",
- "ignore",
- "libc",
- "md-5",
- "notify",
- "rquickjs",
- "rusqlite",
- "serde",
- "serde_json",
- "serde_yaml",
- "sha2 0.10.9",
- "similar",
- "spellbook",
- "trash",
- "ureq",
-]
-
-[[package]]
 name = "khronos-egl"
 version = "6.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9861,6 +9807,60 @@ dependencies = [
  "windows 0.62.2",
  "windows-core 0.62.2",
  "windows-version",
+]
+
+[[package]]
+name = "wundur-app"
+version = "0.3.0"
+dependencies = [
+ "alacritty_terminal",
+ "anyhow",
+ "async-channel",
+ "base64 0.22.1",
+ "block2 0.6.2",
+ "chrono",
+ "dirs 6.0.0",
+ "gpui-kit",
+ "interprocess",
+ "libc",
+ "lsp-types",
+ "objc2 0.6.5",
+ "objc2-app-kit 0.3.2",
+ "objc2-avf-audio",
+ "objc2-foundation 0.3.2",
+ "objc2-speech",
+ "raw-window-handle",
+ "serde_json",
+ "tree-sitter",
+ "tree-sitter-c-sharp",
+ "tree-sitter-cmake",
+ "tree-sitter-swift",
+ "windows 0.62.2",
+ "wry",
+ "wundur-core",
+]
+
+[[package]]
+name = "wundur-core"
+version = "0.3.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "dirs 6.0.0",
+ "ignore",
+ "libc",
+ "md-5",
+ "notify",
+ "rquickjs",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "sha2 0.10.9",
+ "similar",
+ "spellbook",
+ "trash",
+ "ureq",
 ]
 
 [[package]]

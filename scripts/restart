@@ -1,13 +1,13 @@
 #!/bin/sh
 # restart [--no-build] [--reset-layout]
 #
-# Build the release binary, find the running Keleuo, ask it to quit and start the new build in
-# the same folder with the same arguments. The sessions that were open come back (Keleuo saves
-# them as they change). A session still working makes Keleuo ask first: quit and have it carry
-# on after the restart, quit, or cancel (then nothing restarts). Safe to run from a terminal inside Keleuo: after the
+# Build the release binary, find the running Wundur, ask it to quit and start the new build in
+# the same folder with the same arguments. The sessions that were open come back (Wundur saves
+# them as they change). A session still working makes Wundur ask first: quit and have it carry
+# on after the restart, quit, or cancel (then nothing restarts). Safe to run from a terminal inside Wundur: after the
 # build, quitting and starting again is done by a detached process that outlives the app.
-# Test copies of the debug build are left running. KELEUO_BIN overrides the binary, as in
-# scripts/keleuo.
+# Test copies of the debug build are left running. WUNDUR_BIN overrides the binary, as in
+# scripts/wundur.
 #
 # --reset-layout: between quitting and starting, put every folder's saved arrangement aside
 # (layouts/ becomes layouts.reset-<time>) and forget the saved panel widths, so each window
@@ -15,7 +15,9 @@
 
 REPO=$(cd "$(dirname "$0")/.." && pwd)
 TARGET="${CARGO_TARGET_DIR:-$HOME/Library/Caches/workbench-target}"
-BIN="${KELEUO_BIN:-$TARGET/release/keleuo}"
+BIN="${WUNDUR_BIN:-$TARGET/release/wundur}"
+# The binary from before the app was renamed (Keleuo): still running, it is quit and replaced.
+OLD_BIN="$TARGET/release/keleuo"
 
 NO_BUILD=
 RESET=
@@ -36,40 +38,53 @@ if [ "$1" = "--relaunch" ]; then
         for p in "$@"; do kill -0 "$p" 2>/dev/null && return 0; done
         return 1
     }
-    if [ $# -gt 0 ] && "$BIN" --quit; then
+    QUIT=$BIN
+    [ -n "$OLD" ] && QUIT=$OLD_BIN
+    if [ $# -gt 0 ] && "$QUIT" --quit; then
         # Up to five minutes for an answer; still running then means Cancel: no restart.
         i=0
         while alive "$@" && [ $i -lt 1500 ]; do sleep 0.2; i=$((i + 1)); done
         alive "$@" && exit 0
     else
-        # A Keleuo from before --quit: stop it.
+        # A Wundur from before --quit: stop it.
         for p in "$@"; do kill "$p" 2>/dev/null; done
         i=0
         while alive "$@" && [ $i -lt 50 ]; do sleep 0.2; i=$((i + 1)); done
         for p in "$@"; do kill -9 "$p" 2>/dev/null; done
     fi
     if [ -n "$RESET_LAYOUT" ]; then
-        CFG="${KELEUO_CONFIG_DIR:-$HOME/Library/Application Support/keleuo}"
+        CFG="${WUNDUR_CONFIG_DIR:-$HOME/Library/Application Support/wundur}"
+        # Still Keleuo's until Wundur first starts (it copies them over then).
+        [ -n "$OLD" ] && [ -z "$WUNDUR_CONFIG_DIR" ] && CFG="$HOME/Library/Application Support/keleuo"
         [ -d "$CFG/layouts" ] && mv "$CFG/layouts" "$CFG/layouts.reset-$(date +%Y%m%d-%H%M%S)"
         [ -f "$CFG/settings.json" ] && python3 -I -c 'import json,sys
 p=sys.argv[1]; s=json.load(open(p)); s.pop("layout",None); json.dump(s,open(p,"w"),indent=2)' "$CFG/settings.json"
     fi
     cd "$folder" || cd "$HOME" || exit 1
-    # What it prints (warnings, and timings with KELEUO_PERF=1) goes to a log, new each start.
-    LOG="$HOME/Library/Logs/Keleuo/keleuo.log"
+    # What it prints (warnings, and timings with WUNDUR_PERF=1) goes to a log, new each start.
+    LOG="$HOME/Library/Logs/Wundur/wundur.log"
     mkdir -p "$(dirname "$LOG")"
     # shellcheck disable=SC2086
-    exec "$REPO/scripts/keleuo" $args >"$LOG" 2>&1
+    exec "$REPO/scripts/wundur" $args >"$LOG" 2>&1
 fi
 
 if [ -z "$NO_BUILD" ]; then
     # The external drive's AppleDouble files (._*) break the build.
     (cd "$REPO" && find . -name '._*' -type f -not -path './target/*' -delete 2>/dev/null)
-    CARGO_TARGET_DIR="$TARGET" cargo build --manifest-path "$REPO/Cargo.toml" -p keleuo-app --release || exit 1
+    CARGO_TARGET_DIR="$TARGET" cargo build --manifest-path "$REPO/Cargo.toml" -p wundur-app --release || exit 1
 fi
 
-# The running app: processes of exactly this binary.
-PIDS=$(ps -axo pid=,command= | awk -v bin="$BIN" '{ pid = $1; $1 = ""; sub(/^ /, ""); if ($0 == bin || index($0, bin " ") == 1) print pid }')
+# The running app: processes of exactly this binary, else of the one from before the rename.
+running() {
+    ps -axo pid=,command= | awk -v bin="$1" '{ pid = $1; $1 = ""; sub(/^ /, ""); if ($0 == bin || index($0, bin " ") == 1) print pid }'
+}
+PIDS=$(running "$BIN")
+RUNNING=$BIN
+OLD=
+if [ -z "$PIDS" ] && [ -x "$OLD_BIN" ]; then
+    PIDS=$(running "$OLD_BIN")
+    [ -n "$PIDS" ] && RUNNING=$OLD_BIN && OLD=1
+fi
 # Where the first one was started, and with what: it starts again the same way.
 FIRST=$(echo "$PIDS" | head -n 1)
 FOLDER=$PWD
@@ -77,12 +92,12 @@ ARGS=
 if [ -n "$FIRST" ]; then
     FOLDER=$(lsof -a -p "$FIRST" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -n 1)
     [ -n "$FOLDER" ] || FOLDER=$PWD
-    ARGS=$(ps -o command= -p "$FIRST" | awk -v bin="$BIN" '{ print substr($0, length(bin) + 2) }')
-    echo "Restarting Keleuo in $FOLDER..."
+    ARGS=$(ps -o command= -p "$FIRST" | awk -v bin="$RUNNING" '{ print substr($0, length(bin) + 2) }')
+    echo "Restarting Wundur in $FOLDER..."
 else
-    echo "Keleuo isn't running; starting it in $FOLDER."
+    echo "Wundur isn't running; starting it in $FOLDER."
 fi
 # A new session (setsid), so closing the app's terminals cannot take it down.
 # shellcheck disable=SC2086
 [ -n "$RESET" ] && echo "The layout goes back to the default (the old one is kept as layouts.reset-<time>)."
-RESET_LAYOUT=$RESET nohup perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV' "$REPO/scripts/restart" --relaunch "$FOLDER" "$ARGS" $PIDS >/dev/null 2>&1 &
+OLD=$OLD RESET_LAYOUT=$RESET nohup perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV' "$REPO/scripts/restart" --relaunch "$FOLDER" "$ARGS" $PIDS >/dev/null 2>&1 &

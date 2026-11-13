@@ -1,4 +1,4 @@
-// view_model: a page to look at a 3D model in, written next to it and opened in Keleuo's web
+// view_model: a page to look at a 3D model in, written next to it and opened in Wundur's web
 // panel: one HTML file holding the model and three.js, so it needs no server and opens in any
 // browser too. Drag to turn, scroll to zoom; pick and play its animations.
 export default async function (args, kx) {
