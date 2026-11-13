@@ -2702,21 +2702,7 @@ impl Shell {
             .h_full()
             .ml(px(6.))
             .relative()
-            // Its right edge: drag to make the column wider or narrower.
-            .child(
-                div()
-                    .id("list-resize")
-                    .absolute()
-                    .top_0()
-                    .right(px(-4.))
-                    .w(px(8.))
-                    .h_full()
-                    .cursor_col_resize()
-                    .on_mouse_down(MouseButton::Left, cx.listener(|s, _, _, cx| {
-                        s.list_resizing = true;
-                        cx.stop_propagation();
-                    })),
-            )
+
             .flex()
             .flex_col()
             .bg(crate::theme::tool_ground(cx))
@@ -2772,6 +2758,24 @@ impl Shell {
                 None => col.into_any_element(),
             })
             .child(crate::dock_skin::corner_cap(true, true, bg))
+            // Its right edge: drag to make the column wider or narrower. Drawn last, so it is on
+            // top of the list and the panels, inside the column's edge.
+            .child(
+                div()
+                    .id("list-resize")
+                    .absolute()
+                    .top_0()
+                    .right_0()
+                    .w(px(6.))
+                    .h_full()
+                    .occlude()
+                    .cursor_col_resize()
+                    .on_mouse_down(MouseButton::Left, cx.listener(|s, _, _, cx| {
+                        s.list_resizing = true;
+                        cx.stop_propagation();
+                        cx.notify();
+                    })),
+            )
             .into_any_element()
     }
 
