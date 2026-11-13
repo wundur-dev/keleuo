@@ -1,7 +1,7 @@
 //! The project file tree: compact rows in a virtual list, folders expand on click. Listing runs
 //! on a background thread through the Host.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use crate::panels::{LIST_TEXT, ROW_HEIGHT};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -13,6 +13,7 @@ use gpui_kit::component::{ActiveTheme, Icon, Sizable};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 use keleuo_core::files::{self, Node};
+use keleuo_core::git_status::{self, Mark};
 use keleuo_core::host::Host;
 use keleuo_core::links::FileIndex;
 
@@ -84,6 +85,13 @@ pub struct FileTree {
     hovered: Option<usize>,
     scroll: UniformListScrollHandle,
     _task: Option<Task<()>>,
+    /// What git says changed, per file, and the folders holding a change (their dot).
+    marks: Arc<HashMap<PathBuf, Mark>>,
+    dirty: Arc<HashSet<PathBuf>>,
+    _status_task: Option<Task<()>>,
+    /// Find a file: the field, and what is typed (the tree then lists matching files flat).
+    find: Option<(Entity<InputState>, Subscription)>,
+    query: String,
 }
 
 impl EventEmitter<FileTreeEvent> for FileTree {}
@@ -108,6 +116,11 @@ impl FileTree {
             hovered: None,
             scroll: UniformListScrollHandle::new(),
             _task: None,
+            marks: Arc::new(HashMap::new()),
+            dirty: Arc::new(HashSet::new()),
+            _status_task: None,
+            find: None,
+            query: String::new(),
         };
         this.refresh(cx);
         this
@@ -141,10 +154,32 @@ impl FileTree {
                         tree.reveal(&path, cx);
                     }
                     cx.emit(FileTreeEvent::Indexed(Arc::new(index)));
+                    tree.refresh_status(cx);
                     cx.notify();
                 });
             }),
         );
+    }
+
+    /// Ask git again what changed (after the files did), in the background.
+    pub fn refresh_status(&mut self, cx: &mut Context<Self>) {
+        let (host, root) = (self.host.clone(), self.root.clone());
+        self._status_task = Some(cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let (marks, dirty) = cx
+                .background_spawn(async move {
+                    let marks = git_status::status(host.as_ref(), &root);
+                    let dirty = git_status::dirty_folders(&marks, &root);
+                    (marks, dirty)
+                })
+                .await;
+            let _ = this.update(cx, |tree, cx| {
+                if *tree.marks != marks || *tree.dirty != dirty {
+                    tree.marks = Arc::new(marks);
+                    tree.dirty = Arc::new(dirty);
+                    cx.notify();
+                }
+            });
+        }));
     }
 
     fn rebuild_rows(&mut self) {
@@ -166,6 +201,23 @@ impl FileTree {
             }
         }
         let mut rows = Vec::new();
+        // Finding a file: every file whose path holds what is typed, flat, by path.
+        let query = self.query.trim().to_lowercase();
+        if !query.is_empty() {
+            let mut found: Vec<(String, PathBuf)> = self
+                .known
+                .iter()
+                .filter_map(|p| {
+                    let rel = p.strip_prefix(&self.root).ok()?.to_string_lossy().to_string();
+                    (rel.to_lowercase().contains(&query) && !p.is_dir()).then(|| (rel, p.clone()))
+                })
+                .collect();
+            found.sort();
+            found.truncate(300);
+            rows = found.into_iter().map(|(rel, path)| Row { depth: 0, name: rel, path, is_dir: false, open: false, kind: RowKind::Entry }).collect();
+            self.rows = Arc::new(rows);
+            return;
+        }
         walk(&self.nodes, 0, &self.expanded, &mut rows);
         // The name field goes first in its folder.
         if let Some(c) = &self.creating {
@@ -460,12 +512,24 @@ impl Focusable for FileTree {
 }
 
 impl Render for FileTree {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Find a file: made with the window the first time the tree is drawn.
+        if self.find.is_none() {
+            let input = cx.new(|cx| InputState::new(window, cx).placeholder("Find a file…"));
+            let sub = cx.subscribe_in(&input, window, |tree, input, ev: &InputEvent, _, cx| {
+                if let InputEvent::Change = ev {
+                    tree.query = input.read(cx).value().to_string();
+                    tree.rebuild_rows();
+                    cx.notify();
+                }
+            });
+            self.find = Some((input, sub));
+        }
         let theme = cx.theme();
         let (fg, muted, sel_bg, hover) = (
             crate::theme::list_text(cx),
             theme.muted_foreground,
-            theme.accent,
+            theme.ring.opacity(if theme.is_dark() { 0.18 } else { 0.10 }),
             theme.secondary_hover,
         );
         let quiet = if crate::prefs(cx).inset_text { fg.opacity(0.88) } else { theme.sidebar_foreground.opacity(0.88) };
@@ -479,6 +543,10 @@ impl Render for FileTree {
         }
         let rows = self.rows.clone();
         let selected = self.selected.clone();
+        let (marks, dirty) = (self.marks.clone(), self.dirty.clone());
+        let finding = !self.query.trim().is_empty();
+        let (guide, ring) = (theme.border, theme.ring);
+        let (yellow, green, red, blue) = (theme.yellow, theme.green, theme.red, theme.blue);
         let remote = self.host.is_remote();
         let entity = cx.entity().downgrade();
         let menu_tree = entity.clone();
@@ -592,10 +660,30 @@ impl Render for FileTree {
                                     let _ = rem.update(cx, |t, cx| t.discard(rem_path.clone(), window, cx));
                                 }),
                         );
+                    // What git says: a file's letter, a dot on a folder holding a change.
+                    let mark = if row.is_dir {
+                        dirty.contains(&row.path).then(|| div().flex_none().size(px(6.)).mr(px(4.)).rounded_full().bg(yellow).into_any_element())
+                    } else {
+                        marks.get(&row.path).map(|m| {
+                            let color = match m {
+                                Mark::Modified | Mark::Renamed => if matches!(m, Mark::Renamed) { blue } else { yellow },
+                                Mark::Added | Mark::Untracked => green,
+                                Mark::Deleted | Mark::Conflict => red,
+                            };
+                            div().flex_none().w(px(12.)).mr(px(2.)).text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(color).child(m.letter()).into_any_element()
+                        })
+                    };
+                    // A thin line down each level it is nested in (none while finding: flat).
+                    let guides = (!finding).then(|| {
+                        (0..row.depth).map(|level| {
+                            div().absolute().top_0().bottom_0().left(px(6. + level as f32 * 12. + 6.)).w(px(1.)).bg(guide.opacity(0.7))
+                        })
+                    });
                     // The whole width: the highlight runs to the edge, the buttons sit at the right.
                     div()
                         .id(ix)
                         .group(group)
+                        .relative()
                         .w_full()
                         .h(px(ROW_HEIGHT))
                         .pl(indent)
@@ -606,9 +694,13 @@ impl Render for FileTree {
                         .text_size(px(LIST_TEXT))
                         .text_color(if row.is_dir || is_sel { fg } else { quiet })
                         .when(is_sel, |d| d.bg(sel_bg))
-                        .hover(|d| d.bg(hover))
+                        .when(!is_sel, |d| d.hover(|d| d.bg(hover)))
+                        .children(guides.into_iter().flatten())
+                        // The shown file's accent bar.
+                        .when(is_sel, |d| d.child(div().absolute().left_0().top(px(3.)).bottom(px(3.)).w(px(3.)).rounded_full().bg(ring)))
                         .child(icon)
                         .child(crate::theme::pressed(div().flex_1().min_w_0().truncate(), row.name.clone(), cx))
+                        .children(mark)
                         .child(icons)
                         .on_click(move |_, _, cx| {
                             let _ = entity.update(cx, |tree, cx| tree.click(ix, cx));
@@ -628,11 +720,28 @@ impl Render for FileTree {
         })
         .track_scroll(&self.scroll)
         .size_full();
+        let find = self.find.as_ref().map(|(input, _)| input.clone());
         div()
             .id("file-tree-space")
             .size_full()
+            .flex()
+            .flex_col()
             .bg(sidebar_bg)
-            .child(list)
+            .children(find.map(|input| {
+                div()
+                    .flex_none()
+                    .px(px(8.))
+                    .pt(px(2.))
+                    .pb(px(6.))
+                    // Escape empties it.
+                    .capture_key_down(move |ev: &KeyDownEvent, window, cx| {
+                        if ev.keystroke.key == "escape" {
+                            input.update(cx, |i, cx| i.set_value("", window, cx));
+                        }
+                    })
+                    .child(Input::new(self.find.as_ref().map(|(i, _)| i).expect("made above")).small().cleanable(true))
+            }))
+            .child(div().flex_1().min_h_0().child(list))
             .context_menu(move |menu, _, cx| {
                 let Some(tree) = menu_tree.upgrade() else { return menu };
                 let (dir, entry, remote) = (tree.read(cx).menu_folder(), tree.read(cx).menu_entry(), tree.read(cx).host.is_remote());

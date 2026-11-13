@@ -1203,6 +1203,9 @@ impl Workspace {
                     }
                     if ws.files.update(cx, |t, _| t.changes_listing(&paths)) {
                         ws.files.update(cx, |t, cx| t.refresh(cx));
+                    } else {
+                        // Same files, changed: git's marks may have.
+                        ws.files.update(cx, |t, cx| t.refresh_status(cx));
                     }
                 });
                 if ok.is_err() {

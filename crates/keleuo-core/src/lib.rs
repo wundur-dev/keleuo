@@ -35,6 +35,7 @@ pub mod file_clipboard;
 pub mod files;
 pub mod find;
 pub mod frontmatter;
+pub mod git_status;
 pub mod images;
 pub mod google_fonts;
 pub mod host;
