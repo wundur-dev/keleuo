@@ -12,7 +12,6 @@ use gpui_kit::component::input::{Enter, Escape, IndentInline, MoveDown, MoveUp, 
 use crate::agent_session::{Asking, Fill, Spend, View};
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::menu::DropdownMenu;
-use crate::sheet_tabs::{self, Joined, Palette, StripState};
 use gpui_kit::component::text::TextView;
 use gpui_kit::component::{ActiveTheme, Icon, IconName, Sizable};
 use gpui_kit::prelude::*;
@@ -161,8 +160,6 @@ pub struct ChatPanel {
     pending_find: Option<(u64, usize, usize)>,
     /// Go to latest, over the conversation while it is scrolled up (see `latest`).
     latest: latest::Latest,
-    /// The Chat and Terminal view tabs.
-    views: Rc<StripState>,
     _subs: Vec<Subscription>,
 }
 
@@ -188,8 +185,6 @@ const SPELL_PAUSE: std::time::Duration = std::time::Duration::from_millis(150);
 pub struct Pulse(u32);
 /// Steps in a spinner's turn (one turn a little over a second at the tick above).
 const SPINNER_STEPS: u32 = 12;
-/// Space below the Chat / Terminal tabs, before the window's bottom edge.
-const VIEW_STRIP_GAP_BELOW: f32 = 6.;
 
 impl ChatPanel {
     pub fn new(
@@ -351,7 +346,6 @@ impl ChatPanel {
             latest: Default::default(),
             ticker: None,
             on_screen: Default::default(),
-            views: Rc::new(StripState::default()),
             _subs: vec![s1, s2, s3],
         };
         Self::watch_scrolling(&panel.list, &panel.latest, panel.me.clone());
@@ -951,77 +945,6 @@ impl ChatPanel {
 }
 
 impl ChatPanel {
-    /// The Chat and Terminal tabs along the bottom, for backends with a terminal interface.
-    fn render_views(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let session = self.session.read(cx);
-        if !session.backend.capabilities().terminal_view {
-            return None;
-        }
-        let ground = crate::theme::strip_ground(cx);
-        let theme = cx.theme();
-        let content = theme.background;
-        let palette = Palette::new(ground, theme.foreground, content, theme.foreground, theme.border, theme.ring);
-        let shown = match session.view {
-            View::Chat => 0,
-            View::Terminal => 1,
-        };
-        let default_terminal = cx.global::<crate::AppSettings>().0.borrow().view_for(None) == "terminal";
-        let muted = theme.muted_foreground;
-        let locked = session.switch_blocked().map(|why| (SharedString::from(why), self.spinner(muted).xsmall()));
-        let weak = self.session.downgrade();
-        let input = self.input.clone();
-        let strip = sheet_tabs::simple_strip(
-            &self.views,
-            "session-view",
-            &["Chat".into(), "Terminal".into()],
-            shown,
-            Joined::Top,
-            palette,
-            24.,
-            locked,
-            Rc::new(move |ix, window, cx| {
-                let view = if ix == 0 { View::Chat } else { View::Terminal };
-                let _ = weak.update(cx, |s, cx| s.set_view(view, cx));
-                // Typing goes where the view is: the terminal, or the message box.
-                let term = weak.upgrade().and_then(|s| s.read(cx).terminal_view());
-                match (view, term) {
-                    (View::Terminal, Some(t)) => {
-                        let f = t.read(cx).focus.clone();
-                        window.focus(&f, cx)
-                    }
-                    _ => input.update(cx, |i, cx| i.focus(window, cx)),
-                }
-            }),
-        );
-        // Some room below the tabs, so they don't sit on the window's bottom edge.
-        Some(
-            div().flex_none().bg(ground).pb(px(VIEW_STRIP_GAP_BELOW)).child(
-            strip
-                .child(
-                    div()
-                        .id("default-view")
-                        .px_2()
-                        .text_size(px(10.5))
-                        .text_color(muted)
-                        .cursor_pointer()
-                        .hover(|d| d.text_color(theme.foreground))
-                        .child(if default_terminal { "New sessions open in Terminal" } else { "New sessions open in Chat" })
-                        .tooltip(|w, cx| {
-                            gpui_kit::component::tooltip::Tooltip::new("Click to change which view new sessions open in").build(w, cx)
-                        })
-                        .on_click(move |_, window, cx| {
-                            let settings = cx.global::<crate::AppSettings>().0.clone();
-                            let next = if default_terminal { "chat" } else { "terminal" };
-                            settings.borrow_mut().default_view = next.into();
-                            let _ = settings.borrow().save();
-                            window.refresh();
-                        }),
-                ),
-            )
-            .into_any_element(),
-        )
-    }
-
     /// In the terminal view, the files the agent changed this session, as links to their diffs.
     fn render_edits(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let chat = &self.session.read(cx).chat;
@@ -1179,7 +1102,6 @@ impl Render for ChatPanel {
                 self.sync_model_select(window, cx);
                 self.render_composer(slash, window, cx)
             }))
-            .children(self.render_views(cx))
             .children(self.render_fix(cx))
             // Marks the chat as on screen while a frame shows it (see `on_screen`).
             .child({

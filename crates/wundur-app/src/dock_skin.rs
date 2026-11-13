@@ -369,7 +369,9 @@ impl SheetGroup {
         let theme = cx.theme();
         // Where typing goes: the shown tab's accent is blue in the focused group, a quiet grey in
         // the others.
-        let accent = if focused(group, window, cx) { theme.ring } else { theme.border };
+        // Modern keeps the shown tab's accent wherever the focus is; the others mark the group
+        // with the focus.
+        let accent = if focused(group, window, cx) || sheet_tabs::style() == sheet_tabs::TabStyle::Modern { theme.ring } else { theme.border };
         let palette = Palette::new(ground, theme.foreground, content, theme.foreground, theme.border, accent);
         let documents = joined == Joined::Bottom;
         let shown = shown_ix(group, cx);
