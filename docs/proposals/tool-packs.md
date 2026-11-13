@@ -184,7 +184,7 @@ A pack is downloaded code that holds your keys and can spend your money. The rul
 
 ## Where things live
 
-- Installed packs: `~/Library/Application Support/wundur/packs/<id>/<version>/` (and the same
+- Installed packs: `~/Library/Application Support/wundur-studio/packs/<id>/<version>/` (and the same
   folder under Linux's and Windows' config dirs).
 - Secrets: the system key store, as `pack/<id>/<NAME>`. macOS: Keychain (now). Linux: Secret
   Service through `secret-tool` (now). **Windows: Credential Manager, to add** before packs work

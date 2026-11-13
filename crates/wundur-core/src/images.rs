@@ -12,7 +12,7 @@ pub const KEEP: Duration = Duration::from_secs(30 * 24 * 3600);
 pub fn root() -> Option<PathBuf> {
     match crate::env_var_os("CACHE_DIR") {
         Some(d) if !d.is_empty() => Some(PathBuf::from(d).join("images")),
-        _ => dirs::cache_dir().map(|d| d.join("wundur").join("images")),
+        _ => dirs::cache_dir().map(|d| d.join("wundur-studio").join("images")),
     }
 }
 

@@ -9,8 +9,11 @@ use serde::{Deserialize, Serialize};
 pub const MAX_RECENT: usize = 12;
 
 /// Where Wundur keeps its files: `WUNDUR_CONFIG_DIR` when set (tests), else
-/// `wundur` in the user's config folder. The folder of an earlier name of the app
+/// [`DIR_NAME`] in the user's config folder. The folder of an earlier name of the app
 /// (`keleuo`, copied so Keleuo keeps its own; `keleion` and `workbench` before it, moved) comes
+/// The folder Wundur Studio keeps its files in, in the user's config folder.
+pub const DIR_NAME: &str = "wundur-studio";
+
 /// there the first time; if it cannot, it is used where it is.
 pub fn config_dir() -> Option<PathBuf> {
     static DIR: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
@@ -20,7 +23,9 @@ pub fn config_dir() -> Option<PathBuf> {
             let earlier = migrate(&d.join("workbench"), &d.join("keleion"));
             let earlier = migrate(&earlier, &d.join("keleuo"));
             // Copied, not moved: Keleuo, when it is still installed, keeps its own.
-            copy_over(&earlier, &d.join("wundur"))
+            // Its own name: a folder called "Wundur" may be another app's (macOS folder names
+            // ignore case, so "wundur" would be the same one).
+            copy_over(&earlier, &d.join(DIR_NAME))
         }),
     })
     .clone()
@@ -493,7 +498,7 @@ mod tests {
     #[test]
     fn keleuos_folder_is_copied_and_kept() {
         let base = std::env::temp_dir().join(format!("wundur-copy-{}", std::process::id()));
-        let (old, new) = (base.join("keleuo"), base.join("wundur"));
+        let (old, new) = (base.join("keleuo"), base.join(super::DIR_NAME));
         std::fs::create_dir_all(old.join("layouts")).unwrap();
         std::fs::write(old.join("settings.json"), "{}").unwrap();
         std::fs::write(old.join("layouts/a.json"), "[]").unwrap();

@@ -8,7 +8,7 @@ use std::process::Stdio;
 use std::sync::Mutex;
 
 /// The service Wundur's secrets are kept under.
-const SERVICE: &str = "wundur";
+const SERVICE: &str = "wundur-studio";
 
 /// The service they were kept under when the app was called Keleuo: a secret found only there
 /// is copied to `SERVICE` the first time it is read (and left there, so Keleuo still has it).
