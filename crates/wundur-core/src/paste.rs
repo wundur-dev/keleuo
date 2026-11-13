@@ -130,6 +130,52 @@ pub fn bytes(text: &str) -> String {
     }
 }
 
+const IMAGE: &str = "[Image #";
+
+/// The token for image `n` (from 1) in the message box: where the person put it in the text.
+pub fn image_token(n: usize) -> String {
+    format!("{IMAGE}{n}]")
+}
+
+/// The numbers of the image tokens in the message box, in the order they appear (each once).
+pub fn image_tokens_in(message: &str) -> Vec<usize> {
+    let mut out = Vec::new();
+    for (i, _) in message.match_indices(IMAGE) {
+        let after = &message[i + IMAGE.len()..];
+        let digits: String = after.chars().take_while(char::is_ascii_digit).collect();
+        if after[digits.len()..].starts_with(']')
+            && let Ok(n) = digits.parse::<usize>()
+            && !out.contains(&n)
+        {
+            out.push(n);
+        }
+    }
+    out
+}
+
+/// The message as it is sent, and its images: those whose token is still in the text (image
+/// `n` is `images[n - 1]`), numbered 1, 2, 3 in the order they appear, each token written as
+/// `[Image 1]`. The agent gets the images labelled the same way (`Image 1:`), so the text says
+/// which one it means. A token without an image stays as typed.
+pub fn number_images<T: Clone>(message: &str, images: &[T]) -> (String, Vec<T>) {
+    let order: Vec<usize> = image_tokens_in(message).into_iter().filter(|n| n.checked_sub(1).is_some_and(|k| k < images.len())).collect();
+    let mut text = message.to_string();
+    for (k, n) in order.iter().enumerate() {
+        text = text.replace(&image_token(*n), &format!("[Image {}]", k + 1));
+    }
+    (text, order.iter().map(|n| images[n - 1].clone()).collect())
+}
+
+/// The label put before image `k` (from 1) of a message, as the agent reads it.
+pub fn image_label(k: usize) -> String {
+    format!("Image {k}:")
+}
+
+/// Whether `text` is only such a label (left out when a message is read back).
+pub fn is_image_label(text: &str) -> bool {
+    text.trim().strip_prefix("Image ").and_then(|r| r.strip_suffix(':')).is_some_and(|d| !d.is_empty() && d.chars().all(|c| c.is_ascii_digit()))
+}
+
 /// A stretch of a message: typed text, or a pasted block.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Part<'a> {
@@ -239,6 +285,20 @@ mod tests {
         assert_eq!(kind("just some words\nand more words\n"), "Text");
         assert!(heading(&"word ".repeat(40)).ends_with('…'));
         assert_eq!((bytes("abc"), bytes(&"x".repeat(5600))), ("3 B".to_string(), "5.6 KB".to_string()));
+    }
+
+    #[test]
+    fn images_are_numbered_by_where_they_are_in_the_text() {
+        let images = ["a.png", "b.png", "c.png"];
+        // Image 1 was deleted from the text; 3 comes before 2.
+        let msg = format!("make it like {} not {}, see {} again", image_token(3), image_token(2), image_token(3));
+        assert_eq!(image_tokens_in(&msg), [3, 2]);
+        let (text, sent) = number_images(&msg, &images);
+        assert_eq!(text, "make it like [Image 1] not [Image 2], see [Image 1] again");
+        assert_eq!(sent, ["c.png", "b.png"]);
+        // A token without its image stays as typed.
+        assert_eq!(number_images("see [Image #9]", &images), ("see [Image #9]".to_string(), vec![]));
+        assert!(is_image_label(&image_label(2)) && !is_image_label("Image of a cat:") && !is_image_label("Image :"));
     }
 
     #[test]
