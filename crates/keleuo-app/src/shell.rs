@@ -2977,7 +2977,7 @@ impl Shell {
                     // Open, its sessions sit in a well a shade darker than the list, set in.
                     if !project.folded && !members.is_empty() {
                         let root = project.root.clone();
-                        let mut well = div().mx(px(6.)).mt_1().mb_1().py(px(4.)).flex().flex_col().rounded(px(10.)).bg(well_bg).shadow(vec![well_shadow.clone()]);
+                        let mut well = div().w_full().mt_1().mb_1().py(px(4.)).flex().flex_col().bg(well_bg).shadow(vec![well_shadow.clone()]);
                         for ix in members {
                             well = well.child(self.session_row(ix, Some(&root), cx));
                         }
@@ -3265,6 +3265,11 @@ impl Render for Shell {
                 .flex()
                 .items_center()
                 .gap_1()
+                // Hide or show the projects list, where a Mac app keeps its sidebar's button.
+                .child(
+                    button("t-sessions", Icon::new(IconName::PanelLeft), "Projects list (Cmd+Shift+B)")
+                        .on_click(cx.listener(|s, _, _, cx| s.toggle_folded(cx))),
+                )
                 .child(
                     div().flex_1().min_w_0().child(
                         div()
