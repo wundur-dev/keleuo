@@ -367,6 +367,8 @@ fn parse_user(v: &Value) -> Event {
         .iter()
         .filter(|b| b.get("type").and_then(Value::as_str) == Some("text"))
         .map(|b| s(b, "text"))
+        // The labels before a message's images (`Image 1:`) are for the agent.
+        .filter(|t| !crate::paste::is_image_label(t))
         .collect();
     if text.is_empty() {
         Event::Other("user".into())
@@ -420,12 +422,14 @@ pub fn user_message(text: &str) -> String {
 }
 
 /// The stdin line for a user turn with images: each read from its file (on this machine) and
-/// embedded, then the text.
+/// embedded after its label (`Image 1:`, which the text refers to as `[Image 1]`), then the
+/// text. Images first, as Anthropic's vision guide advises; the labels say which is which.
 pub fn user_message_with_images(text: &str, images: &[std::path::PathBuf]) -> std::io::Result<String> {
     use base64::Engine as _;
     let mut content = Vec::new();
-    for path in images {
+    for (k, path) in images.iter().enumerate() {
         let data = base64::engine::general_purpose::STANDARD.encode(std::fs::read(path)?);
+        content.push(json!({"type": "text", "text": crate::paste::image_label(k + 1)}));
         content.push(json!({"type": "image", "source": {"type": "base64", "media_type": image_type(path), "data": data}}));
     }
     if !text.is_empty() {

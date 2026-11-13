@@ -1604,7 +1604,7 @@ impl Workspace {
                 let c = if cmd == "chat-top" { "top" } else { "scroll" };
                 self.claude.update(cx, |p, cx| p.test_command(c, dy, cx));
             }
-            "attach" => self.claude.update(cx, |p, cx| p.test_attach(PathBuf::from(arg), cx)),
+            "attach" => self.claude.update(cx, |p, cx| p.test_attach(PathBuf::from(arg), window, cx)),
             // As if the file's text were pasted into the message box.
             "paste-file" => {
                 let text = std::fs::read_to_string(arg).unwrap_or_default();

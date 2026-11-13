@@ -96,6 +96,8 @@ fn user_text(v: &Value) -> Option<String> {
             .iter()
             .filter(|b| b.get("type").and_then(Value::as_str) == Some("text"))
             .filter_map(|b| b.get("text").and_then(Value::as_str))
+            // The labels Wundur puts before a message's images (`Image 1:`) are for the agent.
+            .filter(|t| !crate::paste::is_image_label(t))
             .collect::<Vec<_>>()
             .join("\n"),
         _ => return None,
@@ -1056,6 +1058,15 @@ mod tests {
                 .join(name),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn the_labels_before_a_messages_images_are_left_out() {
+        let v: Value = serde_json::from_str(
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"Image 1:"},{"type":"image","source":{}},{"type":"text","text":"Image 2:"},{"type":"image","source":{}},{"type":"text","text":"what colour is [Image 1]?"}]}}"#,
+        )
+        .unwrap();
+        assert_eq!(user_text(&v).as_deref(), Some("what colour is [Image 1]?"));
     }
 
     #[test]

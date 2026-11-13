@@ -63,12 +63,14 @@ pub(super) fn continue_list(input: &Entity<TextareaState>, window: &mut Window, 
     true
 }
 
-/// A paste's token in the message box: a tinted pill with the paste's number and name, the
-/// same number as its card above the box.
+/// A paste's or an image's token in the message box: a tinted pill with its number and name,
+/// the same number as its card or thumbnail above the box.
 pub(super) fn paste_pill(token: &InlineTokenContext, _: &mut Window, cx: &mut App) -> AnyElement {
     let theme = cx.theme();
     let ring = theme.ring;
-    let n = token.token().id().strip_prefix("paste-").unwrap_or("").to_string();
+    let id = token.token().id().to_string();
+    let image = id.starts_with("image-");
+    let n = id.strip_prefix("paste-").or_else(|| id.strip_prefix("image-")).unwrap_or("").to_string();
     let edge = if token.is_selected() { ring } else { ring.opacity(0.35) };
     div()
         .h(token.line_height() - px(2.))
@@ -83,7 +85,7 @@ pub(super) fn paste_pill(token: &InlineTokenContext, _: &mut Window, cx: &mut Ap
         .bg(ring.opacity(if token.is_selected() { 0.16 } else { 0.08 }))
         .text_xs()
         .text_color(theme.foreground)
-        .child(Icon::new(gpui_kit::assets::IconName::FileText).xsmall().text_color(ring))
+        .child(Icon::new(if image { gpui_kit::assets::IconName::Image } else { gpui_kit::assets::IconName::FileText }).xsmall().text_color(ring))
         .when(!n.is_empty(), |d| d.child(div().font_weight(FontWeight::SEMIBOLD).text_color(ring).child(n)))
         .child(token.token().label().clone())
         .into_any_element()
@@ -92,8 +94,10 @@ pub(super) fn paste_pill(token: &InlineTokenContext, _: &mut Window, cx: &mut Ap
 impl ChatPanel {
     /// Tests: send `text` with what is attached and pasted.
     pub fn test_send(&mut self, text: &str, cx: &mut Context<Self>) {
-        let images = std::mem::take(&mut self.attachments);
-        let text = paste::expand(text, &std::mem::take(&mut self.pastes), true);
+        let attached = std::mem::take(&mut self.attachments);
+        // Images without a token in `text` all go, as attached.
+        let (text, images) = if paste::image_tokens_in(text).is_empty() { (text.to_string(), attached) } else { paste::number_images(text, &attached) };
+        let text = paste::expand(&text, &std::mem::take(&mut self.pastes), true);
         self.session.update(cx, |s, cx| s.send_with(&text, images, cx));
     }
 
@@ -446,18 +450,20 @@ impl ChatPanel {
     }
 
     /// Send what the message box holds: its text with the long pastes put back (marked, so
-    /// the chat folds them), and the attached images. The box empties.
+    /// the chat folds them), and the images whose token is still in it, numbered by where they
+    /// are (`[Image 1]`, see `paste::number_images`). The box empties.
     pub(super) fn send_composed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let typed = self.input.read(cx).value().to_string();
-        if typed.trim().is_empty() && self.attachments.is_empty() {
+        let (typed, images) = paste::number_images(&typed, &self.attachments);
+        if typed.trim().is_empty() && images.is_empty() {
             return;
         }
+        self.attachments.clear();
         let text = paste::expand(&typed, &std::mem::take(&mut self.pastes), true);
         self.toggled.retain(|k| !k.starts_with("tray-paste:"));
         self.input.update(cx, |s, cx| s.set_value("", window, cx));
         // Sending goes back to the end and follows it.
         self.list.set_follow_mode(FollowMode::Tail);
-        let images = std::mem::take(&mut self.attachments);
         self.session.update(cx, |s, cx| s.send_with(&text, images, cx));
     }
 
@@ -483,22 +489,35 @@ impl ChatPanel {
         cx.notify();
     }
 
+    /// Image `n` out of the message: its token taken from the text (the image goes with it).
+    pub(super) fn drop_image(&mut self, n: usize, window: &mut Window, cx: &mut Context<Self>) {
+        self.replace_token(&format!("image-{n}"), None, window, cx);
+        // Back to writing, where the image was.
+        self.focus_input(window, cx);
+    }
+
     /// Paste `n` back into the message box as plain text (`inline`), or out of it. The other
     /// tokens stay tokens.
     pub(super) fn unfold_paste(&mut self, n: usize, inline: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some(pasted) = self.pastes.get(n - 1).cloned() else { return };
-        let id = format!("paste-{n}");
+        self.replace_token(&format!("paste-{n}"), inline.then_some(pasted), window, cx);
+    }
+
+    /// The token `id` in the message box replaced by `with` (or taken out); the other tokens
+    /// stay tokens.
+    fn replace_token(&mut self, id: &str, with: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
         let content = self.input.read(cx).content();
         let text = content.text().to_string();
-        let (mut out, mut kept, mut last) = (String::new(), Vec::new(), 0);
+        let (mut out, mut kept, mut last, mut at) = (String::new(), Vec::new(), 0, None);
         for span in content.tokens() {
             let r = span.range();
             out.push_str(&text[last..r.start]);
             last = r.end;
             if span.token().id().as_ref() == id {
-                if inline {
-                    out.push_str(&pasted);
+                if let Some(text) = &with {
+                    out.push_str(text);
                 }
+                at = Some(out.len());
             } else {
                 let start = out.len();
                 out.push_str(&text[r]);
@@ -513,7 +532,13 @@ impl ChatPanel {
                 Err(_) => rebuilt,
             };
         }
-        self.input.update(cx, |s, cx| s.set_value(rebuilt, window, cx));
+        // The cursor where the token was (after what replaced it).
+        self.input.update(cx, |s, cx| {
+            s.set_value(rebuilt, window, cx);
+            if let Some(at) = at {
+                s.set_selected_range(at..at, cx);
+            }
+        });
         self.mark_markdown(cx);
         self.check_spelling_soon(std::time::Duration::ZERO, window, cx);
         cx.notify();
@@ -525,16 +550,40 @@ impl ChatPanel {
     }
 
     /// Tests: attach an image file.
-    pub fn test_attach(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        self.attach([path], cx);
+    pub fn test_attach(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        self.attach([path], window, cx);
     }
 
-    /// Add image files to the next message.
-    pub(super) fn attach(&mut self, paths: impl IntoIterator<Item = PathBuf>, cx: &mut Context<Self>) {
+    /// The images whose token is still in the message box, by number (from 1).
+    pub(super) fn placed_images(&self, cx: &App) -> Vec<(usize, PathBuf)> {
+        let value = self.input.read(cx).value().to_string();
+        paste::image_tokens_in(&value).into_iter().filter_map(|n| Some((n, self.attachments.get(n.checked_sub(1)?)?.clone()))).collect()
+    }
+
+    /// Add image files to the next message, each with a token at the cursor (`Image 1`), which
+    /// marks where in the text it goes: the agent is told which image the text means there.
+    /// Deleting the token drops its image.
+    pub(super) fn attach(&mut self, paths: impl IntoIterator<Item = PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
+        let mut placed = self.placed_images(cx);
         for p in paths {
-            if is_image(&p) && !self.attachments.contains(&p) {
-                self.attachments.push(p);
+            if !is_image(&p) || placed.iter().any(|(_, q)| *q == p) {
+                continue;
             }
+            // The lowest number not in the text: one whose token was deleted is free again.
+            let n = (1..).find(|n| !placed.iter().any(|(m, _)| m == n)).unwrap_or(1);
+            if n <= self.attachments.len() {
+                self.attachments[n - 1] = p.clone();
+            } else {
+                self.attachments.push(p.clone());
+            }
+            placed.push((n, p));
+            let typed = paste::image_token(n);
+            let token = InlineToken::new(format!("image-{n}"), typed.clone()).with_label("Image".to_string());
+            self.input.update(cx, |s, cx| {
+                if s.replace_with_token(token, window, cx).is_err() {
+                    s.insert(typed, window, cx);
+                }
+            });
         }
         cx.notify();
     }
@@ -543,7 +592,7 @@ impl ChatPanel {
     /// folder) can't be sent as it is, so its path goes in the text at the cursor instead.
     pub(super) fn take_files(&mut self, paths: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
         let (images, others): (Vec<PathBuf>, Vec<PathBuf>) = paths.into_iter().partition(|p| is_image(p));
-        self.attach(images, cx);
+        self.attach(images, window, cx);
         if !others.is_empty() {
             let text = paths_text(&others);
             self.input.update(cx, |s, cx| s.insert(text, window, cx));
@@ -551,12 +600,12 @@ impl ChatPanel {
     }
 
     /// A pasted image (bytes from the clipboard): kept in the session's image folder.
-    pub(super) fn attach_bytes(&mut self, bytes: &[u8], ext: &str, cx: &mut Context<Self>) {
+    pub(super) fn attach_bytes(&mut self, bytes: &[u8], ext: &str, window: &mut Window, cx: &mut Context<Self>) {
         let id = self.session.read(cx).chat.session_id.clone();
         if let Some(dir) = wundur_core::images::session_dir(id.as_deref())
             && let Ok(path) = wundur_core::images::store(&dir, bytes, ext)
         {
-            self.attach([path], cx);
+            self.attach([path], window, cx);
         }
     }
 
@@ -568,7 +617,7 @@ impl ChatPanel {
         let session = self.session.read(cx);
         let busy = session.chat.busy;
         let permission_prompts = session.backend.capabilities().permission_prompts;
-        let has_text = !self.input.read(cx).value().trim().is_empty() || !self.attachments.is_empty();
+        let has_text = !self.input.read(cx).value().trim().is_empty();
         let mono = !cx.global::<crate::AppSettings>().0.borrow().always_proportional
             && wundur_core::markdown_marks::has_fence(&self.input.read(cx).value());
         let restarting = session.restarting.clone();
@@ -807,8 +856,9 @@ impl ChatPanel {
         let theme = cx.theme();
         let (border, muted, fg, ring, bg) = (theme.border, theme.muted_foreground, theme.foreground, theme.ring, theme.background);
         let mut images = div().flex().flex_wrap().gap_2();
-        for (n, path) in self.attachments.iter().enumerate() {
-            let (p1, p2) = (path.clone(), path.clone());
+        let placed = self.placed_images(cx);
+        for (n, path) in placed.iter().cloned() {
+            let p1 = path.clone();
             images = images.child(
                 div()
                     .id(("chip", n))
@@ -834,11 +884,31 @@ impl ChatPanel {
                             .items_center()
                             .justify_center()
                             .child(Icon::new(IconName::Close).xsmall().text_color(gpui_kit::white()))
-                            .on_click(cx.listener(move |p, _, _, cx| {
+                            .on_click(cx.listener(move |p, _, window, cx| {
                                 cx.stop_propagation();
-                                p.attachments.retain(|a| *a != p2);
-                                cx.notify();
+                                p.drop_image(n, window, cx);
                             })),
+                    )
+                    // Its number, as on its token in the text.
+                    .child(
+                        div()
+                            .absolute()
+                            .bottom(px(3.))
+                            .left(px(3.))
+                            .min_w(px(16.))
+                            .h(px(16.))
+                            .px(px(4.))
+                            .rounded_full()
+                            .bg(ring)
+                            .border_1()
+                            .border_color(gpui_kit::white())
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .text_size(px(10.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(gpui_kit::white())
+                            .child(n.to_string()),
                     ),
             );
         }
@@ -964,14 +1034,14 @@ impl ChatPanel {
             );
         }
 
-        (!self.attachments.is_empty() || paste_cards > 0).then(|| {
+        (!placed.is_empty() || paste_cards > 0).then(|| {
             div()
                 .w_full()
                 .flex()
                 .flex_col()
                 .gap_2()
                 .pb_1()
-                .when(!self.attachments.is_empty(), |d| d.child(images))
+                .when(!placed.is_empty(), |d| d.child(images))
                 .when(paste_cards > 0, |d| d.child(cards))
                 .into_any_element()
         })
@@ -1255,11 +1325,11 @@ impl ChatPanel {
             .ghost()
             .icon(gpui_kit::assets::IconName::Paperclip)
             .tooltip("Attach images")
-            .on_click(cx.listener(|_, _, _, cx| {
+            .on_click(cx.listener(|_, _, window, cx| {
                 let paths = cx.prompt_for_paths(PathPromptOptions { files: true, directories: false, multiple: true, prompt: None });
-                cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+                cx.spawn_in(window, async move |this, cx| {
                     if let Ok(Ok(Some(paths))) = paths.await {
-                        let _ = this.update(cx, |p, cx| p.attach(paths, cx));
+                        let _ = this.update_in(cx, |p, window, cx| p.attach(paths, window, cx));
                     }
                 })
                 .detach();
@@ -1453,8 +1523,11 @@ fn take_paste(item: &ClipboardItem, paste_target: &WeakEntity<ChatPanel>, window
                     ImageFormat::Webp => "webp",
                     _ => "png",
                 };
-                let bytes = image.bytes.clone();
-                let _ = paste_target.update(cx, |p, cx| p.attach_bytes(&bytes, ext, cx));
+                // Its token goes in after this paste is done changing the box.
+                let (bytes, target) = (image.bytes.clone(), paste_target.clone());
+                window.defer(cx, move |window, cx| {
+                    let _ = target.update(cx, |p, cx| p.attach_bytes(&bytes, ext, window, cx));
+                });
                 took = true;
             }
             ClipboardEntry::ExternalPaths(paths) => {
