@@ -89,6 +89,19 @@ fn tools() -> Value {
             },
         },
         {
+            "name": "notify",
+            "description": "Tell the person something in Keleuo's inbox: the one place they see notices from all their sessions at once. Use it when something deserves their attention while they may be looking elsewhere: a long task is done, a decision waits on them, or something went wrong that they should know about. One notice per thing worth their attention, not progress updates; it doesn't wait for an answer. Clicking it opens this session.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "title": { "type": "string", "description": "A short headline, under about 60 characters: \"Release 0.2.4 is built\", \"Pick a database for the save system\"." },
+                    "message": { "type": "string", "description": "Optional detail, a sentence or two." },
+                    "kind": { "type": "string", "enum": ["info", "done", "needs_you", "problem"], "description": "What it is about: done (finished), needs_you (a decision or input waits on the person), problem (something went wrong), or info." },
+                },
+                "required": ["title"],
+            },
+        },
+        {
             "name": "ask_for_review",
             "description": "Ask another agent for a second opinion on work in this folder: Keleuo opens a new, read-only session of that agent here (it can read and run read-only commands, not change files), gives it your request, and its review comes back to this session as a message. The person allows it first. Don't wait for it: finish your turn; the review arrives as a new message.",
             "inputSchema": {
