@@ -41,6 +41,7 @@ actions!(
         FindInChat,
         // In a terminal: its text larger, smaller, or back to the size in Settings.
         TerminalZoomIn,
+        TerminalClear,
         TerminalZoomOut,
         TerminalZoomReset,
         OpenWebPage,
@@ -70,7 +71,9 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-l", AskClaude, None),
         KeyBinding::new("cmd-t", NewTerminal, None),
         KeyBinding::new("cmd-n", NewSession, None),
-        KeyBinding::new("cmd-k", SwitchSession, None),
+        // Go to session: Cmd+P (Cmd+K is the terminal's Clear, as in every Mac terminal).
+        KeyBinding::new("cmd-p", SwitchSession, None),
+        KeyBinding::new("secondary-k", TerminalClear, Some("Terminal")),
         // In a terminal Tab is the program's (completion, a TUI's fields), not the window's move
         // to the next control: unbound there, it reaches the terminal, which sends it on.
         KeyBinding::new("tab", gpui_kit::NoAction, Some("Terminal")),

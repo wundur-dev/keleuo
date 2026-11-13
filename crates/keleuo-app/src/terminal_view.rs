@@ -480,6 +480,31 @@ impl TerminalView {
         }
     }
 
+    /// Clear (Cmd+K): the scrollback goes, and at a shell's prompt the screen too: the shell is
+    /// sent Ctrl+L to redraw its prompt at the top, and what that pushed into the scrollback
+    /// goes once it has. A full-screen program (an editor) keeps its screen.
+    fn clear(&mut self, cx: &mut Context<Self>) {
+        let Some(pty) = self.pty.clone() else { return };
+        let full_screen = {
+            let mut term = pty.term.lock();
+            term.grid_mut().clear_history();
+            term.mode().contains(TermMode::ALT_SCREEN)
+        };
+        if !full_screen {
+            pty.write(b"\x0c".to_vec());
+            let pty = Rc::downgrade(&pty);
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(std::time::Duration::from_millis(150)).await;
+                if let Some(pty) = pty.upgrade() {
+                    pty.term.lock().grid_mut().clear_history();
+                }
+                let _ = this.update(cx, |_, cx| cx.notify());
+            })
+            .detach();
+        }
+        cx.notify();
+    }
+
     fn scroll_to_bottom(&self) {
         if let Some(pty) = &self.pty {
             pty.term.lock().scroll_display(Scroll::Bottom);
@@ -985,6 +1010,7 @@ impl Render for TerminalView {
             .track_focus(&self.focus)
             .key_context("Terminal")
             .on_action(cx.listener(|v, _: &crate::actions::TerminalZoomIn, _, cx| v.zoom_by(Some(1.), cx)))
+            .on_action(cx.listener(|v, _: &crate::actions::TerminalClear, _, cx| v.clear(cx)))
             .on_action(cx.listener(|v, _: &crate::actions::TerminalZoomOut, _, cx| v.zoom_by(Some(-1.), cx)))
             .on_action(cx.listener(|v, _: &crate::actions::TerminalZoomReset, _, cx| v.zoom_by(None, cx)))
             .on_key_down(cx.listener(Self::on_key))
