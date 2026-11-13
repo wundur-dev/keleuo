@@ -1437,17 +1437,13 @@ impl Shell {
         .detach();
     }
 
-    /// A new session in the folder of the project keyed `root`, straight away (no browser):
-    /// on the machine and with the agent of the project's latest session, else this machine's
-    /// default agent.
+    /// The new-session screen for the folder of the project keyed `root` (its name, agent and
+    /// model to choose, ready to start), on the machine of the project's latest session.
     fn new_session_for_project(&mut self, root: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         let latest = self.tabs.iter().rev().find(|t| project_root_of(&t.row).starts_with(&root)).map(|t| t.ws.clone());
-        let (host, backend) = match &latest {
-            Some(ws) => {
-                let w = ws.read(cx);
-                (w.host(), w.session.read(cx).backend.clone())
-            }
-            None => (Arc::new(LocalHost) as Arc<dyn Host>, crate::backends::backend(None, cx)),
+        let host = match &latest {
+            Some(ws) => ws.read(cx).host(),
+            None => Arc::new(LocalHost) as Arc<dyn Host>,
         };
         // A project on another machine is keyed `ssh://host/folder`: its folder is the rest.
         let folder = match root.to_string_lossy().strip_prefix("ssh://") {
@@ -1459,7 +1455,7 @@ impl Shell {
             }
             None => root,
         };
-        self.new_session_in(host, folder, backend, window, cx);
+        self.open_browser(host, folder, None, window, cx);
     }
 
     pub fn new_session_in(&mut self, host: Arc<dyn Host>, root: PathBuf, backend: Arc<dyn Backend>, window: &mut Window, cx: &mut Context<Self>) {
@@ -1686,7 +1682,7 @@ impl Shell {
             "project-new-session" => {
                 // Tests: New session from a project's menu (`arg`: its folder).
                 self.new_session_for_project(PathBuf::from(arg), window, cx);
-                format!("active={} in {}", self.name(self.active, cx), self.tabs[self.active].row.root.display())
+                format!("browser={}", self.browser.is_some())
             }
             "switch" => {
                 // Tests: Go to session, typing `arg`.
@@ -2533,7 +2529,7 @@ impl Shell {
                 let (k, a, r) = (k1.clone(), a1.clone(), root3.clone());
                 let saved = cx.global::<AppSettings>().0.borrow().projects.iter().any(|p| p.root == r);
                 let (w, r_new) = (weak_shell.clone(), r.clone());
-                menu.item(PopupMenuItem::new("New session").on_click(move |_, window, cx| {
+                menu.item(PopupMenuItem::new("New session…").on_click(move |_, window, cx| {
                     let _ = w.update(cx, |s, cx| s.new_session_for_project(r_new.clone(), window, cx));
                 }))
                 .separator()
@@ -2665,7 +2661,7 @@ impl Shell {
                 let (w, r, n, r2) = (weak.clone(), r1.clone(), current.clone(), r2.clone());
                 let saved = cx.global::<AppSettings>().0.borrow().projects.iter().any(|p| p.root == r2);
                 let (w_new, r_new) = (w.clone(), r.clone());
-                menu.item(PopupMenuItem::new("New session").on_click(move |_, window, cx| {
+                menu.item(PopupMenuItem::new("New session…").on_click(move |_, window, cx| {
                     let _ = w_new.update(cx, |s, cx| s.new_session_for_project(r_new.clone(), window, cx));
                 }))
                 .separator()
