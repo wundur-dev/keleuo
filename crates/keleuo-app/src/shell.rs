@@ -3164,6 +3164,11 @@ impl Focusable for Shell {
 
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // The splitter's drag is over once the window has none (it ends wherever the button
+        // came up, whatever was under it): keep the width and drop the highlight.
+        if self.list_resizing && !cx.has_active_drag() {
+            self.end_list_resize(cx);
+        }
         crate::perf::first_frame(window);
         crate::perf::count(crate::perf::Count::Frame);
         let theme = cx.theme();
