@@ -9811,7 +9811,7 @@ dependencies = [
 
 [[package]]
 name = "wundur-app"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
@@ -9830,6 +9830,7 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "objc2-speech",
  "raw-window-handle",
+ "serde",
  "serde_json",
  "tree-sitter",
  "tree-sitter-c-sharp",
@@ -9842,7 +9843,7 @@ dependencies = [
 
 [[package]]
 name = "wundur-core"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
