@@ -1,17 +1,17 @@
 <p align="center">
-  <img src="crates/keleuo-app/assets/icon/keleuo-512.png" alt="Keleuo icon: a cream voxel character beside a golden crane lowering a cube" width="128" height="128">
+  <img src="crates/wundur-app/assets/icon/wundur-512.png" alt="Wundur icon: a cream voxel character beside a golden crane lowering a cube" width="128" height="128">
 </p>
 
-<h1 align="center">Keleuo</h1>
+<h1 align="center">Wundur</h1>
 
-<p align="center"><a href="https://keleuo.com">keleuo.com</a></p>
+<p align="center"><a href="https://wundur.ai">wundur.ai</a></p>
 
 A native desktop app for working with coding agents (Claude Code so far): a list of
 sessions, each a whole workspace with its chat or the agent's own terminal, files, skills
 and terminals. Written in Rust with gpui (the UI framework behind Zed) and gpui-component.
 Prototype.
 
-Keleuo started as a tool for our own work. Running many projects and many agent sessions at
+Wundur started as a tool for our own work. Running many projects and many agent sessions at
 once, we needed something native, fast and easy to work with that fit how we actually work.
 It is a desktop app, not a harness: it runs Claude Code and stays out of its way, while
 keeping each session's folder, conversation, terminals and files together so nothing gets lost.
@@ -25,48 +25,48 @@ Keep the build output on the internal disk:
 
 ```sh
 export CARGO_TARGET_DIR="$HOME/Library/Caches/workbench-target"
-cargo run -p keleuo-app --release -- /path/to/project      # the browser at that folder
-cargo run -p keleuo-app --release -- --new /path/to/project # a session there at once
+cargo run -p wundur-app --release -- /path/to/project      # the browser at that folder
+cargo run -p wundur-app --release -- --new /path/to/project # a session there at once
 cargo test --workspace
 ```
 
 The window opens on the **session browser** at the folder given (or the current folder, like
 `code .`; started from the Finder, the last folder). Remote: `--ssh host:/path/on/host`.
 
-### The `keleuo` command
+### The `wundur` command
 
-`scripts/keleuo` opens the browser at the current folder, or hands the request to the
+`scripts/wundur` opens the browser at the current folder, or hands the request to the
 window that is already open (one window for everything; the first one listens on a socket in
 `$TMPDIR`). Install it once, after a release build:
 
 ```sh
-CARGO_TARGET_DIR="$HOME/Library/Caches/workbench-target" cargo build -p keleuo-app --release
-ln -s "$PWD/scripts/keleuo" "$HOME/.local/bin/keleuo"   # any folder on your PATH
+CARGO_TARGET_DIR="$HOME/Library/Caches/workbench-target" cargo build -p wundur-app --release
+ln -s "$PWD/scripts/wundur" "$HOME/.local/bin/wundur"   # any folder on your PATH
 ```
 
-Then `keleuo`, `keleuo ~/code/app`, `keleuo --new .` or `keleuo --ssh dev:/srv/app`.
-`KELEUO_BIN` points it at another binary.
+Then `wundur`, `wundur ~/code/app`, `wundur --new .` or `wundur --ssh dev:/srv/app`.
+`WUNDUR_BIN` points it at another binary.
 
 ### Restarting onto a new build
 
-`scripts/restart` builds the release binary, quits the running Keleuo and starts the new
+`scripts/restart` builds the release binary, quits the running Wundur and starts the new
 build in the same folder with the same arguments; the open sessions come back. It can run
-from a terminal inside Keleuo (the quit-and-start half is detached, so it outlives the app),
+from a terminal inside Wundur (the quit-and-start half is detached, so it outlives the app),
 which is what the Run button on a `! ./scripts/restart` block in the chat does. `--no-build`
-restarts without building; debug test copies are left running. Keleuo is asked to quit
-(`keleuo --quit`), not stopped, so the quit question below applies.
+restarts without building; debug test copies are left running. Wundur is asked to quit
+(`wundur --quit`), not stopped, so the quit question below applies.
 
 ### Closing with work in it
 
 Closing asks first only when something would be lost, like any Mac app. A file with unsaved
 changes asks Save, Don't Save or Cancel when its tab closes (Cmd+W, its ×, a middle click) or
-when Keleuo quits (Save All for several). Closing a session (Cmd+Shift+W, its menu) that is
+when Wundur quits (Save All for several). Closing a session (Cmd+Shift+W, its menu) that is
 mid-turn, or whose terminals run a command, asks Close or Cancel.
 
 Quitting (Cmd+Q, the menu, the window's close button, or a restart) while a session is mid-turn
 asks, with how many sessions are working and how many terminals are running a command: **Yes** quits and has each
-working session told to carry on when Keleuo starts again (it is sent a short message saying
-so, once); **No** just quits; **Cancel** keeps Keleuo open. With only terminal commands
+working session told to carry on when Wundur starts again (it is sent a short message saying
+so, once); **No** just quits; **Cancel** keeps Wundur open. With only terminal commands
 running it asks whether to quit anyway.
 
 ## Layout and keys
@@ -166,7 +166,7 @@ running it asks whether to quit anyway.
   "Pasted text · 40 lines", where the cursor is: one unit (the cursor steps over it, one
   Backspace takes it), with a card above the box to show it in the text field or remove it.
   Sending puts the whole text back in its place. In the chat a paste folds to a line that
-  opens it, Keleuo's own and Claude Code's (its `<pasted_content>` markers), so older
+  opens it, Wundur's own and Claude Code's (its `<pasted_content>` markers), so older
   conversations fold too.
 - **Run** on a `!` command in the chat (`! git push`): the command, without the `!`, is
   typed into a terminal of the session's folder and run, so a password or login prompt has
@@ -177,7 +177,7 @@ running it asks whether to quit anyway.
   known, avoidable way (so far: zsh refusing an unquoted `?`, `*` or `[`, as in a URL), its
   card says so and offers "Fix so it doesn't happen again": a Claude Code hook, a CLAUDE.md
   line or a shell setting, each saying what it writes where before anything is written.
-  Keleuo never changes or retries the call itself.
+  Wundur never changes or retries the call itself.
 - **Diffs**: a file the session edited can show everything the session changed in it, as one
   diff (rebuilt by undoing its edits): Open diff on an edit card, the Edited list, or
   Cmd+click on a path in a terminal.
@@ -195,7 +195,7 @@ running it asks whether to quit anyway.
   into its own `[Image #N]` attachments; in the Terminal view Cmd+V with an image on the
   clipboard sends Ctrl+V, Claude Code's own image paste, and a copy is kept. Pointing at an
   `[Image #N]` on the terminal screen shows that image. Images in history show as
-  thumbnails. They are kept in `~/Library/Caches/keleuo/images/<session>` and removed after
+  thumbnails. They are kept in `~/Library/Caches/wundur/images/<session>` and removed after
   30 days; nothing is uploaded anywhere else.
 - **Light and dark** follow the macOS appearance, live; the System | Light | Dark buttons in
   the titlebar (or View > Appearance) set it (saved as `appearance`). Both carry the round 4 hierarchy; the terminal has a light
@@ -203,11 +203,11 @@ running it asks whether to quit anyway.
   can. The accent is the icon's periwinkle (#6084E8); crane yellow marks what wants
   attention. Claude Code draws its own interface with its own theme setting, so in the light
   terminal its theme may need to be set to light in Claude Code.
-- **The icon** (`crates/keleuo-app/assets/icon`): the owner's art at 128 px and up, the
-  character alone for 16 to 64 px, in `Keleuo.icns`; the Dock shows it while the app runs.
+- **The icon** (`crates/wundur-app/assets/icon`): the owner's art at 128 px and up, the
+  character alone for 16 to 64 px, in `Wundur.icns`; the Dock shows it while the app runs.
 - **Worktrees** are explicit: the browser's right side is titled with the folder's repository
   and branch, and "New session in a git worktree..." first shows what it will make ("Copy of
-  proj (main) into ../proj-2, branch keleuo/proj-2") with the name editable.
+  proj (main) into ../proj-2, branch wundur/proj-2") with the name editable.
 - **Panel headers and sheet tabs** (after an earlier app): a tool panel (Files, Skills,
   Agent) has a title bar with a grip to drag it by, its title, its actions and
   options on hover; tool panels sharing a spot put their tabs along the bottom, the shown one
@@ -221,7 +221,7 @@ running it asks whether to quit anyway.
 - **Subagents** run live: a strip on top of the chat while they run, a list in the Agent
   panel (finished ones folded under Completed), and a card per subagent in the chat. A
   restored session shows only the subagents of its loaded part (after the last compaction).
-- **About Keleuo** (the app menu): what it is and what it is built with; its memory (the
+- **About Wundur** (the app menu): what it is and what it is built with; its memory (the
   figure Activity Monitor shows, with a chart of the last minute) apart from the agents' own
   programs and web pages; and the machine. A session is one conversation: earlier and
   running sessions of a folder are found in the session browser (Cmd+N), not inside a session.
@@ -247,18 +247,18 @@ running it asks whether to quit anyway.
 | Cmd+Opt+C | Copy the conversation as Markdown |
 | Cmd+, | Settings: appearance, sessions, the chat, the message box, terminals, alerts |
 
-Environment: `KELEUO_MODEL=haiku` picks the model; `KELEUO_PERMISSION_MODE=default`
-starts sessions in that permission mode; `KELEUO_PERF=1` prints timings;
-`KELEUO_CONTROL=<fifo>` accepts test commands (`open`, `term`, `type`, `split`, `send`,
+Environment: `WUNDUR_MODEL=haiku` picks the model; `WUNDUR_PERMISSION_MODE=default`
+starts sessions in that permission mode; `WUNDUR_PERF=1` prints timings;
+`WUNDUR_CONTROL=<fifo>` accepts test commands (`open`, `term`, `type`, `split`, `send`,
 `allow`, `new`, `browse`, `tab`, `tabs`, `move-session`, `fold-sessions`, `view`,
 `term-type`, `term-screen`, `chat`, `chat-top`, `chat-scroll`, `panel`, `earlier`, `resume`, `fork`, `takeover`, `key`, `state`,
-...; see `control.rs`, `shell.rs`, `workspace.rs`); `KELEUO_BACKGROUND=1` opens windows
-without taking focus; `KELEUO_CONFIG_DIR` moves the settings folder (and the window's
-socket with it); `KELEUO_TEST_BACKENDS=1` adds the scripted test agent to the browser.
+...; see `control.rs`, `shell.rs`, `workspace.rs`); `WUNDUR_BACKGROUND=1` opens windows
+without taking focus; `WUNDUR_CONFIG_DIR` moves the settings folder (and the window's
+socket with it); `WUNDUR_TEST_BACKENDS=1` adds the scripted test agent to the browser.
 
 ## Layout of the code
 
-- `crates/keleuo-core`: no UI. The gitignore-aware file tree, skills and frontmatter, the
+- `crates/wundur-core`: no UI. The gitignore-aware file tree, skills and frontmatter, the
   chat state built from agent events (tool calls, permission prompts, diffs, subagents,
   cost), `path:line` link detection, tab names, and the `Host` interface every project
   operation and every program goes through.
@@ -269,13 +269,13 @@ socket with it); `KELEUO_TEST_BACKENDS=1` adds the scripted test agent to the br
   - `backends::claude`: Claude Code. Its `stream-json` format, session files under
     `~/.claude/projects`, skill folders and process discovery live here and nowhere else.
   - `backends::scripted`: a fake agent for tests that plays a fixed turn of neutral events.
-- `crates/keleuo-app`: the gpui window. It only knows `Backend`, `Agent` and `Event`;
+- `crates/wundur-app`: the gpui window. It only knows `Backend`, `Agent` and `Event`;
   `src/backends.rs` is the one file that names a backend, and a test fails if another file
   does.
 
 ## Adding an agent backend
 
-1. Add `crates/keleuo-core/src/backends/<name>/` (or one file) and list it in
+1. Add `crates/wundur-core/src/backends/<name>/` (or one file) and list it in
    `backends/mod.rs`.
 2. Implement `Agent` for one running conversation: build a `ProgramSpec` (program, arguments,
    environment, folder) and start it with `host.program_command(&spec)`, so it runs locally or
@@ -287,20 +287,20 @@ socket with it); `KELEUO_TEST_BACKENDS=1` adds the scripted test agent to the br
    `create_skill`, `earlier_sessions`, `session_count`, `load_session`, `running` and
    `running_elsewhere`. The window hides what `capabilities()` says is missing (skills, earlier
    sessions, forking, subagents, permission prompts, the accept-edits toggle, models).
-4. Register it in `crates/keleuo-app/src/backends.rs`. The new-session browser then offers
+4. Register it in `crates/wundur-app/src/backends.rs`. The new-session browser then offers
    it.
 5. Test it the way `backends/scripted.rs` and `backends/claude/mod.rs` do: drive the `Agent`
    through the trait and apply its events to a `Conversation`. Recorded output belongs in
-   `crates/keleuo-core/tests/fixtures`.
+   `crates/wundur-core/tests/fixtures`.
 
 ## How Claude runs
 
 Each session runs `claude` (`--session-id <new id>`, or `--resume <id>`, with
 `--fork-session` for a fork) in a pseudo-terminal in the project folder, plus
-`--settings <file>`: a settings file of the window's own (in a `keleuo-<pid>` folder in
+`--settings <file>`: a settings file of the window's own (in a `wundur-<pid>` folder in
 the system's temporary folder, removed when the window closes) that adds hooks. Nothing in
-`~/.claude` is changed. Each hook runs `keleuo-hook <socket> <token> <event>` (built next
-to `keleuo`; standard library only), which passes the hook's input to the window over a
+`~/.claude` is changed. Each hook runs `wundur-hook <socket> <token> <event>` (built next
+to `wundur`; standard library only), which passes the hook's input to the window over a
 local socket. Otherwise it is started as in a person's terminal: no stream flags, TERM
 `xterm-256color`, LANG set when the window has none, and the variables a running Claude Code
 gives its children unset (when the window was itself started from one).
@@ -328,7 +328,7 @@ folders, whose hooks could not reach the window.
 
 ## Remote over SSH: the plan
 
-Every project operation goes through `keleuo_core::host::Host`: list and read files, read
+Every project operation goes through `wundur_core::host::Host`: list and read files, read
 and write skills, watch for changes, the terminal's shell, and the `claude` command.
 
 - `LocalHost`: this machine.
@@ -336,7 +336,7 @@ and write skills, watch for changes, the terminal's shell, and the `claude` comm
   control connection (`ControlMaster`). The terminal is `ssh -t host 'cd dir && exec $SHELL -l'`
   in the local PTY; Claude is `ssh -T host claude -p ...` with the same stream over the ssh
   pipes. Files are read with `cat`, listed with `git ls-files`. No file watching.
-- Next: a small headless helper binary (`keleuo-remote`), copied to the host on first
+- Next: a small headless helper binary (`wundur-remote`), copied to the host on first
   connect and started over `ssh` (the approach Zed uses for remote development). It speaks a
   compact length-prefixed protocol over its stdin and stdout: list, read, write, watch
   (notify on the remote), spawn PTY, spawn `claude`, and later spawn language servers. One

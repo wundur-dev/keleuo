@@ -2,8 +2,8 @@
 # bundle-macos.sh <version> <out-dir> [build-number]
 #
 # Build the release binaries for Apple silicon and Intel, join each pair into one universal
-# binary, and assemble Keleuo.app in <out-dir>. `keleuo` is the window; `keleuo-hook` and
-# `keleuo-mcp` sit beside it because the window finds them next to its own executable.
+# binary, and assemble Wundur.app in <out-dir>. `wundur` is the window; `wundur-hook` and
+# `wundur-mcp` sit beside it because the window finds them next to its own executable.
 # The build number (CFBundleVersion) defaults to 1; the release workflow passes its run number.
 # Not signed here: the release workflow signs and notarizes the bundle it produces.
 
@@ -13,21 +13,21 @@ VERSION=$1
 OUT=$2
 BUILD=${3:-1}
 REPO=$(cd "$(dirname "$0")/.." && pwd)
-APP="$OUT/Keleuo.app"
+APP="$OUT/Wundur.app"
 
 cd "$REPO"
 TARGET=${CARGO_TARGET_DIR:-target}
 for arch in aarch64-apple-darwin x86_64-apple-darwin; do
-    cargo build -p keleuo-app --release --bins --target "$arch"
+    cargo build -p wundur-app --release --bins --target "$arch"
 done
 
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-for bin in keleuo keleuo-hook keleuo-mcp; do
+for bin in wundur wundur-hook wundur-mcp; do
     lipo -create -output "$APP/Contents/MacOS/$bin" \
         "$TARGET/aarch64-apple-darwin/release/$bin" "$TARGET/x86_64-apple-darwin/release/$bin"
 done
-cp crates/keleuo-app/assets/icon/Keleuo.icns "$APP/Contents/Resources/Keleuo.icns"
+cp crates/wundur-app/assets/icon/Wundur.icns "$APP/Contents/Resources/Wundur.icns"
 
 cat > "$APP/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -35,15 +35,15 @@ cat > "$APP/Contents/Info.plist" <<EOF
 <plist version="1.0">
 <dict>
     <key>CFBundleExecutable</key>
-    <string>keleuo</string>
+    <string>wundur</string>
     <key>CFBundleIdentifier</key>
-    <string>ai.wundur.keleuo</string>
+    <string>ai.wundur.app</string>
     <key>CFBundleName</key>
-    <string>Keleuo</string>
+    <string>Wundur</string>
     <key>CFBundleDisplayName</key>
-    <string>Keleuo</string>
+    <string>Wundur</string>
     <key>CFBundleIconFile</key>
-    <string>Keleuo</string>
+    <string>Wundur</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
@@ -57,9 +57,9 @@ cat > "$APP/Contents/Info.plist" <<EOF
     <key>NSHighResolutionCapable</key>
     <true/>
     <key>NSMicrophoneUsageDescription</key>
-    <string>Keleuo listens when you press the microphone button, to type what you say into your message.</string>
+    <string>Wundur listens when you press the microphone button, to type what you say into your message.</string>
     <key>NSSpeechRecognitionUsageDescription</key>
-    <string>Keleuo turns what you say into text for your message, on this Mac where it can.</string>
+    <string>Wundur turns what you say into text for your message, on this Mac where it can.</string>
 </dict>
 </plist>
 EOF

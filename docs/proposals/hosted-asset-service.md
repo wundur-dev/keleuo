@@ -4,11 +4,11 @@ Status: draft for the owner, 2026-11-13. Nothing here is built yet.
 
 ## Why
 
-Today Keleuo's asset pipeline runs on the person's own keys: gpt-image for the concept and the
+Today Wundur's asset pipeline runs on the person's own keys: gpt-image for the concept and the
 views, Tripo for the model and the rig. That works, but it puts setup in front of every new
 person, and Tripo is the expensive step (roughly 30 cents to a dollar a model).
 
-The idea: a service we run on Azure, behind a Keleuo account, that does the same pipeline:
+The idea: a service we run on Azure, behind a Wundur account, that does the same pipeline:
 
 1. **Images** with gpt-image-2.5 on Azure (Microsoft Foundry).
 2. **3D models** with Tripo *and* with an open model we host ourselves on Azure GPUs
@@ -21,7 +21,7 @@ for the same price than one built on Tripo, while costing us less.
 ## What it does, end to end
 
 ```
-Keleuo app ──(signed in)──> API (api.keleuo.com)
+Wundur app ──(signed in)──> API (api.wundur.ai)
                              │
      ┌───────────────────────┼─────────────────────────┐
      ▼                       ▼                         ▼
@@ -35,7 +35,7 @@ Keleuo app ──(signed in)──> API (api.keleuo.com)
 
 Images come back in seconds and can be answered directly. 3D and rigging take tens of seconds
 to minutes, so they are **jobs**: the app asks, gets a job id, and polls (or is told) when it is
-done. Everything Keleuo's card already does fits this: it shows a spinner per step.
+done. Everything Wundur's card already does fits this: it shows a spinner per step.
 
 ## 1. Images: gpt-image-2.5, and the one-image turnaround test
 
@@ -138,12 +138,12 @@ smaller limit, or as the fallback when the open model fails a model's check.
 **Mesh2Motion** is, as far as I know, an open-source Mixamo-style tool that runs **in the
 browser** (three.js): it fits a skeleton template (human, and some animals) to a model and
 applies animations. If that's right, it doesn't need to live in the GPU container at all: it
-could run in Keleuo's own web panel, next to the 3D viewer, at no cost to us. That's worth
+could run in Wundur's own web panel, next to the 3D viewer, at no cost to us. That's worth
 confirming first, because it changes the design.
 
 If we want rigging on the server instead (automatic, no person in the loop), the candidates are:
 
-- **Tripo's rig** (what Keleuo uses today; paid per call).
+- **Tripo's rig** (what Wundur uses today; paid per call).
 - **An open auto-rigger on the GPU worker**, such as UniRig (licence and quality to check).
 
 The same container *can* host the 3D model and a rigger (one image, one GPU, two jobs), but
@@ -152,7 +152,7 @@ without touching the other.
 
 ## The rest of the service
 
-- **API:** a small web service on Azure Container Apps (no GPU), at `api.keleuo.com`.
+- **API:** a small web service on Azure Container Apps (no GPU), at `api.wundur.ai`.
   Endpoints: images (generate, edit), jobs (model, rig; create, status, result), the person's
   allowance (`/v1/me`), and later summaries.
 - **Accounts:** Microsoft Entra External ID; the app signs in with a browser and a loopback

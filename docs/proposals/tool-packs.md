@@ -6,11 +6,11 @@ Status: proposal for the owner to read; a first prototype follows it. Written 20
 
 A **tool pack** is a small download (a manifest and a JavaScript file or two) that gives every
 agent new tools: "make an image with gpt-image", "make a sound effect with ElevenLabs", "turn
-this image into a 3D model with Tripo". Keleuo runs the pack's scripts itself, in an embedded
+this image into a 3D model with Tripo". Wundur runs the pack's scripts itself, in an embedded
 JavaScript engine, so nothing needs installing (no Python, no Node, no `npm install`), and the
 scripts can do only what the pack declared: reach the hosts it named, read the secrets it named
 (from the system's key store), write inside the project. Agents get the tools the same way they
-get your own (Settings > Tools): through Keleuo's own MCP server, `keleuo-mcp`, so a pack starts no
+get your own (Settings > Tools): through Wundur's own MCP server, `wundur-mcp`, so a pack starts no
 process of its own.
 
 ## What it is for
@@ -61,8 +61,8 @@ game-assets/
   "name": "Game assets",
   "version": "0.1.0",
   "description": "Images, sound effects, voice and 3D models for games, with your own keys.",
-  "homepage": "https://github.com/wundur-dev/keleuo-packs",
-  "keleuo": ">=0.2.0",
+  "homepage": "https://github.com/wundur-dev/wundur-packs",
+  "wundur": ">=0.2.0",
 
   "secrets": [
     { "name": "OPENAI_API_KEY", "label": "OpenAI API key", "help": "https://platform.openai.com/api-keys", "optional": true },
@@ -111,7 +111,7 @@ tool whose needs are missing isn't offered to agents, and Settings says which ke
 
 ## The script
 
-One function, given the call's arguments and `kx`, Keleuo's API; it returns what the agent gets.
+One function, given the call's arguments and `kx`, Wundur's API; it returns what the agent gets.
 
 ```js
 // image.js
@@ -146,13 +146,13 @@ export default async function (args, kx) {
 | `kx.setting(name)` | a pack setting (Settings > Tools) | |
 | `kx.writeFile(path, bytes \| text)` | write in the session's folder; returns the path written (a free name if taken) | inside the project only, as the write sandbox |
 | `kx.download(url, path, { headers })` | a download saved straight to a project file (a 3D model), never held in the script; returns `{ ok, status, path }` | the same hosts as `fetch`; inside the project only |
-| `kx.writeFile(path, [parts])` | a file put together by Keleuo from texts, `kx.embed(projectFile)` (as base64) and `kx.packFile(name)` (the pack's own), so big parts never pass through the script | inside the project only |
+| `kx.writeFile(path, [parts])` | a file put together by Wundur from texts, `kx.embed(projectFile)` (as base64) and `kx.packFile(name)` (the pack's own), so big parts never pass through the script | inside the project only |
 | `kx.readFile(path)` | read a project file (an image to turn into a 3D model) | inside the project only |
 | `kx.sleep(ms)`, `kx.progress(text)` | wait (polling a job), say how far it is (shown on the tool call's card) | |
 | `kx.base64(text)`, `kx.slug(text)`, `kx.fail(why)` | helpers | |
 
 Nothing else: no file access outside the project, no processes, no other hosts, no environment
-variables, no other packs' secrets. The engine has none of these of its own; Keleuo adds only
+variables, no other packs' secrets. The engine has none of these of its own; Wundur adds only
 the calls above.
 
 ### Results
@@ -170,7 +170,7 @@ A pack is downloaded code that holds your keys and can spend your money. The rul
    more asks again.
 2. **Keys stay out of reach.** A secret leaves the key store only into that pack's script, only
    for its declared hosts' requests in practice (it can't be written to a file, logged or
-   returned: Keleuo blanks it if it appears in a result or a file the script writes).
+   returned: Wundur blanks it if it appears in a result or a file the script writes).
 3. **Ask before paid calls.** Tools with a `cost` ask before each run by default (the card shows
    the call and the cost note: Allow, Always for this session, Deny), as your own tools can now.
    You can turn it off per tool.
@@ -179,12 +179,12 @@ A pack is downloaded code that holds your keys and can spend your money. The rul
 5. **Pinned versions.** A pack is installed at a version and its hash; updates are offered, never
    applied silently.
 6. **Packs in a repo don't run on their own.** A project can list packs it uses
-   (`.keleuo/packs.json`), but they install only when you say so, as project scripts in the
+   (`.wundur/packs.json`), but they install only when you say so, as project scripts in the
    scripting proposal.
 
 ## Where things live
 
-- Installed packs: `~/Library/Application Support/keleuo/packs/<id>/<version>/` (and the same
+- Installed packs: `~/Library/Application Support/wundur/packs/<id>/<version>/` (and the same
   folder under Linux's and Windows' config dirs).
 - Secrets: the system key store, as `pack/<id>/<NAME>`. macOS: Keychain (now). Linux: Secret
   Service through `secret-tool` (now). **Windows: Credential Manager, to add** before packs work
@@ -195,7 +195,7 @@ A pack is downloaded code that holds your keys and can spend your money. The rul
 
 ## Previews (separate work, useful without packs)
 
-What packs make should be visible in Keleuo:
+What packs make should be visible in Wundur:
 
 - **Audio:** `.wav`, `.mp3`, `.ogg`, `.m4a` play in the file viewer and on the tool call's card.
 - **3D models:** `.glb` and `.gltf` in a viewer you can turn, drawn by the built-in web view with
@@ -216,12 +216,12 @@ What packs make should be visible in Keleuo:
 | `view_model` | none (three.js r147, bundled) | a page to look at a GLB in: one HTML file next to it holding the model, opened in the web panel; turn, zoom, play its animations with the camera following |
 
 Each service's request details are checked against its documentation when the tool is written
-(models and endpoints change; that is also why packs update apart from Keleuo).
+(models and endpoints change; that is also why packs update apart from Wundur).
 
 ## Phases
 
 1. **The engine and one tool** (the prototype): QuickJS in the window, `kx` with fetch, secret,
-   setting, writeFile; a pack installed from a folder; its tools listed by `keleuo-mcp` beside your
+   setting, writeFile; a pack installed from a folder; its tools listed by `wundur-mcp` beside your
    own; `make_image` working end to end with an OpenAI key.
 2. **Packs in Settings:** install from a link or zip, keys and settings forms, per-folder
    switches, ask-before-run with cost, updates.
@@ -231,7 +231,7 @@ Each service's request details are checked against its documentation when the to
 
 ## Questions for you
 
-1. Should packs live in a public `wundur-dev/keleuo-packs` repo (others can send theirs), or stay
+1. Should packs live in a public `wundur-dev/wundur-packs` repo (others can send theirs), or stay
    yours for now?
 2. Is ask-before-run on paid tools the right default, or too much friction for asset work, where
    you might make thirty images in a row? (A middle way: ask once per session per tool.)

@@ -1,19 +1,19 @@
 [workspace]
 resolver = "3"
-members = ["crates/keleuo-core", "crates/keleuo-app"]
+members = ["crates/wundur-core", "crates/wundur-app"]
 # The vendored component library is patched in, not a member; excluded so its own tests run
 # (`cargo test --manifest-path vendor/gpui-base/Cargo.toml`).
 exclude = ["vendor/gpui-base"]
 
 [workspace.package]
-version = "0.2.3"
+version = "0.3.0"
 edition = "2024"
 license = "Apache-2.0"
 publish = false
 rust-version = "1.99"
 
 [workspace.dependencies]
-keleuo-core = { path = "crates/keleuo-core" }
+wundur-core = { path = "crates/wundur-core" }
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

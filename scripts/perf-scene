@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Measure Keleuo on a fixed scene, so a performance change is compared like for like.
+# Measure Wundur on a fixed scene, so a performance change is compared like for like.
 #
 #   scripts/perf-scene [binary] [project]
 #
-# Starts a separate copy of Keleuo (its own settings, never brought to the front), with
-# KELEUO_PERF=1, and plays four phases of 20 seconds, each averaged from the app's own
+# Starts a separate copy of Wundur (its own settings, never brought to the front), with
+# WUNDUR_PERF=1, and plays four phases of 20 seconds, each averaged from the app's own
 # `perf pulse` lines (renders per second, CPU, memory, wakeups):
 #
 #   idle       one session, nothing happening, the app in the background
@@ -13,22 +13,22 @@
 #   terminal   a terminal printing 20 lines a second in a tab that is not shown
 #   hidden     that terminal, and a turn, in a session that is not shown
 #
-# Nothing is spent: the agent is Keleuo's scripted test backend. The project defaults to this
+# Nothing is spent: the agent is Wundur's scripted test backend. The project defaults to this
 # repository (read only: the scripted agent never writes).
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")/.." && pwd)"
-bin="${1:-${CARGO_TARGET_DIR:-$HOME/Library/Caches/workbench-target}/release/keleuo}"
+bin="${1:-${CARGO_TARGET_DIR:-$HOME/Library/Caches/workbench-target}/release/wundur}"
 project="${2:-$here}"
 phase_secs=20
 
-t="$(mktemp -d /tmp/keleuo-perf.XXXXXX)"
+t="$(mktemp -d /tmp/wundur-perf.XXXXXX)"
 mkfifo "$t/ctl"
 : > "$t/log"
 echo "perf-scene: $bin on $project (files in $t)"
 
-KELEUO_PERF=1 KELEUO_TEST_BACKENDS=1 KELEUO_BACKGROUND=1 \
-  KELEUO_CONFIG_DIR="$t/config" KELEUO_CACHE_DIR="$t/cache" KELEUO_CONTROL="$t/ctl" \
+WUNDUR_PERF=1 WUNDUR_TEST_BACKENDS=1 WUNDUR_BACKGROUND=1 \
+  WUNDUR_CONFIG_DIR="$t/config" WUNDUR_CACHE_DIR="$t/cache" WUNDUR_CONTROL="$t/ctl" \
   "$bin" "$project" >> "$t/log" 2>&1 &
 pid=$!
 trap 'kill $pid 2>/dev/null || true' EXIT

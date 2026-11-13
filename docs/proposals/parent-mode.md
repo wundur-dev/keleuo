@@ -4,7 +4,7 @@ Status: agreed with the owner 2026-10-28; first version built with it. Written 2
 
 ## The idea in one paragraph
 
-A child builds things with an agent in Keleuo (a game, with Claude Code). The parent is happy
+A child builds things with an agent in Wundur (a game, with Claude Code). The parent is happy
 with that, but doesn't want the child to start treating the AI as a friend. Parent mode does two
 things: it tells the agent to stay a helpful tool (warm, on the project, and gently pointing
 personal talk back to real people), and it alerts the parent when something is worth their
@@ -48,7 +48,7 @@ answers four yes/no questions:
 | `distress` | sadness, loneliness, fear, being bullied or hurt, self-harm, wanting to give up on themselves | frustration with a bug |
 | `personal_info` | sharing a home address, phone number, school, full name with where they live, passwords, photos of themselves | a first name, a game character's details |
 
-Only the flags and the time are kept (`parent-log.json` in Keleuo's config folder), never the
+Only the flags and the time are kept (`parent-log.json` in Wundur's config folder), never the
 text.
 
 ### 3. Alerts, when a pattern appears
@@ -63,7 +63,7 @@ An alert reads: *"Parent mode: Tyler talked to the AI like a friend 3 times toda
 
 Alerts go off the child's machine: a notification on that Mac would only reach the child. The
 first way is **ntfy** (a free push service with a phone app: the parent subscribes to a private
-topic name; Keleuo posts to it). A **Send test alert** button checks it. Email and iMessage can
+topic name; Wundur posts to it). A **Send test alert** button checks it. Email and iMessage can
 follow.
 
 ### 4. On the child's machine
@@ -72,8 +72,8 @@ follow.
 - Settings > Parent mode: on/off, the child's name, the alert topic, the instructions switch,
   thresholds. With a **password** set, the page is locked: changing anything or turning it off
   asks for it.
-- An honest limit: on a shared macOS account, a determined child could still edit Keleuo's
-  settings file. Real enforcement is the child having their own macOS account, with Keleuo's
+- An honest limit: on a shared macOS account, a determined child could still edit Wundur's
+  settings file. Real enforcement is the child having their own macOS account, with Wundur's
   settings set up by the parent.
 
 ## Questions, later

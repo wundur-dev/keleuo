@@ -3,7 +3,7 @@
   "name": "Game assets",
   "version": "0.5.1",
   "description": "Images, sound, music, voices and 3D models for games, with your own keys.",
-  "homepage": "https://github.com/wundur-dev/keleuo",
+  "homepage": "https://github.com/wundur-dev/wundur",
   "services": [
     {
       "id": "images",
@@ -646,7 +646,7 @@
     },
     {
       "name": "view_model",
-      "description": "Show a 3D model (a GLB in the project) to the person: writes a viewer page next to it (one HTML file holding the model, nothing to install, opens in any browser) and opens it in Keleuo's web panel. A studio shot: backdrop, floor and shadow, lights; drag to turn, scroll to zoom; its animations to pick, play, scrub and slow down, with the camera following the body. Use after model_from_* or rig_model so the person sees the result.",
+      "description": "Show a 3D model (a GLB in the project) to the person: writes a viewer page next to it (one HTML file holding the model, nothing to install, opens in any browser) and opens it in Wundur's web panel. A studio shot: backdrop, floor and shadow, lights; drag to turn, scroll to zoom; its animations to pick, play, scrub and slow down, with the camera following the body. Use after model_from_* or rig_model so the person sees the result.",
       "script": "view.js",
       "params": [
         {

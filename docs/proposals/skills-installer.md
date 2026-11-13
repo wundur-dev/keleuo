@@ -9,9 +9,9 @@ any files it needs. Claude Code, Cursor and Codex all read the same format; they
 which folders they look in. Today installing one means a terminal command per agent and knowing
 where each one looks. This proposal adds an installer to the Skills tab: paste a git URL (or
 `owner/repo`), see the skills in it and read them, choose which agents and which scope, and
-Keleuo puts each one where every chosen agent natively looks, remembering where it came from so
+Wundur puts each one where every chosen agent natively looks, remembering where it came from so
 it can be updated or removed later. A second part adds a short, reviewed list of skills worth
-trying, published on keleuo.com and shown in the Skills tab, each one a click from the installer.
+trying, published on wundur.ai and shown in the Skills tab, each one a click from the installer.
 
 ## What it is for
 
@@ -19,7 +19,7 @@ trying, published on keleuo.com and shown in the Skills tab, each one a click fr
 2. **Read it before it runs.** A skill is instructions an agent follows, and some come with
    scripts it may run. Nothing is installed unseen.
 3. **Keep skills current, or take them out.** Update from the source, see what changed first;
-   remove every copy Keleuo made.
+   remove every copy Wundur made.
 4. **Find good skills.** A few worth knowing about, with why, ready to try.
 
 ## What exists today
@@ -50,16 +50,16 @@ So one copy in `~/.claude/skills/` serves Claude Code and Cursor; Codex needs it
 1. **Skills tab, "+" › "Install from git…".** A field takes a URL (`https://github.com/…`,
    `git@…`, any git remote) or `owner/repo` (GitHub). A subfolder or branch can follow:
    `owner/repo/path/to/skill`, `…@branch`.
-2. **Keleuo fetches it** (a shallow `git clone` into a temporary folder, with the person's own git
+2. **Wundur fetches it** (a shallow `git clone` into a temporary folder, with the person's own git
    credentials, so private repositories work) and finds every `SKILL.md` in it. Nothing is
    installed yet.
 3. **A sheet lists them:** each skill's name and description, its files, and its SKILL.md in full
    (the files it would run marked as such). Each has a checkbox.
-4. **Where:** this project or all projects; which agents (those Keleuo runs, each ticked when
+4. **Where:** this project or all projects; which agents (those Wundur runs, each ticked when
    its folder is not already covered: Claude Code's user folder covers Cursor too).
-5. **Install.** Keleuo copies each chosen skill into each agent's folder and writes its record.
+5. **Install.** Wundur copies each chosen skill into each agent's folder and writes its record.
    A skill already there under the same name is not overwritten without asking (and says which
-   one is there and where it came from, if Keleuo knows).
+   one is there and where it came from, if Wundur knows).
 6. The Skills tab shows it at once, marked with its source; agents pick it up in their next
    session (say so).
 
@@ -72,7 +72,7 @@ copies again.
 
 ### The record
 
-One file, `installed-skills.json` in Keleuo's settings folder:
+One file, `installed-skills.json` in Wundur's settings folder:
 
 ```json
 {
@@ -99,9 +99,9 @@ ask before replacing it). A project install records the project too.
 - **Update** (per skill, or all): fetch the source again; if the commit moved, show the
   SKILL.md's changes and any changed files, then replace the copies. Edited copies are named
   and kept unless the person says otherwise.
-- **Remove:** delete the copies the record lists, after showing them. Folders Keleuo did not
+- **Remove:** delete the copies the record lists, after showing them. Folders Wundur did not
   make are never touched.
-- **Skills not from Keleuo** (installed by hand, by `npx skills`, by plugins) show as they do
+- **Skills not from Wundur** (installed by hand, by `npx skills`, by plugins) show as they do
   today, without update or remove.
 
 ### Agents as the source of the folders
@@ -123,13 +123,13 @@ remote machine, the record says which machine.
 
 ## Part 2: finding skills
 
-### On keleuo.com
+### On wundur.ai
 
-A page, `keleuo.com/skills`, with a few skills worth knowing about: what each does, why it is
-worth a try, who made it, which agents it works with, and a "Try it in Keleuo" button. Entries
+A page, `wundur.ai/skills`, with a few skills worth knowing about: what each does, why it is
+worth a try, who made it, which agents it works with, and a "Try it in Wundur" button. Entries
 are added by hand after a read-through, a handful at a time (a log of picks, not a catalogue).
 
-The same list as `keleuo.com/skills/feed.json`:
+The same list as `wundur.ai/skills/feed.json`:
 
 ```json
 {
@@ -157,15 +157,15 @@ reviewed; the installer fetches that commit and refuses if the files differ. A r
 a vouch, and a skill tells an agent what to do: an entry pointing at whatever a repository holds
 today could change after it was read.
 
-### In Keleuo
+### In Wundur
 
 A "Discover" group at the bottom of the Skills tab: the latest few from the feed, new ones
 marked, each opening the installer filled in (with the pinned commit). The feed is fetched at
 most once a day, only when the Skills tab is open, and can be turned off in Settings (fetching it
-tells keleuo.com an address; say so there).
+tells wundur.ai an address; say so there).
 
-"Try it in Keleuo" on the site opens Keleuo with a `keleuo://install-skill?…` link, which needs
-Keleuo to be a real `.app` that registers the scheme (on the open queue already). Until then the
+"Try it in Wundur" on the site opens Wundur with a `wundur://install-skill?…` link, which needs
+Wundur to be a real `.app` that registers the scheme (on the open queue already). Until then the
 button copies an `owner/repo@commit` line to paste into the installer.
 
 ### Where entries come from
@@ -194,4 +194,4 @@ could mention new picks.
    remove (most of the work: the sheet, git fetch, copies, the record).
 2. The site page and the feed, with the first few reviewed entries.
 3. Discover in the Skills tab.
-4. Codex as a target when Codex is a backend; `keleuo://` when Keleuo is an `.app`.
+4. Codex as a target when Codex is a backend; `wundur://` when Wundur is an `.app`.
