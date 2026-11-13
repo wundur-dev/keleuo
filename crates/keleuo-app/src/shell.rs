@@ -1679,6 +1679,10 @@ impl Shell {
                 }
                 format!("tools={} tab={}", Self::tools_shown(cx), self.tools_tab)
             }
+            "active" => {
+                // Tests: the shown session.
+                format!("active={} ({}) browser={}", self.name(self.active, cx), self.active, self.browser.is_some())
+            }
             "project-new-session" => {
                 // Tests: New session from a project's menu (`arg`: its folder).
                 self.new_session_for_project(PathBuf::from(arg), window, cx);
@@ -2743,7 +2747,8 @@ impl Shell {
             .h_full()
             .ml(px(6.))
             .relative()
-
+            // Nothing in it reaches past its edges (to be seen or clicked).
+            .overflow_hidden()
             .flex()
             .flex_col()
             .bg(crate::theme::tool_ground(cx))
@@ -2792,9 +2797,22 @@ impl Shell {
                     .on_click(cx.listener(|s, _, window, cx| s.new_session(window, cx))),
             )
             .child(match Self::tools_shown(cx).then(|| self.render_tools(cx)).flatten() {
-                Some(tools) => v_resizable("list-and-tools")
-                    .child(resizable_panel().size_range(px(120.)..Pixels::MAX).child(col))
-                    .child(resizable_panel().size(px(TOOLS_HEIGHT)).size_range(px(140.)..Pixels::MAX).child(tools))
+                // Each half holds its own: the list scrolls inside its share and the panels keep
+                // theirs (a list running on under the panels was hidden there but still took
+                // clicks, and pushed the panels' tabs off the bottom).
+                // The room left under the heading and New session, not the column's whole height.
+                Some(tools) => div().flex_1().min_h_0().w_full().child(v_resizable("list-and-tools")
+                    .child(
+                        resizable_panel()
+                            .size_range(px(120.)..Pixels::MAX)
+                            .child(div().size_full().min_h_0().overflow_hidden().flex().flex_col().child(col)),
+                    )
+                    .child(
+                        resizable_panel()
+                            .size(px(TOOLS_HEIGHT))
+                            .size_range(px(140.)..Pixels::MAX)
+                            .child(div().size_full().min_h_0().overflow_hidden().child(tools)),
+                    ))
                     .into_any_element(),
                 None => col.into_any_element(),
             })

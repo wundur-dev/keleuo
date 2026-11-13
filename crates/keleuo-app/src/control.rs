@@ -92,6 +92,26 @@ fn dispatch(line: &str, cx: &mut App) -> String {
             })
             .unwrap_or_else(|_| "window closed".into());
     }
+    if let Some(args) = line.strip_prefix("click ") {
+        // A left click inside the app (no system input): `click X Y`, in the window's points.
+        let n: Vec<f32> = args.split_whitespace().filter_map(|a| a.parse().ok()).collect();
+        let [x, y] = n[..] else { return "click X Y".into() };
+        return handle
+            .update(cx, |_, window, cx| {
+                let position = point(px(x), px(y));
+                // What is under the pointer comes from its last move.
+                let moved = MouseMoveEvent { position, pressed_button: None, modifiers: Modifiers::default() };
+                window.dispatch_event(PlatformInput::MouseMove(moved), cx);
+                window.refresh();
+                let down = MouseDownEvent { button: MouseButton::Left, position, modifiers: Modifiers::default(), click_count: 1, first_mouse: false };
+                window.dispatch_event(PlatformInput::MouseDown(down), cx);
+                let up = MouseUpEvent { button: MouseButton::Left, position, modifiers: Modifiers::default(), click_count: 1 };
+                window.dispatch_event(PlatformInput::MouseUp(up), cx);
+                window.refresh();
+                "click".to_string()
+            })
+            .unwrap_or_else(|_| "window closed".into());
+    }
     if let Some(keys) = line.strip_prefix("key ") {
         // Keystrokes dispatched inside the app (no system input): `key cmd-n`.
         let keys = keys.trim().to_string();
