@@ -1437,6 +1437,31 @@ impl Shell {
         .detach();
     }
 
+    /// A new session in the folder of the project keyed `root`, straight away (no browser):
+    /// on the machine and with the agent of the project's latest session, else this machine's
+    /// default agent.
+    fn new_session_for_project(&mut self, root: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let latest = self.tabs.iter().rev().find(|t| project_root_of(&t.row).starts_with(&root)).map(|t| t.ws.clone());
+        let (host, backend) = match &latest {
+            Some(ws) => {
+                let w = ws.read(cx);
+                (w.host(), w.session.read(cx).backend.clone())
+            }
+            None => (Arc::new(LocalHost) as Arc<dyn Host>, crate::backends::backend(None, cx)),
+        };
+        // A project on another machine is keyed `ssh://host/folder`: its folder is the rest.
+        let folder = match root.to_string_lossy().strip_prefix("ssh://") {
+            Some(rest) => {
+                if latest.is_none() {
+                    return;
+                }
+                PathBuf::from(rest.find('/').map_or("/", |i| &rest[i..]))
+            }
+            None => root,
+        };
+        self.new_session_in(host, folder, backend, window, cx);
+    }
+
     pub fn new_session_in(&mut self, host: Arc<dyn Host>, root: PathBuf, backend: Arc<dyn Backend>, window: &mut Window, cx: &mut Context<Self>) {
         let session = AgentSession::new(host.clone(), backend, root.clone());
         self.add_session(host, root, session, None, None, window, cx);
@@ -1653,6 +1678,11 @@ impl Shell {
                     _ => self.show_tool("Skills", cx),
                 }
                 format!("tools={} tab={}", Self::tools_shown(cx), self.tools_tab)
+            }
+            "project-new-session" => {
+                // Tests: New session from a project's menu (`arg`: its folder).
+                self.new_session_for_project(PathBuf::from(arg), window, cx);
+                format!("active={} in {}", self.name(self.active, cx), self.tabs[self.active].row.root.display())
             }
             "switch" => {
                 // Tests: Go to session, typing `arg`.
@@ -2454,6 +2484,7 @@ impl Shell {
         let key = project_key(&project.root);
         let title = panels::session_title(&key, project.name.clone(), cx);
         let (root, root2, root3, k1, a1) = (project.root.clone(), project.root.clone(), project.root.clone(), key.clone(), project.name.clone());
+        let weak_shell = cx.entity().downgrade();
         let folded = project.folded;
         div()
             .id(("project-row", pi))
@@ -2489,7 +2520,12 @@ impl Shell {
             .context_menu(move |menu, _, cx| {
                 let (k, a, r) = (k1.clone(), a1.clone(), root3.clone());
                 let saved = cx.global::<AppSettings>().0.borrow().projects.iter().any(|p| p.root == r);
-                menu.item(PopupMenuItem::new("Rename").on_click(move |_, window, cx| start_tab_rename(k.clone(), a.clone(), a.clone(), window, cx)))
+                let (w, r_new) = (weak_shell.clone(), r.clone());
+                menu.item(PopupMenuItem::new("New session").on_click(move |_, window, cx| {
+                    let _ = w.update(cx, |s, cx| s.new_session_for_project(r_new.clone(), window, cx));
+                }))
+                .separator()
+                .item(PopupMenuItem::new("Rename").on_click(move |_, window, cx| start_tab_rename(k.clone(), a.clone(), a.clone(), window, cx)))
                     .when(saved, |m| {
                         m.item(PopupMenuItem::new("Forget project (its sessions stay)").on_click(move |_, _, cx| {
                             let r = r.clone();
@@ -2616,7 +2652,12 @@ impl Shell {
             .context_menu(move |menu, _, cx| {
                 let (w, r, n, r2) = (weak.clone(), r1.clone(), current.clone(), r2.clone());
                 let saved = cx.global::<AppSettings>().0.borrow().projects.iter().any(|p| p.root == r2);
-                menu.item(PopupMenuItem::new("Rename…").on_click(move |_, window, cx| {
+                let (w_new, r_new) = (w.clone(), r.clone());
+                menu.item(PopupMenuItem::new("New session").on_click(move |_, window, cx| {
+                    let _ = w_new.update(cx, |s, cx| s.new_session_for_project(r_new.clone(), window, cx));
+                }))
+                .separator()
+                .item(PopupMenuItem::new("Rename…").on_click(move |_, window, cx| {
                     let _ = w.update(cx, |s, cx| s.ask_project_name(r.clone(), n.clone(), true, window, cx));
                 }))
                 .when(saved, |m| {
