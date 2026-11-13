@@ -80,6 +80,102 @@ pub fn tokens_in(message: &str) -> Vec<usize> {
         .collect()
 }
 
+/// What a paste is about, for its card: a web page's title, else its first heading, else its
+/// first line, without Markdown's marks, cut at about 80 characters.
+pub fn heading(text: &str) -> String {
+    if let Some((title, _)) = text.strip_prefix("[Web page: ").and_then(|t| t.split_once("]\n")) {
+        return cut(title.trim(), 80);
+    }
+    let lines = || text.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with("```"));
+    let line = lines().find(|l| l.starts_with('#')).or_else(|| lines().next()).unwrap_or("");
+    let plain = line.trim_start_matches(['#', '>', '-', '*', ' ']).replace("**", "").replace('`', "");
+    cut(plain.trim(), 80)
+}
+
+fn cut(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    let short: String = text.chars().take(max).collect();
+    format!("{}…", short.trim_end())
+}
+
+/// What kind of text a paste is, as its card says it: a web page, JSON, Markdown, code or text.
+pub fn kind(text: &str) -> &'static str {
+    let t = text.trim();
+    if t.starts_with("[Web page: ") {
+        return "Web page";
+    }
+    if (t.starts_with('{') || t.starts_with('[')) && serde_json::from_str::<serde_json::Value>(t).is_ok() {
+        return "JSON";
+    }
+    let lines: Vec<&str> = t.lines().map(str::trim_start).collect();
+    let markdown = lines.iter().filter(|l| l.starts_with("# ") || l.starts_with("## ") || l.starts_with("### ") || l.starts_with("```")).count();
+    if markdown > 0 {
+        return "Markdown";
+    }
+    let code = lines.iter().filter(|l| l.ends_with(['{', '}', ';']) || l.starts_with("fn ") || l.starts_with("def ") || l.starts_with("import ")).count();
+    if code * 3 >= lines.len().max(1) { "Code" } else { "Text" }
+}
+
+/// A paste's size in bytes, as people read it: `840 B`, `5.6 KB`, `1.2 MB`.
+pub fn bytes(text: &str) -> String {
+    let n = text.len() as f64;
+    if n < 1000. {
+        format!("{n} B")
+    } else if n < 1_000_000. {
+        format!("{:.1} KB", n / 1000.)
+    } else {
+        format!("{:.1} MB", n / 1_000_000.)
+    }
+}
+
+const IMAGE: &str = "[Image #";
+
+/// The token for image `n` (from 1) in the message box: where the person put it in the text.
+pub fn image_token(n: usize) -> String {
+    format!("{IMAGE}{n}]")
+}
+
+/// The numbers of the image tokens in the message box, in the order they appear (each once).
+pub fn image_tokens_in(message: &str) -> Vec<usize> {
+    let mut out = Vec::new();
+    for (i, _) in message.match_indices(IMAGE) {
+        let after = &message[i + IMAGE.len()..];
+        let digits: String = after.chars().take_while(char::is_ascii_digit).collect();
+        if after[digits.len()..].starts_with(']')
+            && let Ok(n) = digits.parse::<usize>()
+            && !out.contains(&n)
+        {
+            out.push(n);
+        }
+    }
+    out
+}
+
+/// The message as it is sent, and its images: those whose token is still in the text (image
+/// `n` is `images[n - 1]`), numbered 1, 2, 3 in the order they appear, each token written as
+/// `[Image 1]`. The agent gets the images labelled the same way (`Image 1:`), so the text says
+/// which one it means. A token without an image stays as typed.
+pub fn number_images<T: Clone>(message: &str, images: &[T]) -> (String, Vec<T>) {
+    let order: Vec<usize> = image_tokens_in(message).into_iter().filter(|n| n.checked_sub(1).is_some_and(|k| k < images.len())).collect();
+    let mut text = message.to_string();
+    for (k, n) in order.iter().enumerate() {
+        text = text.replace(&image_token(*n), &format!("[Image {}]", k + 1));
+    }
+    (text, order.iter().map(|n| images[n - 1].clone()).collect())
+}
+
+/// The label put before image `k` (from 1) of a message, as the agent reads it.
+pub fn image_label(k: usize) -> String {
+    format!("Image {k}:")
+}
+
+/// Whether `text` is only such a label (left out when a message is read back).
+pub fn is_image_label(text: &str) -> bool {
+    text.trim().strip_prefix("Image ").and_then(|r| r.strip_suffix(':')).is_some_and(|d| !d.is_empty() && d.chars().all(|c| c.is_ascii_digit()))
+}
+
 /// A stretch of a message: typed text, or a pasted block.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Part<'a> {
@@ -174,6 +270,35 @@ mod tests {
         let marked = expand(&msg, &pastes, true);
         assert_eq!(parts(&marked), [Part::Text("here: "), Part::Pasted("ERROR 1"), Part::Text(" why?")]);
         assert_eq!(without_markers(&marked), expand(&msg, &pastes, false));
+    }
+
+    #[test]
+    fn a_paste_is_named_by_its_heading_and_kind() {
+        let doc = "Some intro\n\n# Making sure agents **always** know about `MCP` tools\n\n- one\n";
+        assert_eq!(heading(doc), "Making sure agents always know about MCP tools");
+        assert_eq!(kind(doc), "Markdown");
+        assert_eq!(heading("\n  $ make\nerror\n"), "$ make");
+        assert_eq!(heading("[Web page: Example Domain]\n[https://example.com/]\n\ntext"), "Example Domain");
+        assert_eq!(kind("[Web page: Example]\n[u]\n\nx"), "Web page");
+        assert_eq!(kind("{\"a\": [1, 2]}"), "JSON");
+        assert_eq!(kind("fn main() {\n    run();\n}\n"), "Code");
+        assert_eq!(kind("just some words\nand more words\n"), "Text");
+        assert!(heading(&"word ".repeat(40)).ends_with('…'));
+        assert_eq!((bytes("abc"), bytes(&"x".repeat(5600))), ("3 B".to_string(), "5.6 KB".to_string()));
+    }
+
+    #[test]
+    fn images_are_numbered_by_where_they_are_in_the_text() {
+        let images = ["a.png", "b.png", "c.png"];
+        // Image 1 was deleted from the text; 3 comes before 2.
+        let msg = format!("make it like {} not {}, see {} again", image_token(3), image_token(2), image_token(3));
+        assert_eq!(image_tokens_in(&msg), [3, 2]);
+        let (text, sent) = number_images(&msg, &images);
+        assert_eq!(text, "make it like [Image 1] not [Image 2], see [Image 1] again");
+        assert_eq!(sent, ["c.png", "b.png"]);
+        // A token without its image stays as typed.
+        assert_eq!(number_images("see [Image #9]", &images), ("see [Image #9]".to_string(), vec![]));
+        assert!(is_image_label(&image_label(2)) && !is_image_label("Image of a cat:") && !is_image_label("Image :"));
     }
 
     #[test]

@@ -11,64 +11,19 @@ impl ChatPanel {
     pub(super) fn render_user_text(&self, key: &str, text: &str, cx: &mut Context<Self>) -> AnyElement {
         let parts = paste::parts(text);
         if !parts.iter().any(|p| matches!(p, paste::Part::Pasted(_))) {
-            return self.marked_text(text);
+            return self.marked_text(text, cx);
         }
-        let theme = cx.theme();
-        let (muted, border, hover, code_bg) = (theme.muted_foreground, theme.border, theme.secondary_hover, theme.background);
-        let mut col = div().flex().flex_col().gap_1();
+        let mut col = div().flex().flex_col().gap_2();
         for (k, part) in parts.into_iter().enumerate() {
             match part {
                 paste::Part::Text(t) => {
                     if !t.trim().is_empty() {
-                        col = col.child(self.marked_text(t.trim()));
+                        col = col.child(self.marked_text(t.trim(), cx));
                     }
                 }
                 paste::Part::Pasted(p) => {
                     let id = format!("paste:{key}:{k}");
-                    let open = self.toggled.contains(&id);
-                    let toggle = id.clone();
-                    col = col.child(
-                        div()
-                            .rounded(px(8.))
-                            .border_1()
-                            .border_color(border)
-                            .overflow_hidden()
-                            .child(
-                                div()
-                                    .id(SharedString::from(id))
-                                    .px_2()
-                                    .py_1()
-                                    .flex()
-                                    .items_center()
-                                    .gap_1()
-                                    .text_xs()
-                                    .text_color(muted)
-                                    .cursor_pointer()
-                                    .hover(|d| d.bg(hover))
-                                    .child(Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight }).xsmall())
-                                    .child(format!("{} · {}", super::composer::paste_name(p), paste::size(p)))
-                                    .on_click(cx.listener(move |panel, _, _, cx| {
-                                        if !panel.toggled.remove(&toggle) {
-                                            panel.toggled.insert(toggle.clone());
-                                        }
-                                        panel.list.remeasure();
-                                        cx.notify();
-                                    })),
-                            )
-                            .when(open, |d| {
-                                d.child(
-                                    div()
-                                        .px_2()
-                                        .py_1()
-                                        .bg(code_bg)
-                                        .font_family(crate::fonts::code(cx))
-                                        .text_xs()
-                                        .flex()
-                                        .flex_col()
-                                        .children(p.lines().map(|l| if l.is_empty() { " ".to_string() } else { l.to_string() })),
-                                )
-                            }),
-                    );
+                    col = col.child(paste_card(id.clone(), p, self.toggled.contains(&id), cx));
                 }
             }
         }
@@ -761,20 +716,35 @@ impl ChatPanel {
     }
 
     /// Plain text, its find matches marked (as `find_marks` marks Markdown's).
-    fn marked_text(&self, text: &str) -> AnyElement {
+    /// The person's typed text: the find marks on it, and each `[Image 1]` (where they put an
+    /// image) in the accent, like its token in the message box.
+    fn marked_text(&self, text: &str, cx: &App) -> AnyElement {
         let text = &keep_with_word(text);
-        let Some(marks) = &self.marking else { return text.to_string().into_any_element() };
-        let found = wundur_core::find::ranges(text, &marks.query);
-        if found.is_empty() {
+        let mut highlights: Vec<(std::ops::Range<usize>, HighlightStyle)> = Vec::new();
+        if let Some(marks) = &self.marking {
+            for (n, r) in wundur_core::find::ranges(text, &marks.query).into_iter().enumerate() {
+                let bg = match marks.current {
+                    Some((c, color)) if c == n => color,
+                    _ => marks.background,
+                };
+                highlights.push((r, HighlightStyle { background_color: Some(bg), ..Default::default() }));
+            }
+        }
+        let refs = image_refs(text);
+        if highlights.is_empty() && !refs.is_empty() {
+            return image_ref_text(text, &refs, cx);
+        }
+        let ring = cx.theme().ring;
+        let image = HighlightStyle { color: Some(ring), background_color: Some(ring.opacity(0.1)), font_weight: Some(FontWeight::SEMIBOLD), ..Default::default() };
+        for r in image_refs(text) {
+            if !highlights.iter().any(|(h, _)| h.start < r.end && r.start < h.end) {
+                highlights.push((r, image));
+            }
+        }
+        if highlights.is_empty() {
             return text.to_string().into_any_element();
         }
-        let highlights = found.into_iter().enumerate().map(|(n, r)| {
-            let bg = match marks.current {
-                Some((c, color)) if c == n => color,
-                _ => marks.background,
-            };
-            (r, HighlightStyle { background_color: Some(bg), ..Default::default() })
-        });
+        highlights.sort_by_key(|(r, _)| r.start);
         StyledText::new(text.to_string()).with_highlights(highlights).into_any_element()
     }
 
@@ -996,7 +966,29 @@ impl ChatPanel {
                                 .border_1()
                                 .border_color(cx.theme().border)
                                 .cursor_pointer()
+                                .relative()
                                 .child(img(path.clone()).size_full().object_fit(ObjectFit::Cover))
+                                // Its number: the message says `[Image 1]` where it means it.
+                                .child(
+                                    div()
+                                        .absolute()
+                                        .bottom(px(5.))
+                                        .left(px(5.))
+                                        .min_w(px(18.))
+                                        .h(px(18.))
+                                        .px(px(5.))
+                                        .rounded_full()
+                                        .bg(cx.theme().ring)
+                                        .border_1()
+                                        .border_color(gpui_kit::white())
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .text_size(px(10.5))
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(gpui_kit::white())
+                                        .child((n + 1).to_string()),
+                                )
                                 .on_click(move |_, _, cx| crate::image_view::show(p.clone(), cx)),
                         );
                     }
@@ -1283,6 +1275,160 @@ pub(super) fn hover_actions(group: SharedString, key: String, text: String, mute
         )
 }
 
+/// Where `[Image 1]`, `[Image 2]` … are in a message (the images the person put in it).
+fn image_refs(text: &str) -> Vec<std::ops::Range<usize>> {
+    text.match_indices("[Image ")
+        .filter_map(|(i, m)| {
+            let after = &text[i + m.len()..];
+            let digits = after.chars().take_while(char::is_ascii_digit).count();
+            (digits > 0 && after[digits..].starts_with(']')).then(|| i..i + m.len() + digits + 1)
+        })
+        .collect()
+}
+
+/// A message that names its images: its words wrapping around a pill for each `[Image 1]`
+/// (an image icon, its number), like the image's token in the message box.
+fn image_ref_text(text: &str, refs: &[std::ops::Range<usize>], cx: &App) -> AnyElement {
+    let theme = cx.theme();
+    let (ring, fg) = (theme.ring, theme.foreground);
+    let pill = |n: String| {
+        div()
+            .flex_none()
+            .mx(px(2.))
+            .px(px(6.))
+            .h(px(20.))
+            .flex()
+            .items_center()
+            .gap(px(4.))
+            .rounded(px(7.))
+            .border_1()
+            .border_color(ring.opacity(0.35))
+            .bg(ring.opacity(0.08))
+            .text_xs()
+            .text_color(fg)
+            .child(Icon::new(gpui_kit::assets::IconName::Image).xsmall().text_color(ring))
+            .child(div().font_weight(FontWeight::SEMIBOLD).text_color(ring).child(n))
+            .child("Image")
+    };
+    let mut lines = div().flex().flex_col();
+    let mut row = div().flex().flex_wrap().items_center();
+    let mut last = 0;
+    let words = |row: Div, chunk: &str| -> (Div, Vec<Div>) {
+        // Each word its own piece (with the space after it), so the line wraps between words.
+        let mut row = row;
+        let mut done = Vec::new();
+        for (k, line) in chunk.split('\n').enumerate() {
+            if k > 0 {
+                done.push(std::mem::replace(&mut row, div().flex().flex_wrap().items_center()));
+            }
+            for word in line.split_inclusive(' ') {
+                row = row.child(div().whitespace_nowrap().child(word.replace(' ', "\u{a0}")));
+            }
+        }
+        (row, done)
+    };
+    for r in refs {
+        let (r2, done) = words(row, &text[last..r.start]);
+        row = r2;
+        for d in done {
+            lines = lines.child(d.min_h(px(20.)));
+        }
+        let n: String = text[r.clone()].chars().filter(char::is_ascii_digit).collect();
+        row = row.child(pill(n));
+        last = r.end;
+    }
+    let (r2, done) = words(row, &text[last..]);
+    for d in done {
+        lines = lines.child(d.min_h(px(20.)));
+    }
+    lines.child(r2).into_any_element()
+}
+
+/// A paste in one of the person's messages, as a card: a file tile, what it is (a pasted text,
+/// a web page), its heading, its kind and size, and View text, which opens it below in the
+/// code font. `id` keeps it open or shut (`ChatPanel::toggled`).
+fn paste_card(id: String, text: &str, open: bool, cx: &mut Context<ChatPanel>) -> Div {
+    let theme = cx.theme();
+    let (fg, muted, border, bg, ring, hover) = (theme.foreground, theme.muted_foreground, theme.border, theme.background, theme.ring, theme.secondary_hover);
+    let kind = paste::kind(text);
+    let what = if kind == "Web page" { "WEB PAGE" } else { "PASTED TEXT" };
+    let meta = if kind == "Web page" { format!("{} · {}", paste::size(text), paste::bytes(text)) } else { format!("{kind} · {} · {}", paste::size(text), paste::bytes(text)) };
+    let toggle = id.clone();
+    div()
+        .rounded(px(12.))
+        .border_1()
+        .border_color(border)
+        .bg(bg)
+        .overflow_hidden()
+        .child(
+            div()
+                .id(SharedString::from(id))
+                .px_3()
+                .py(px(10.))
+                .flex()
+                .items_center()
+                .gap_3()
+                .cursor_pointer()
+                .hover(|d| d.bg(hover))
+                .child(
+                    div()
+                        .flex_none()
+                        .size(px(40.))
+                        .rounded(px(9.))
+                        .bg(ring.opacity(0.1))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(Icon::new(gpui_kit::assets::IconName::FileText).small().text_color(ring)),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .gap(px(1.))
+                        .child(div().text_size(px(10.5)).font_weight(FontWeight::SEMIBOLD).text_color(muted).child(what))
+                        .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).text_color(fg).line_height(rems(1.3)).child(paste::heading(text)))
+                        .child(div().text_xs().text_color(muted).child(meta)),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .text_xs()
+                        .text_color(ring)
+                        .child(if open { "Hide text" } else { "View text" })
+                        .child(Icon::new(if open { IconName::ChevronUp } else { IconName::ChevronDown }).xsmall()),
+                )
+                .on_click(cx.listener(move |panel, _, _, cx| {
+                    if !panel.toggled.remove(&toggle) {
+                        panel.toggled.insert(toggle.clone());
+                    }
+                    panel.list.remeasure();
+                    cx.notify();
+                })),
+        )
+        .when(open, |d| {
+            d.child(
+                div()
+                    .px_3()
+                    .py_2()
+                    .border_t_1()
+                    .border_color(border)
+                    .font_family(crate::fonts::code(cx))
+                    .text_xs()
+                    .line_height(px(17.))
+                    .text_color(fg)
+                    .flex()
+                    .flex_col()
+                    .children(text.lines().map(|l| if l.is_empty() { " ".to_string() } else { l.to_string() })),
+            )
+        })
+}
+
 /// A green Run pill, so it reads as a button at a glance (brighter under the pointer, darker
 /// while pressed): runs `command` in a terminal tab of the session's folder.
 pub(super) fn run_pill(id: impl Into<ElementId>, command: String, background: usize, panel: WeakEntity<ChatPanel>, cx: &App) -> Stateful<Div> {
@@ -1359,6 +1505,16 @@ fn save_csv(csv: String, window: &mut Window, cx: &mut App) {
             let _ = cx.update(|window, cx| gpui_kit::component::WindowExt::push_notification(window, done, cx));
         })
         .detach();
+}
+
+#[cfg(test)]
+mod image_ref_tests {
+    #[::core::prelude::v1::test]
+    fn image_refs_are_found_in_a_message() {
+        let t = "like [Image 1] not [Image 2], [Image x] and [Image 3";
+        let found: Vec<&str> = super::image_refs(t).into_iter().map(|r| &t[r]).collect();
+        assert_eq!(found, ["[Image 1]", "[Image 2]"]);
+    }
 }
 
 #[cfg(test)]
