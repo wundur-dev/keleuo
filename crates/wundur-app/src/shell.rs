@@ -14,6 +14,7 @@ use std::sync::Arc;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::resizable::{resizable_panel, v_resizable};
+use gpui_kit::component::text::TextView;
 use std::rc::Rc;
 use gpui_kit::component::menu::{ContextMenuExt, PopupMenu, PopupMenuItem};
 use gpui_kit::component::menu::DropdownMenu as _;
@@ -1694,7 +1695,10 @@ impl Shell {
                         crate::tasks::Task { title, command: bits.next().map(str::to_string), detail: "A step for the test.".into(), ..Default::default() }
                     })
                     .collect();
-                let (folder, from) = (self.tabs[self.active].row.root.clone(), self.name(self.active, cx));
+                let (folder, from) = match self.tabs.get(self.active) {
+                    Some(tab) => (tab.row.root.clone(), self.name(self.active, cx)),
+                    None => (PathBuf::new(), "test".into()),
+                };
                 let (_, ids) = crate::tasks::add_list(title, folder, from, tasks, cx);
                 format!("ids={ids:?}")
             }
@@ -2837,11 +2841,13 @@ impl Shell {
             let folder = list.folder.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
             let when = ago(std::time::UNIX_EPOCH + std::time::Duration::from_secs(list.made));
             let mut cards = div().flex().flex_col().gap(px(6.));
-            // Open ones first, then those done.
-            let mut tasks = list.tasks.clone();
-            tasks.sort_by_key(|t| t.done);
-            for t in tasks {
+            // Open ones first, then those done; each keeps its step number (its place in the list
+            // as the agent wrote it), which is how the agent refers to it.
+            let mut tasks: Vec<(usize, crate::tasks::Task)> = list.tasks.iter().cloned().enumerate().map(|(n, t)| (n + 1, t)).collect();
+            tasks.sort_by_key(|(_, t)| t.done);
+            for (step, t) in tasks {
                 let (id, done) = (t.id, t.done);
+                let whole = crate::tasks::as_text(step, &t);
                 let check = div()
                     .id(("task-check", id as usize))
                     .flex_none()
@@ -2912,8 +2918,35 @@ impl Shell {
                                 .flex()
                                 .flex_col()
                                 .gap(px(2.))
-                                .child(div().text_sm().font_weight(FontWeight::MEDIUM).text_color(fg).child(t.title.clone()))
-                                .when(!t.detail.is_empty(), |d| d.child(div().text_xs().line_height(rems(1.4)).text_color(muted).child(t.detail.clone())))
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_start()
+                                        .gap(px(6.))
+                                        .child(div().flex_none().text_sm().font_weight(FontWeight::SEMIBOLD).text_color(muted).child(format!("{step}.")))
+                                        .child(
+                                            div().flex_1().min_w_0().text_sm().font_weight(FontWeight::MEDIUM).text_color(fg).child(
+                                                TextView::markdown(SharedString::from(format!("task-title-{id}")), crate::tasks::escape_markdown(&t.title)).selectable(true),
+                                            ),
+                                        )
+                                        .child(
+                                            Button::new(("task-copy-all", id as usize))
+                                                .icon(gpui_kit::assets::IconName::Copy)
+                                                .xsmall()
+                                                .ghost()
+                                                .tooltip("Copy this step")
+                                                .on_click(move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(whole.clone()))),
+                                        ),
+                                )
+                                .when(!t.detail.is_empty(), |d| {
+                                    d.child(
+                                        div()
+                                            .text_xs()
+                                            .line_height(rems(1.4))
+                                            .text_color(muted)
+                                            .child(TextView::markdown(SharedString::from(format!("task-detail-{id}")), t.detail.clone()).selectable(true)),
+                                    )
+                                })
                                 .children(command)
                                 .children(link),
                         ),
@@ -2968,9 +3001,15 @@ impl Shell {
             .absolute()
             .inset_0()
             .occlude()
-            .on_mouse_down(MouseButton::Left, cx.listener(|s, _, _, cx| {
-                s.tasks_open = false;
-                cx.notify();
+            // A press outside the panel closes it. Told by where it lands, not by the panel
+            // stopping it: a press stopped short never reaches the window's text selection, and
+            // the cards' text could not be selected.
+            .on_mouse_down(MouseButton::Left, cx.listener(|s, e: &MouseDownEvent, _, cx| {
+                let x = e.position.x;
+                if x < px(TOOLBAR_WIDTH) || x > px(TOOLBAR_WIDTH + TASKS_WIDTH) {
+                    s.tasks_open = false;
+                    cx.notify();
+                }
             }))
             .child(
                 div()
@@ -2986,7 +3025,7 @@ impl Shell {
                     .border_r_1()
                     .border_color(border)
                     .shadow_lg()
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    
                     .child(div().flex_none().h(px(44.)).px(px(14.)).flex().items_center().child(div().text_size(px(16.)).font_weight(FontWeight::SEMIBOLD).text_color(fg).child("Tasks")))
                     .child(body),
             )
