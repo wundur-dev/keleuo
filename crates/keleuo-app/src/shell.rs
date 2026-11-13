@@ -1267,6 +1267,7 @@ impl Shell {
         let (key, auto, current) = (self.key(ix), self.list_name(ix, cx), self.name(ix, cx));
         let row = &self.tabs[ix].row;
         let (remote, folder) = (row.remote, row.root.clone());
+        let session_id = row.short_id.clone();
         let weak = cx.entity().downgrade();
         move |menu: PopupMenu, _: &mut Window, _: &mut Context<PopupMenu>| {
             let (w1, w3) = (weak.clone(), weak.clone());
@@ -1298,6 +1299,9 @@ impl Shell {
             .item(PopupMenuItem::new("Copy folder path").on_click(move |_, _, cx| {
                 cx.write_to_clipboard(ClipboardItem::new_string(path.clone()))
             }))
+            .when_some(session_id.clone(), |m, id| {
+                m.item(PopupMenuItem::new("Copy session ID").on_click(move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(id.clone()))))
+            })
             .separator()
             .item(PopupMenuItem::new("Close session").on_click(move |_, window, cx| {
                 let _ = w1.update(cx, |s, cx| {
@@ -1930,45 +1934,50 @@ impl Shell {
     /// hover; drag to reorder.
     /// A session's row in the full list; `project`, the root of the project it is listed under.
     fn session_row(&self, ix: usize, project: Option<&Path>, cx: &mut Context<Self>) -> AnyElement {
+        // Two lines: its name, with how long ago it last did something (or how full its context
+        // is, once that matters) at the right; then what it is about: that it needs the person
+        // or is working, and the last turn's headline or what it is doing. Under a project it
+        // sits in line with the project's name; the shown one is tinted, with an accent bar.
         let theme = cx.theme();
-        let (fg, muted, border, hover, ring, sel) =
-            (crate::theme::list_text(cx), theme.muted_foreground, theme.border, theme.secondary_hover, theme.ring, theme.secondary);
-        let (yellow, red, blue) = (theme.yellow, theme.red, theme.blue);
+        let (fg, muted, border, hover, ring) = (crate::theme::list_text(cx), theme.muted_foreground, theme.border, theme.secondary_hover, theme.ring);
+        let (yellow, red, blue, green) = (theme.yellow, theme.red, theme.blue, theme.green);
         let active = ix == self.active && self.browser.is_none();
         let number = self.tabs[ix].number;
         let row = &self.tabs[ix].row;
-        // Under its project: where in it (when deeper), its branch, and when it last did
-        // something. Else its folder, branch and machine.
-        let place = match project {
-            Some(root) => {
-                let key = project_root_of(row);
-                let deeper = key.strip_prefix(root).ok().filter(|r| !r.as_os_str().is_empty()).map(|r| r.display().to_string());
-                let parts: Vec<String> = deeper.into_iter().chain(row.branch.clone()).chain(self.tabs[ix].changed.map(ago)).collect();
-                if parts.is_empty() { row.place.clone() } else { parts.join(" · ") }
-            }
-            None => row.place.clone(),
-        };
-        // What it is doing, in words, where its cost would show.
-        let status = row.dot.map(|d| match d {
-            Dot::Permission | Dot::Asking => ("Needs you", theme.yellow),
-            Dot::Working => ("Working", theme.green),
-            Dot::Agents => ("Agents working", theme.green.opacity(0.8)),
+        let sel = ring.opacity(if theme.is_dark() { 0.18 } else { 0.10 });
+        // At the right: the context once it fills (amber, then red), else how long ago.
+        let filling = row.spend(cx).and_then(|sp| match sp {
+            Spend::Context { fill: Fill::Filling, .. } => Some((sp.short(), theme.warning)),
+            Spend::Context { fill: Fill::Nearly, .. } => Some((sp.short(), theme.danger)),
+            _ => None,
         });
-        let worktree = row.worktree.then_some(());
-        let activity = row.activity.clone();
-        // Once a turn is over and summarised: its headline, how it ended when it needs the
-        // person or went wrong.
+        let corner = filling.or_else(|| self.tabs[ix].changed.map(|t| (ago(t), muted)));
+        // The line under it.
         let summary = row.summary.clone().filter(|_| crate::summaries_on(cx));
-        // A context filling up shows amber, then red, as in the session's header.
-        let cost = row.spend(cx).map(|sp| {
-            let color = match sp {
-                Spend::Context { fill: Fill::Filling, .. } => cx.theme().warning,
-                Spend::Context { fill: Fill::Nearly, .. } => cx.theme().danger,
-                _ => cx.theme().muted_foreground,
-            };
-            (sp.short(), color)
+        let deeper = project.and_then(|root| {
+            let key = project_root_of(row);
+            key.strip_prefix(root).ok().filter(|r| !r.as_os_str().is_empty()).map(|r| r.display().to_string())
         });
-        let short_id = row.short_id.clone();
+        let (pill, about): (Option<(&'static str, Hsla)>, Option<String>) = match (row.dot, &summary) {
+            (Some(Dot::Permission | Dot::Asking), _) => (Some(("Needs you", yellow)), row.activity.clone()),
+            (Some(Dot::Working), _) => (Some(("Working", green)), row.activity.clone()),
+            (Some(Dot::Agents), _) => (Some(("Agents working", green)), row.activity.clone()),
+            (None, Some((st, needs_you, headline))) => {
+                use keleuo_core::summary::Status;
+                let pill = match st {
+                    Status::Done if *needs_you => Some(("Needs you", yellow)),
+                    Status::Waiting => Some((st.label(), yellow)),
+                    Status::Failed => Some((st.label(), red)),
+                    Status::Partial => Some((st.label(), blue)),
+                    Status::Done => None,
+                };
+                (pill, Some(headline.clone()))
+            }
+            (None, None) => (None, row.activity.clone()),
+        };
+        // Nothing said yet: where it is (a folder inside the project, else its branch).
+        let about = about.or(deeper).or_else(|| if project.is_some() { row.branch.clone() } else { Some(row.place.clone()) });
+        let worktree = row.worktree.then_some(());
         let dot = self.dot(ix, cx);
         let key = self.key(ix);
         let auto = self.list_name(ix, cx);
@@ -1977,20 +1986,23 @@ impl Shell {
         let drag = SessionDrag { number, name: current.clone().into() };
         let (k1, a1, c1) = (key, auto, current);
         let menu = self.session_menu(ix, cx);
-                        div()
+        div()
                 .id(("session-row", number))
                 .group(SharedString::from(format!("session-row-{number}")))
                 .relative()
                 .mx(px(6.))
-                .px_2()
-                .py(px(6.))
+                // In line with the project's name (past its chevron and folder).
+                .pl(px(if project.is_some() { 22. } else { 8. }))
+                .pr_2()
+                .py(px(5.))
                 .flex()
                 .gap_2()
-                .rounded(px(8.))
+                .rounded(px(6.))
                 .cursor_pointer()
-                // The shown session: a rounded highlight.
                 .when(active, |d| d.bg(sel))
                 .when(!active, |d| d.hover(|d| d.bg(hover)))
+                // The shown one's accent bar.
+                .when(active, |d| d.child(div().absolute().left_0().top(px(4.)).bottom(px(4.)).w(px(3.)).rounded_full().bg(ring)))
                 .child(
                     div()
                         .pt(px(5.))
@@ -2000,7 +2012,7 @@ impl Shell {
                         .justify_center()
                         .child(match dot {
                             Some((c, _)) => div().size(px(8.)).rounded_full().bg(c),
-                            None => div().size(px(8.)).rounded_full().border_1().border_color(muted.opacity(0.6)),
+                            None => div().size(px(8.)).rounded_full().border_1().border_color(if active { ring } else { muted.opacity(0.6) }),
                         }),
                 )
                 .child(
@@ -2009,54 +2021,46 @@ impl Shell {
                         .min_w_0()
                         .flex()
                         .flex_col()
-                        .gap(px(1.))
+                        .gap(px(2.))
                         .child(
                             div()
                                 .flex()
                                 .items_center()
                                 .gap_1()
-                                .child(div().flex_1().min_w_0().truncate().text_sm().text_color(fg).child(title))
-                                .children(match status {
-                                    Some((word, color)) => Some(div().flex_none().text_size(px(11.)).font_weight(FontWeight::MEDIUM).text_color(color).child(word)),
-                                    None => cost.map(|(c, color)| div().flex_none().text_size(px(10.5)).text_color(color).child(c)),
-                                }),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap_1()
-                                .text_size(px(11.))
-                                .text_color(muted)
-                                .child(crate::theme::pressed(div().min_w_0().truncate(), place, cx))
-                                .children(short_id.map(|id| panels::short_id(id, ("session-id", number), cx)))
-                                .children(worktree.map(|_| {
-                                    div().flex_none().px_1().rounded_sm().bg(border).text_size(px(10.)).child("worktree")
-                                })),
-                        )
-                        .children(match summary {
-                            Some((status, needs_you, headline)) => {
-                                use keleuo_core::summary::Status;
-                                // How the work went when it is not plainly done, else that
-                                // something waits on the person.
-                                let (label, tone) = match status {
-                                    Status::Done if needs_you => (Some("Needs you"), yellow),
-                                    Status::Done => (None, yellow),
-                                    Status::Waiting => (Some(status.label()), yellow),
-                                    Status::Failed => (Some(status.label()), red),
-                                    Status::Partial => (Some(status.label()), blue),
-                                };
-                                Some(
+                                .child(
                                     div()
-                                        .flex()
-                                        .gap_1()
-                                        .text_size(px(11.))
-                                        .children(label.map(|l| div().flex_none().text_color(tone).child(l)))
-                                        .child(crate::theme::pressed(div().min_w_0().truncate().text_color(muted.opacity(0.9)), headline, cx)),
+                                        .flex_1()
+                                        .min_w_0()
+                                        .truncate()
+                                        .text_sm()
+                                        .text_color(fg)
+                                        .when(active, |d| d.font_weight(FontWeight::SEMIBOLD))
+                                        .child(title),
                                 )
-                            }
-                            None => activity.map(|a| div().flex().text_size(px(11.)).text_color(muted.opacity(0.8)).child(crate::theme::pressed(div().min_w_0().truncate(), a, cx))),
-                        }),
+                                .children(corner.map(|(t, color)| div().flex_none().text_size(px(11.)).text_color(color).child(t))),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(6.))
+                                .text_size(px(11.5))
+                                .text_color(muted)
+                                .children(pill.map(|(word, color)| {
+                                    div()
+                                        .flex_none()
+                                        .px(px(6.))
+                                        .py(px(1.))
+                                        .rounded(px(5.))
+                                        .bg(color.opacity(0.16))
+                                        .text_size(px(10.5))
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .text_color(color)
+                                        .child(word)
+                                }))
+                                .children(about.map(|a| crate::theme::pressed(div().min_w_0().truncate(), a, cx)))
+                                .children(worktree.map(|_| div().flex_none().px_1().rounded_sm().bg(border).text_size(px(10.)).child("worktree"))),
+                        ),
                 )
                 // Rename and close, on hover (right-click is easy to miss on a Mac).
                 .child({
@@ -2067,7 +2071,7 @@ impl Shell {
                         .right(px(4.))
                         .flex()
                         .rounded(px(6.))
-                        .bg(if active { sel } else { hover })
+                        .bg(crate::theme::tool_ground(cx))
                         .invisible()
                         .group_hover(SharedString::from(format!("session-row-{number}")), |d| d.visible())
                         .child(
@@ -2315,7 +2319,38 @@ impl Shell {
             });
         });
         let tabs = simple_strip(&self.tools_strip, "tool-tab", &labels, picked, Joined::Top, palette, crate::dock_skin::BOTTOM_STRIP, None, select);
+        let on_files = tools.get(picked).is_some_and(|(n, _)| *n == "Files");
         let view = tools.into_iter().nth(picked).map(|(_, v)| v)?;
+        // Over the file tree: the folder it shows and its branch.
+        let root_line = on_files.then(|| {
+            let row = &self.tabs[self.active].row;
+            let muted = cx.theme().muted_foreground;
+            div()
+                .flex_none()
+                .px(px(12.))
+                .pt(px(6.))
+                .pb(px(4.))
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(Icon::new(gpui_kit::assets::IconName::Folder).small().text_color(muted))
+                .child(div().min_w_0().truncate().text_sm().font_weight(FontWeight::MEDIUM).text_color(cx.theme().foreground).child(row.folder.clone()))
+                .children(row.branch.clone().map(|b| {
+                    div()
+                        .flex_none()
+                        .px(px(6.))
+                        .py(px(1.))
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .rounded(px(5.))
+                        .bg(cx.theme().ring.opacity(0.12))
+                        .text_size(px(11.))
+                        .text_color(cx.theme().ring)
+                        .child(Icon::new(gpui_kit::assets::IconName::GitBranch).xsmall())
+                        .child(b)
+                }))
+        });
         Some(
             div()
                 .size_full()
@@ -2323,6 +2358,7 @@ impl Shell {
                 .flex_col()
                 .bg(content)
                 .child(title)
+                .children(root_line)
                 .child(div().flex_1().min_h_0().child(view))
                 .child(div().flex_none().h(px(crate::dock_skin::STRIP_GAP_ABOVE)))
                 .child(tabs)
@@ -2350,19 +2386,13 @@ impl Shell {
             .bg(ground)
             .border_t_1()
             .border_color(line)
-            .when(!open, |d| d.cursor_pointer().hover(|d| d.bg(hover)).on_click(cx.listener(|s, _, _, cx| s.toggle_tools(cx))))
+            // As a project's row folds: the chevron at the left, the whole heading a click.
+            .cursor_pointer()
+            .hover(|d| d.bg(hover))
+            .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(if open { "Hide the panels (Cmd+B)" } else { "Show the panels (Cmd+B)" }).build(w, cx))
+            .on_click(cx.listener(|s, _, _, cx| s.toggle_tools(cx)))
+            .child(Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight }).small().text_color(cx.theme().muted_foreground))
             .child(div().flex_1().min_w_0().truncate().text_size(px(18.)).font_weight(FontWeight::SEMIBOLD).text_color(fg).child(name))
-            .child(
-                Button::new("tools-hide")
-                    .icon(if open { IconName::ChevronDown } else { IconName::ChevronUp })
-                    .xsmall()
-                    .ghost()
-                    .tooltip(if open { "Hide the panels (Cmd+B)" } else { "Show the panels (Cmd+B)" })
-                    .on_click(cx.listener(|s, _, _, cx| {
-                        cx.stop_propagation();
-                        s.toggle_tools(cx)
-                    })),
-            )
             .into_any_element()
     }
 
@@ -2940,28 +2970,19 @@ impl Shell {
         // With projects: each project's sessions under it (a session in its folder or inside
         // it), then the rest under Other. Without: the plain list.
         let (projects, groups) = self.groups(cx);
-        // An open project's well: a hair darker than the list, its top edge shadowed inward.
-        let well_bg = crate::sheet_tabs::mix(crate::theme::tool_ground(cx), cx.theme().sidebar, 0.55);
-        let well_shadow = BoxShadow {
-            color: gpui_kit::black().opacity(if cx.theme().is_dark() { 0.35 } else { 0.08 }),
-            offset: point(px(0.), px(1.)),
-            blur_radius: px(3.),
-            spread_radius: px(0.),
-            inset: true,
-        };
         for (group, members) in groups {
             match group {
                 Some(pi) => {
                     let project = &projects[pi];
                     col = col.child(self.project_header(pi, project, &members, cx));
-                    // Open, its sessions sit in a well a shade darker than the list, set in.
+                    // Open, its sessions under it, in line with its name.
                     if !project.folded && !members.is_empty() {
                         let root = project.root.clone();
-                        let mut well = div().w_full().mt_1().mb_1().py(px(4.)).flex().flex_col().bg(well_bg).shadow(vec![well_shadow.clone()]);
+                        let mut under = div().pt(px(2.)).pb_1().flex().flex_col().gap(px(1.));
                         for ix in members {
-                            well = well.child(self.session_row(ix, Some(&root), cx));
+                            under = under.child(self.session_row(ix, Some(&root), cx));
                         }
-                        col = col.child(well);
+                        col = col.child(under);
                     }
                 }
                 None => {
