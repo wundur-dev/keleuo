@@ -2665,8 +2665,18 @@ impl Shell {
             .pb_2()
             .bg(bg)
             .child(
-                item("tb-projects", Icon::new(gpui_kit::assets::IconName::Folder), "Projects (Cmd+Shift+S)", !self.folded && !self.tabs.is_empty())
-                    .on_click(cx.listener(|s, _, _, cx| s.toggle_folded(cx))),
+                item("tb-projects", Icon::new(gpui_kit::assets::IconName::Folder), "Projects (Cmd+Shift+S)", !self.folded && !self.tabs.is_empty() && self.settings.is_none())
+                    // From Settings: back to the sessions, with the list shown.
+                    .on_click(cx.listener(|s, _, window, cx| {
+                        if s.settings.is_some() {
+                            s.close_settings(window, cx);
+                            if s.folded {
+                                s.toggle_folded(cx);
+                            }
+                        } else {
+                            s.toggle_folded(cx);
+                        }
+                    })),
             )
             .child(
                 item("tb-inbox", Icon::new(gpui_kit::assets::IconName::Inbox), "Inbox: notices from your sessions' agents", self.inbox_open)
@@ -3298,7 +3308,8 @@ impl Render for Shell {
         };
         // Hidden (the toolbar's Projects, or Cmd+Shift+S), the list goes entirely and the work
         // has the room.
-        let list = (!self.tabs.is_empty() && !self.folded).then(|| self.render_list(cx));
+        // Settings, while open, has the whole window beside the toolbar.
+        let list = (!self.tabs.is_empty() && !self.folded && self.settings.is_none()).then(|| self.render_list(cx));
         let toolbar = self.render_toolbar(cx);
         let inbox = self.inbox_open.then(|| self.render_inbox(cx));
         let list_shown = list.is_some();
