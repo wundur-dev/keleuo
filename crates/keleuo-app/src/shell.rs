@@ -2368,6 +2368,33 @@ impl Shell {
         )
     }
 
+    /// The tool panels' tabs alone, under the list while the panels are hidden: one opens them
+    /// on that panel.
+    fn render_tools_tabs(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        use crate::sheet_tabs::{Joined, Palette, simple_strip};
+        let ws = self.active_workspace()?;
+        let names: Vec<&'static str> = ws.read(cx).tools(cx).into_iter().map(|(n, _)| n).collect();
+        let theme = cx.theme();
+        let (ground, content, border) = (theme.sidebar, crate::theme::tool_ground(cx), theme.border);
+        let palette = Palette::new(ground, theme.foreground, content, theme.foreground, border, border);
+        let labels: Vec<SharedString> = names.iter().map(|n| SharedString::from(*n)).collect();
+        let picked = names.iter().position(|n| *n == self.tools_tab).unwrap_or(0);
+        let me = cx.entity().downgrade();
+        let select: crate::sheet_tabs::OnSelect = Rc::new(move |ix, _, cx| {
+            let name = names[ix];
+            let _ = me.update(cx, |s, cx| s.show_tool(name, cx));
+        });
+        Some(
+            div()
+                .flex_none()
+                .border_t_1()
+                .border_color(border)
+                .child(simple_strip(&self.tools_strip, "tool-tab-hidden", &labels, picked, Joined::Top, palette, crate::dock_skin::BOTTOM_STRIP, None, select))
+                .child(div().h(px(crate::dock_skin::STRIP_GAP_BELOW)).bg(ground))
+                .into_any_element(),
+        )
+    }
+
     fn tools_tab_name(&self, tools: &[(&'static str, AnyView)], picked: usize) -> &'static str {
         tools.get(picked).map_or(self.tools_tab, |(n, _)| *n)
     }
@@ -2665,7 +2692,7 @@ impl Shell {
             .pb_2()
             .bg(bg)
             .child(
-                item("tb-projects", Icon::new(gpui_kit::assets::IconName::Folder), "Projects (Cmd+Shift+S)", !self.folded && !self.tabs.is_empty() && self.settings.is_none())
+                item("tb-projects", Icon::new(gpui_kit::assets::IconName::Folder), "Projects (Cmd+Shift+B)", !self.folded && !self.tabs.is_empty() && self.settings.is_none())
                     // From Settings: back to the sessions, with the list shown.
                     .on_click(cx.listener(|s, _, window, cx| {
                         if s.settings.is_some() {
@@ -2933,16 +2960,28 @@ impl Shell {
         // With projects: each project's sessions under it (a session in its folder or inside
         // it), then the rest under Other. Without: the plain list.
         let (projects, groups) = self.groups(cx);
+        // An open project's well: a hair darker than the list, its top edge shadowed inward.
+        let well_bg = crate::sheet_tabs::mix(crate::theme::tool_ground(cx), cx.theme().sidebar, 0.55);
+        let well_shadow = BoxShadow {
+            color: gpui_kit::black().opacity(if cx.theme().is_dark() { 0.35 } else { 0.08 }),
+            offset: point(px(0.), px(1.)),
+            blur_radius: px(3.),
+            spread_radius: px(0.),
+            inset: true,
+        };
         for (group, members) in groups {
             match group {
                 Some(pi) => {
                     let project = &projects[pi];
                     col = col.child(self.project_header(pi, project, &members, cx));
-                    if !project.folded {
+                    // Open, its sessions sit in a well a shade darker than the list, set in.
+                    if !project.folded && !members.is_empty() {
                         let root = project.root.clone();
+                        let mut well = div().mx(px(6.)).mt_1().mb_1().py(px(4.)).flex().flex_col().rounded(px(10.)).bg(well_bg).shadow(vec![well_shadow.clone()]);
                         for ix in members {
-                            col = col.child(div().pl(px(12.)).child(self.session_row(ix, Some(&root), cx)));
+                            well = well.child(self.session_row(ix, Some(&root), cx));
                         }
+                        col = col.child(well);
                     }
                 }
                 None => {
@@ -3042,7 +3081,11 @@ impl Shell {
                             .child(div().size_full().min_h_0().overflow_hidden().child(tools)),
                     ))
                     .into_any_element(),
-                None => col.into_any_element(),
+                // Hidden, the panels leave their tabs along the bottom: one opens them on it.
+                None => match self.render_tools_tabs(cx) {
+                    Some(tabs) => div().flex_1().min_h_0().w_full().flex().flex_col().child(div().flex_1().min_h_0().flex().flex_col().child(col)).child(tabs).into_any_element(),
+                    None => col.into_any_element(),
+                },
             })
             .child(crate::dock_skin::corner_cap(true, true, bg))
             // Its right edge, the splitter: a thin line that thickens in the accent colour under
@@ -3207,21 +3250,6 @@ impl Render for Shell {
         let has_session = !self.tabs.is_empty() && self.browser.is_none() && !showing_settings;
         // The tool panels by name, each opening the sidebar on it: what the icon strip beside
         // the folded sidebar did.
-        let tools_menu = {
-            let ws = self.active_workspace().map(|w| w.downgrade());
-            let me = cx.entity().downgrade();
-            // Read when the menu opens, not on every frame.
-            move |mut menu: PopupMenu, _: &mut Window, cx: &mut Context<PopupMenu>| {
-                let tools = ws.as_ref().and_then(|w| w.upgrade()).map(|w| w.read(cx).tools(cx)).unwrap_or_default();
-                for (name, _) in tools {
-                    let me = me.clone();
-                    menu = menu.item(PopupMenuItem::new(name).on_click(move |_, _, cx| {
-                        let _ = me.update(cx, |s, cx| s.show_tool(name, cx));
-                    }));
-                }
-                menu
-            }
-        };
         // The whole menu (Appearance in it), from a button at the right end, as Chrome has it.
         let menu_button = gpui_kit::component::button::Button::new("t-menu")
             .icon(Icon::new(gpui_kit::assets::IconName::EllipsisVertical))
@@ -3237,10 +3265,6 @@ impl Render for Shell {
                 .flex()
                 .items_center()
                 .gap_1()
-                .child(
-                    button("t-sessions", Icon::new(IconName::PanelLeft), "Session list (Cmd+Shift+B)")
-                        .on_click(cx.listener(|s, _, _, cx| s.toggle_folded(cx))),
-                )
                 .child(
                     div().flex_1().min_w_0().child(
                         div()
@@ -3280,11 +3304,6 @@ impl Render for Shell {
                             .child(
                                 button("t-terminal", Icon::new(IconName::SquareTerminal), "New terminal (Cmd+T)")
                                     .on_click(to_ws(|w, win, cx| w.new_terminal(win, cx))),
-                            )
-                            .child(
-                                button("t-sidebar", Icon::new(IconName::PanelLeft), "Tool panels (Cmd+B; right-click for one)")
-                                    .on_click(cx.listener(|s, _, _, cx| s.toggle_tools(cx)))
-                                    .context_menu(tools_menu),
                             )
                             .child(
                                 button("t-split", Icon::new(IconName::PanelRight), "Split the shown file or terminal (Cmd+\\)")
