@@ -13,9 +13,7 @@ impl ChatPanel {
         if !parts.iter().any(|p| matches!(p, paste::Part::Pasted(_))) {
             return self.marked_text(text);
         }
-        let theme = cx.theme();
-        let (muted, border, hover, code_bg) = (theme.muted_foreground, theme.border, theme.secondary_hover, theme.background);
-        let mut col = div().flex().flex_col().gap_1();
+        let mut col = div().flex().flex_col().gap_2();
         for (k, part) in parts.into_iter().enumerate() {
             match part {
                 paste::Part::Text(t) => {
@@ -25,50 +23,7 @@ impl ChatPanel {
                 }
                 paste::Part::Pasted(p) => {
                     let id = format!("paste:{key}:{k}");
-                    let open = self.toggled.contains(&id);
-                    let toggle = id.clone();
-                    col = col.child(
-                        div()
-                            .rounded(px(8.))
-                            .border_1()
-                            .border_color(border)
-                            .overflow_hidden()
-                            .child(
-                                div()
-                                    .id(SharedString::from(id))
-                                    .px_2()
-                                    .py_1()
-                                    .flex()
-                                    .items_center()
-                                    .gap_1()
-                                    .text_xs()
-                                    .text_color(muted)
-                                    .cursor_pointer()
-                                    .hover(|d| d.bg(hover))
-                                    .child(Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight }).xsmall())
-                                    .child(format!("{} · {}", super::composer::paste_name(p), paste::size(p)))
-                                    .on_click(cx.listener(move |panel, _, _, cx| {
-                                        if !panel.toggled.remove(&toggle) {
-                                            panel.toggled.insert(toggle.clone());
-                                        }
-                                        panel.list.remeasure();
-                                        cx.notify();
-                                    })),
-                            )
-                            .when(open, |d| {
-                                d.child(
-                                    div()
-                                        .px_2()
-                                        .py_1()
-                                        .bg(code_bg)
-                                        .font_family(crate::fonts::code(cx))
-                                        .text_xs()
-                                        .flex()
-                                        .flex_col()
-                                        .children(p.lines().map(|l| if l.is_empty() { " ".to_string() } else { l.to_string() })),
-                                )
-                            }),
-                    );
+                    col = col.child(paste_card(id.clone(), p, self.toggled.contains(&id), cx));
                 }
             }
         }
@@ -1281,6 +1236,91 @@ pub(super) fn hover_actions(group: SharedString, key: String, text: String, mute
                     gpui_kit::component::WindowExt::push_notification(window, "Copied", cx);
                 }),
         )
+}
+
+/// A paste in one of the person's messages, as a card: a file tile, what it is (a pasted text,
+/// a web page), its heading, its kind and size, and View text, which opens it below in the
+/// code font. `id` keeps it open or shut (`ChatPanel::toggled`).
+fn paste_card(id: String, text: &str, open: bool, cx: &mut Context<ChatPanel>) -> Div {
+    let theme = cx.theme();
+    let (fg, muted, border, bg, ring, hover) = (theme.foreground, theme.muted_foreground, theme.border, theme.background, theme.ring, theme.secondary_hover);
+    let kind = paste::kind(text);
+    let what = if kind == "Web page" { "WEB PAGE" } else { "PASTED TEXT" };
+    let meta = if kind == "Web page" { format!("{} · {}", paste::size(text), paste::bytes(text)) } else { format!("{kind} · {} · {}", paste::size(text), paste::bytes(text)) };
+    let toggle = id.clone();
+    div()
+        .rounded(px(12.))
+        .border_1()
+        .border_color(border)
+        .bg(bg)
+        .overflow_hidden()
+        .child(
+            div()
+                .id(SharedString::from(id))
+                .px_3()
+                .py(px(10.))
+                .flex()
+                .items_center()
+                .gap_3()
+                .cursor_pointer()
+                .hover(|d| d.bg(hover))
+                .child(
+                    div()
+                        .flex_none()
+                        .size(px(40.))
+                        .rounded(px(9.))
+                        .bg(ring.opacity(0.1))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(Icon::new(gpui_kit::assets::IconName::FileText).small().text_color(ring)),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .gap(px(1.))
+                        .child(div().text_size(px(10.5)).font_weight(FontWeight::SEMIBOLD).text_color(muted).child(what))
+                        .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).text_color(fg).line_height(rems(1.3)).child(paste::heading(text)))
+                        .child(div().text_xs().text_color(muted).child(meta)),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .text_xs()
+                        .text_color(ring)
+                        .child(if open { "Hide text" } else { "View text" })
+                        .child(Icon::new(if open { IconName::ChevronUp } else { IconName::ChevronDown }).xsmall()),
+                )
+                .on_click(cx.listener(move |panel, _, _, cx| {
+                    if !panel.toggled.remove(&toggle) {
+                        panel.toggled.insert(toggle.clone());
+                    }
+                    panel.list.remeasure();
+                    cx.notify();
+                })),
+        )
+        .when(open, |d| {
+            d.child(
+                div()
+                    .px_3()
+                    .py_2()
+                    .border_t_1()
+                    .border_color(border)
+                    .font_family(crate::fonts::code(cx))
+                    .text_xs()
+                    .line_height(px(17.))
+                    .text_color(fg)
+                    .flex()
+                    .flex_col()
+                    .children(text.lines().map(|l| if l.is_empty() { " ".to_string() } else { l.to_string() })),
+            )
+        })
 }
 
 /// A green Run pill, so it reads as a button at a glance (brighter under the pointer, darker

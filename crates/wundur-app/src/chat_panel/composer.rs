@@ -63,32 +63,28 @@ pub(super) fn continue_list(input: &Entity<TextareaState>, window: &mut Window, 
     true
 }
 
-/// A paste's token in the message box: a small raised pill (rounded, lit from above, a soft
-/// shadow) with its size.
+/// A paste's token in the message box: a tinted pill with the paste's number and name, the
+/// same number as its card above the box.
 pub(super) fn paste_pill(token: &InlineTokenContext, _: &mut Window, cx: &mut App) -> AnyElement {
     let theme = cx.theme();
-    let base = theme.secondary;
-    let (top, bottom, edge) = if theme.is_dark() {
-        (Hsla { l: (base.l + 0.13).min(1.), ..base }, Hsla { l: (base.l + 0.04).min(1.), ..base }, theme.foreground.opacity(0.18))
-    } else {
-        (Hsla { l: (base.l + 0.03).min(1.), ..base }, Hsla { l: (base.l - 0.05).max(0.), ..base }, theme.border)
-    };
-    let edge = if token.is_selected() { theme.ring } else { edge };
+    let ring = theme.ring;
+    let n = token.token().id().strip_prefix("paste-").unwrap_or("").to_string();
+    let edge = if token.is_selected() { ring } else { ring.opacity(0.35) };
     div()
         .h(token.line_height() - px(2.))
         .mx(px(1.))
         .px(px(7.))
         .flex()
         .items_center()
-        .gap(px(4.))
+        .gap(px(5.))
         .rounded(px(7.))
         .border_1()
         .border_color(edge)
-        .bg(linear_gradient(180., linear_color_stop(top, 0.), linear_color_stop(bottom, 1.)))
-        .shadow_xs()
+        .bg(ring.opacity(if token.is_selected() { 0.16 } else { 0.08 }))
         .text_xs()
         .text_color(theme.foreground)
-        .child(Icon::new(gpui_kit::assets::IconName::FileText).xsmall().text_color(theme.muted_foreground))
+        .child(Icon::new(gpui_kit::assets::IconName::FileText).xsmall().text_color(ring))
+        .when(!n.is_empty(), |d| d.child(div().font_weight(FontWeight::SEMIBOLD).text_color(ring).child(n)))
         .child(token.token().label().clone())
         .into_any_element()
 }
@@ -457,6 +453,7 @@ impl ChatPanel {
             return;
         }
         let text = paste::expand(&typed, &std::mem::take(&mut self.pastes), true);
+        self.toggled.retain(|k| !k.starts_with("tray-paste:"));
         self.input.update(cx, |s, cx| s.set_value("", window, cx));
         // Sending goes back to the end and follows it.
         self.list.set_follow_mode(FollowMode::Tail);
@@ -476,7 +473,7 @@ impl ChatPanel {
     pub(super) fn paste_as(&mut self, text: String, what: &str, window: &mut Window, cx: &mut Context<Self>) {
         let n = self.pastes.len() + 1;
         let typed = paste::token(n, &text);
-        let token = InlineToken::new(format!("paste-{n}"), typed.clone()).with_label(format!("{what} · {}", paste::size(&text)));
+        let token = InlineToken::new(format!("paste-{n}"), typed.clone()).with_label(what.to_string());
         self.pastes.push(text);
         self.input.update(cx, |s, cx| {
             if s.replace_with_token(token, window, cx).is_err() {
@@ -803,14 +800,16 @@ impl ChatPanel {
         Some(div().w_full().max_w(px(COLUMN)).px_3().child(panel).into_any_element())
     }
 
-    /// The images and long pastes waiting to go with the message, above the box.
+    /// The images and long pastes waiting to go with the message, above the box: the images as
+    /// thumbnails, each paste as a card (its number, as on its pill in the text; its heading and
+    /// size) that opens to show the text, with Put in the text and Remove.
     fn render_chips(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let theme = cx.theme();
-        let (border, muted, fg, field) = (theme.border, theme.muted_foreground, theme.foreground, theme.secondary);
-        let mut chips = div().flex().flex_wrap().gap_2();
+        let (border, muted, fg, ring, bg) = (theme.border, theme.muted_foreground, theme.foreground, theme.ring, theme.background);
+        let mut images = div().flex().flex_wrap().gap_2();
         for (n, path) in self.attachments.iter().enumerate() {
             let (p1, p2) = (path.clone(), path.clone());
-            chips = chips.child(
+            images = images.child(
                 div()
                     .id(("chip", n))
                     .relative()
@@ -844,50 +843,138 @@ impl ChatPanel {
             );
         }
 
-        // Long pastes still in the box: what each holds, to put back in the text or drop.
+        // Long pastes still in the box.
         let value = self.input.read(cx).value().to_string();
-        let mut paste_chips = 0;
+        let mut cards = div().flex().flex_col().gap_2();
+        let mut paste_cards = 0;
         for n in paste::tokens_in(&value) {
             let Some(text) = self.pastes.get(n.wrapping_sub(1)) else { continue };
-            paste_chips += 1;
-            let first = text.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim().to_string();
-            let action = |id: &'static str, label: &'static str, inline: bool| {
+            paste_cards += 1;
+            let key = format!("tray-paste:{n}");
+            let open = self.toggled.contains(&key);
+            let what = if paste::kind(text) == "Web page" { "Web page" } else { "Pasted text" };
+            let tile = div()
+                .flex_none()
+                .relative()
+                .size(px(36.))
+                .rounded(px(8.))
+                .bg(ring.opacity(0.1))
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(Icon::new(gpui_kit::assets::IconName::FileText).small().text_color(ring))
+                .child(
+                    div()
+                        .absolute()
+                        .top(px(-5.))
+                        .right(px(-5.))
+                        .min_w(px(16.))
+                        .h(px(16.))
+                        .px(px(4.))
+                        .rounded_full()
+                        .bg(ring)
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_size(px(10.))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(gpui_kit::white())
+                        .child(n.to_string()),
+                );
+            let toggle = key.clone();
+            let head = div()
+                .id(("paste-card", n))
+                .px_2()
+                .py(px(8.))
+                .flex()
+                .items_center()
+                .gap(px(10.))
+                .cursor_pointer()
+                .child(tile)
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .child(div().truncate().text_sm().font_weight(FontWeight::SEMIBOLD).text_color(fg).child(paste::heading(text)))
+                        .child(div().truncate().text_xs().text_color(muted).child(format!("{what} · {}", paste::size(text)))),
+                )
+                .child(Icon::new(if open { IconName::ChevronUp } else { IconName::ChevronDown }).small().text_color(muted))
+                .child(
+                    Button::new(("paste-drop", n))
+                        .xsmall()
+                        .ghost()
+                        .icon(gpui_kit::assets::IconName::Close)
+                        .tooltip("Remove it from the message")
+                        .on_click(cx.listener(move |p, _, window, cx| {
+                            cx.stop_propagation();
+                            p.unfold_paste(n, false, window, cx);
+                        })),
+                )
+                .on_click(cx.listener(move |p, _, _, cx| {
+                    if !p.toggled.remove(&toggle) {
+                        p.toggled.insert(toggle.clone());
+                    }
+                    cx.notify();
+                }));
+            let body = open.then(|| {
                 div()
-                    .id((id, n))
-                    .px_1()
-                    .rounded(px(4.))
-                    .cursor_pointer()
-                    .hover(|d| d.text_color(fg))
-                    .child(label)
-                    .on_click(cx.listener(move |p, _, window, cx| p.unfold_paste(n, inline, window, cx)))
-            };
-            chips = chips.child(
-                div()
-                    .h(px(56.))
-                    .max_w(px(280.))
-                    .px_2()
-                    .rounded(px(10.))
-                    .border_1()
-                    .border_color(border)
-                    .bg(field)
-                    .flex()
-                    .flex_col()
-                    .justify_center()
-                    .text_xs()
-                    .text_color(muted)
-                    .child(div().text_color(fg).truncate().child(format!("{} · {}", paste_name(text), paste::size(text))))
-                    .child(div().truncate().font_family(crate::fonts::code(cx)).child(first))
+                    .border_t_1()
+                    .border_color(ring.opacity(0.25))
                     .child(
                         div()
+                            .id(("paste-preview", n))
+                            .max_h(px(180.))
+                            .overflow_y_scroll()
+                            .px_3()
+                            .py_2()
+                            .bg(bg)
+                            .font_family(crate::fonts::code(cx))
+                            .text_xs()
+                    .line_height(px(17.))
+                            .text_color(fg)
                             .flex()
-                            .gap_1()
-                            .child(action("paste-inline", "Show in text field", true))
-                            .child(action("paste-drop", "Remove", false)),
-                    ),
+                            .flex_col()
+                            .children(text.lines().take(400).map(|l| if l.is_empty() { " ".to_string() } else { l.to_string() })),
+                    )
+                    .child(
+                        div().px_2().py_1().flex().text_xs().text_color(muted).child(
+                            div()
+                                .id(("paste-inline", n))
+                                .px_1()
+                                .rounded(px(4.))
+                                .cursor_pointer()
+                                .hover(|d| d.text_color(fg))
+                                .child("Put it in the text instead")
+                                .on_click(cx.listener(move |p, _, window, cx| p.unfold_paste(n, true, window, cx))),
+                        ),
+                    )
+            });
+            cards = cards.child(
+                div()
+                    .w_full()
+                    .rounded(px(12.))
+                    .border_1()
+                    .border_color(ring.opacity(0.4))
+                    .bg(ring.opacity(0.05))
+                    .overflow_hidden()
+                    .child(head)
+                    .children(body),
             );
         }
 
-        (!self.attachments.is_empty() || paste_chips > 0).then(|| chips.into_any_element())
+        (!self.attachments.is_empty() || paste_cards > 0).then(|| {
+            div()
+                .w_full()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .pb_1()
+                .when(!self.attachments.is_empty(), |d| d.child(images))
+                .when(paste_cards > 0, |d| d.child(cards))
+                .into_any_element()
+        })
     }
 
     /// The model list box (every model the agent offers, typed to filter), or the field typing a
