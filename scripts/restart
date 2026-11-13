@@ -53,7 +53,7 @@ if [ "$1" = "--relaunch" ]; then
         for p in "$@"; do kill -9 "$p" 2>/dev/null; done
     fi
     if [ -n "$RESET_LAYOUT" ]; then
-        CFG="${WUNDUR_CONFIG_DIR:-$HOME/Library/Application Support/wundur}"
+        CFG="${WUNDUR_CONFIG_DIR:-$HOME/Library/Application Support/wundur-studio}"
         # Still Keleuo's until Wundur first starts (it copies them over then).
         [ -n "$OLD" ] && [ -z "$WUNDUR_CONFIG_DIR" ] && CFG="$HOME/Library/Application Support/keleuo"
         [ -d "$CFG/layouts" ] && mv "$CFG/layouts" "$CFG/layouts.reset-$(date +%Y%m%d-%H%M%S)"
@@ -62,7 +62,7 @@ p=sys.argv[1]; s=json.load(open(p)); s.pop("layout",None); json.dump(s,open(p,"w
     fi
     cd "$folder" || cd "$HOME" || exit 1
     # What it prints (warnings, and timings with WUNDUR_PERF=1) goes to a log, new each start.
-    LOG="$HOME/Library/Logs/Wundur/wundur.log"
+    LOG="$HOME/Library/Logs/Wundur Studio/wundur.log"
     mkdir -p "$(dirname "$LOG")"
     # shellcheck disable=SC2086
     exec "$REPO/scripts/wundur" $args >"$LOG" 2>&1

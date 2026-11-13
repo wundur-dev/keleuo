@@ -377,7 +377,7 @@ fn index_path(host: &dyn Host, path: &Path) -> Option<PathBuf> {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     path.hash(&mut h);
     let name = path.file_stem()?.to_string_lossy().to_string();
-    Some(dirs::cache_dir()?.join("wundur").join("session-index").join(format!("{name}-{:016x}.json", h.finish())))
+    Some(dirs::cache_dir()?.join("wundur-studio").join("session-index").join(format!("{name}-{:016x}.json", h.finish())))
 }
 
 fn read_index(host: &dyn Host, path: &Path, len: u64) -> Option<Index> {

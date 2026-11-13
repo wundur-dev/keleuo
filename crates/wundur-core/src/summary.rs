@@ -691,7 +691,7 @@ fn cache_file(session: &str) -> Option<PathBuf> {
     }
     let root = match crate::env_var_os("CACHE_DIR") {
         Some(d) if !d.is_empty() => PathBuf::from(d),
-        _ => dirs::cache_dir()?.join("wundur"),
+        _ => dirs::cache_dir()?.join("wundur-studio"),
     };
     Some(root.join("summaries").join(format!("{name}.json")))
 }

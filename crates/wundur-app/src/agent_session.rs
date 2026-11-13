@@ -1026,7 +1026,7 @@ impl AgentSession {
             let n = LAUNCHES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let (hooks, home) = (self.hooks.as_ref()?, self.host.home_dir()?);
             let socket = PathBuf::from(format!("/tmp/wundur-{}-{n}.sock", hooks.token()));
-            hooks.remote(self.backend.as_ref(), &home.join(".cache/wundur"), &socket).map(|r| (r, socket))
+            hooks.remote(self.backend.as_ref(), &home.join(".cache/wundur-studio"), &socket).map(|r| (r, socket))
         }).flatten();
         let settings = match &remote {
             Some((r, _)) => Some(r.settings.clone()),
@@ -2331,7 +2331,7 @@ impl Drop for AgentSession {
 /// Copy `images` (here) into a folder of Wundur's on `host`, giving their paths there; one that
 /// cannot be copied is left out.
 fn copy_images_to(host: &dyn wundur_core::host::Host, images: &[PathBuf]) -> Vec<PathBuf> {
-    let Some(dir) = host.home_dir().map(|h| h.join(".cache/wundur/images")) else { return Vec::new() };
+    let Some(dir) = host.home_dir().map(|h| h.join(".cache/wundur-studio/images")) else { return Vec::new() };
     if host.create_dir_all(&dir).is_err() {
         return Vec::new();
     }

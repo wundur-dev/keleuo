@@ -154,7 +154,7 @@ hooks read-only, so all automation is visible in one place.
 
 ## Where things live
 
-- **Your own:** `~/Library/Application Support/wundur/scripts/` (rules file plus `.js` files),
+- **Your own:** `~/Library/Application Support/wundur-studio/scripts/` (rules file plus `.js` files),
   available in every session.
 - **Per project:** `.wundur/rules.toml` and `.wundur/scripts/` in the repo, so a team can share
   them, under the trust rule above.
