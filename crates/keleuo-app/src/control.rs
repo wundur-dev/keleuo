@@ -112,6 +112,44 @@ fn dispatch(line: &str, cx: &mut App) -> String {
             })
             .unwrap_or_else(|_| "window closed".into());
     }
+    if let Some(args) = line.strip_prefix("move ") {
+        // The pointer moved, no button held (no system input): `move X Y`.
+        let n: Vec<f32> = args.split_whitespace().filter_map(|a| a.parse().ok()).collect();
+        let [x, y] = n[..] else { return "move X Y".into() };
+        return handle
+            .update(cx, |_, window, cx| {
+                let ev = MouseMoveEvent { position: point(px(x), px(y)), pressed_button: None, modifiers: Modifiers::default() };
+                window.dispatch_event(PlatformInput::MouseMove(ev), cx);
+                window.refresh();
+                "move".to_string()
+            })
+            .unwrap_or_else(|_| "window closed".into());
+    }
+    if let Some(args) = line.strip_prefix("drag ") {
+        // A left-button drag inside the app (no system input): `drag X1 Y1 X2 Y2`, pressed at
+        // the first point, moved in steps with the button held, let go at the second.
+        let n: Vec<f32> = args.split_whitespace().filter_map(|a| a.parse().ok()).collect();
+        let [x1, y1, x2, y2] = n[..] else { return "drag X1 Y1 X2 Y2".into() };
+        return handle
+            .update(cx, |_, window, cx| {
+                let at = |t: f32| point(px(x1 + (x2 - x1) * t), px(y1 + (y2 - y1) * t));
+                let m = Modifiers::default();
+                window.dispatch_event(PlatformInput::MouseMove(MouseMoveEvent { position: at(0.), pressed_button: None, modifiers: m }), cx);
+                window.refresh();
+                window.dispatch_event(
+                    PlatformInput::MouseDown(MouseDownEvent { button: MouseButton::Left, position: at(0.), modifiers: m, click_count: 1, first_mouse: false }),
+                    cx,
+                );
+                for i in 1..=10 {
+                    let position = at(i as f32 / 10.);
+                    window.dispatch_event(PlatformInput::MouseMove(MouseMoveEvent { position, pressed_button: Some(MouseButton::Left), modifiers: m }), cx);
+                }
+                window.dispatch_event(PlatformInput::MouseUp(MouseUpEvent { button: MouseButton::Left, position: at(1.), modifiers: m, click_count: 1 }), cx);
+                window.refresh();
+                "drag".to_string()
+            })
+            .unwrap_or_else(|_| "window closed".into());
+    }
     if let Some(keys) = line.strip_prefix("key ") {
         // Keystrokes dispatched inside the app (no system input): `key cmd-n`.
         let keys = keys.trim().to_string();

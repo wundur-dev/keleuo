@@ -2270,6 +2270,14 @@ impl Shell {
         )
     }
 
+    /// The left column's splitter was let go: keep the width.
+    fn end_list_resize(&mut self, cx: &mut Context<Self>) {
+        if std::mem::take(&mut self.list_resizing) {
+            let _ = cx.global::<AppSettings>().0.borrow().save();
+            cx.notify();
+        }
+    }
+
     /// Whether the tool panels show under the sessions (Cmd+B hides them).
     fn tools_shown(cx: &App) -> bool {
         !cx.global::<AppSettings>().0.borrow().layout.sidebar_folded
@@ -2817,24 +2825,36 @@ impl Shell {
                 None => col.into_any_element(),
             })
             .child(crate::dock_skin::corner_cap(true, true, bg))
-            // Its right edge: drag to make the column wider or narrower. Drawn last, so it is on
-            // top of the list and the panels, inside the column's edge.
-            .child(
+            // Its right edge, the splitter: a thin line that thickens in the accent colour under
+            // the pointer and while dragged. Drawn last, so it is on top of the list and the
+            // panels, inside the column's edge.
+            .child({
+                let (line, accent, dragging) = (cx.theme().border, cx.theme().ring, self.list_resizing);
                 div()
                     .id("list-resize")
+                    .group("list-resize")
                     .absolute()
                     .top_0()
                     .right_0()
-                    .w(px(6.))
+                    .w(px(8.))
                     .h_full()
                     .occlude()
                     .cursor_col_resize()
-                    .on_mouse_down(MouseButton::Left, cx.listener(|s, _, _, cx| {
-                        s.list_resizing = true;
+                    .on_drag(ListResize, |_, _, _, cx| {
                         cx.stop_propagation();
-                        cx.notify();
-                    })),
-            )
+                        cx.new(|_| ListResize)
+                    })
+                    .child(
+                        div()
+                            .absolute()
+                            .top_0()
+                            .bottom_0()
+                            .right_0()
+                            .w(px(if dragging { 3. } else { 1. }))
+                            .bg(if dragging { accent } else { line })
+                            .group_hover("list-resize", move |d| d.w(px(3.)).bg(accent)),
+                    )
+            })
             .into_any_element()
     }
 
@@ -3398,20 +3418,18 @@ impl Render for Shell {
                     .min_h_0()
                     .relative()
                     .flex()
-                    // Dragging the left column's edge: it follows the pointer, and is kept when
-                    // the button comes up.
+                    // Dragging the left column's splitter: the column follows the pointer; letting
+                    // go anywhere ends it (a drag of the window's own, which ends wherever the
+                    // button comes up), and the width is kept.
+                    .on_drag_move(cx.listener(|s, ev: &DragMoveEvent<ListResize>, _, cx| {
+                        let width = (f32::from(ev.event.position.x) - 6.).clamp(LIST_MIN, LIST_MAX);
+                        cx.global::<AppSettings>().0.borrow_mut().layout.list_width = width;
+                        s.list_resizing = true;
+                        cx.notify();
+                    }))
+                    .on_drop(cx.listener(|s, _: &ListResize, _, cx| s.end_list_resize(cx)))
                     .when(self.list_resizing, |d| {
-                        d.cursor_col_resize()
-                            .on_mouse_move(cx.listener(|_, ev: &MouseMoveEvent, _, cx| {
-                                let width = (f32::from(ev.position.x) - 6.).clamp(LIST_MIN, LIST_MAX);
-                                cx.global::<AppSettings>().0.borrow_mut().layout.list_width = width;
-                                cx.notify();
-                            }))
-                            .on_mouse_up(MouseButton::Left, cx.listener(|s, _, _, cx| {
-                                s.list_resizing = false;
-                                let _ = cx.global::<AppSettings>().0.borrow().save();
-                                cx.notify();
-                            }))
+                        d.cursor_col_resize().on_mouse_up(MouseButton::Left, cx.listener(|s, _, _, cx| s.end_list_resize(cx)))
                     })
                     .children(list)
                     .child(
@@ -3458,6 +3476,15 @@ type Reopen = (Arc<dyn Host>, PathBuf, Arc<dyn Backend>, Option<String>);
 
 /// A group of the session list: a project (by its index), or none (Other), and its sessions.
 type Group = (Option<usize>, Vec<usize>);
+
+/// The left column's splitter being dragged (nothing is drawn under the pointer).
+struct ListResize;
+
+impl Render for ListResize {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        Empty
+    }
+}
 
 /// One entry of the folded list, in order.
 enum RailItem {
