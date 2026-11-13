@@ -2335,31 +2335,23 @@ impl Shell {
     /// hidden, shows them again (⌃; the whole bar does too).
     fn tools_title(&self, name: &'static str, open: bool, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
-        let (content, border, muted, hover) = (crate::theme::tool_ground(cx), theme.border, theme.muted_foreground, theme.secondary_hover);
-        let title_fg = crate::sheet_tabs::mix(theme.foreground, muted, 0.55);
-        let inset = BoxShadow {
-            color: gpui_kit::black().opacity(if theme.is_dark() { 0.35 } else { 0.07 }),
-            offset: point(px(0.), px(1.)),
-            blur_radius: px(3.),
-            spread_radius: px(0.),
-            inset: true,
-        };
+        // A heading as the list's ("Projects"): the same size and weight on the column's own
+        // ground, under a clear line between the two.
+        let (ground, hover, fg) = (crate::theme::tool_ground(cx), theme.secondary_hover, crate::theme::list_text(cx));
+        let line = crate::sheet_tabs::mix(theme.border, theme.foreground, 0.18);
         div()
             .id("tools-title")
             .flex_none()
-            .h(px(crate::dock_skin::HEADER_HEIGHT))
-            .pl(px(12.))
-            .pr(px(8.))
+            .h(px(40.))
+            .px(px(14.))
             .flex()
             .items_center()
             .gap_2()
-            .bg(content)
-            .shadow(vec![inset])
+            .bg(ground)
             .border_t_1()
-            .when(open, |d| d.border_b_1())
-            .border_color(border)
+            .border_color(line)
             .when(!open, |d| d.cursor_pointer().hover(|d| d.bg(hover)).on_click(cx.listener(|s, _, _, cx| s.toggle_tools(cx))))
-            .child(div().flex_1().min_w_0().truncate().text_size(px(15.)).text_color(title_fg).child(name))
+            .child(div().flex_1().min_w_0().truncate().text_size(px(18.)).font_weight(FontWeight::SEMIBOLD).text_color(fg).child(name))
             .child(
                 Button::new("tools-hide")
                     .icon(if open { IconName::ChevronDown } else { IconName::ChevronUp })
