@@ -150,7 +150,7 @@ pub fn render(page: &WeakEntity<SettingsPage>, window: &mut Window, cx: &mut App
             say(&p, true, "Sending…", cx);
             cx.spawn(async move |cx: &mut AsyncApp| {
                 let sent = cx
-                    .background_spawn(async move { wundur_core::parent::send(&config, "test", &format!("A test alert from Wundur. Alerts about {} will look like this.", config.child()), false) })
+                    .background_spawn(async move { wundur_core::parent::send(&config, "test", &format!("A test alert from Wundur Studio. Alerts about {} will look like this.", config.child()), false) })
                     .await;
                 cx.update(|cx| match sent {
                     Ok(()) => say(&p, true, "Sent: it should be on your phone in a moment.", cx),
@@ -212,7 +212,7 @@ pub fn render(page: &WeakEntity<SettingsPage>, window: &mut Window, cx: &mut App
     }
     body = body
         .child(heading("Password"))
-        .child(note("Locks this page, so turning parent mode off or changing it needs you. On a shared macOS account it's a speed bump: Wundur's settings file can still be edited. Your child having their own macOS account is what really keeps it."))
+        .child(note("Locks this page, so turning parent mode off or changing it needs you. On a shared macOS account it's a speed bump: Wundur Studio's settings file can still be edited. Your child having their own macOS account is what really keeps it."))
         .child(pass);
 
     body.children(said.map(|(ok, t)| div().pt_1().text_sm().text_color(if ok { green } else { danger }).child(t)))

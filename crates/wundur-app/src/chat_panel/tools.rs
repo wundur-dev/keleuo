@@ -138,7 +138,7 @@ impl ChatPanel {
                         .shadow_lg()
                         .child(div().text_base().font_weight(FontWeight::SEMIBOLD).text_color(fg).child(issue.title.clone()))
                         .child(div().text_sm().line_height(rems(1.45)).text_color(muted).child(issue.detail.replace('`', "")))
-                        .child(div().text_xs().text_color(muted).child("Choose a fix. It goes into the agent's own settings, so it works outside Wundur too."))
+                        .child(div().text_xs().text_color(muted).child("Choose a fix. It goes into the agent's own settings, so it works outside Wundur Studio too."))
                         .child(list)
                         .child(
                             div().flex().justify_end().child(

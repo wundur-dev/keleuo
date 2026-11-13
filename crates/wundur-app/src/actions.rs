@@ -116,15 +116,15 @@ pub fn menus(cx: &App) -> Vec<Menu> {
     let notify = cx.global::<crate::AppSettings>().0.borrow().notify.clone();
     let appearance = cx.global::<crate::AppSettings>().0.borrow().appearance.clone();
     vec![
-        Menu::new("Wundur").items([
-            MenuItem::action("About Wundur", ShowAbout),
+        Menu::new("Wundur Studio").items([
+            MenuItem::action("About Wundur Studio", ShowAbout),
             MenuItem::separator(),
             MenuItem::action("Settings…", ShowSettings),
             MenuItem::separator(),
             MenuItem::action("Alert When a Session Asks", ToggleNotifyWaiting).checked(notify.waiting),
             MenuItem::action("Alert When a Turn Finishes", ToggleNotifyFinished).checked(notify.finished),
             MenuItem::separator(),
-            MenuItem::action("Quit Wundur", Quit),
+            MenuItem::action("Quit Wundur Studio", Quit),
         ]),
         Menu::new("File").items([
             MenuItem::action("Open Folder...", OpenFolder),

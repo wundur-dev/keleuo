@@ -13,7 +13,7 @@ VERSION=$1
 OUT=$2
 BUILD=${3:-1}
 REPO=$(cd "$(dirname "$0")/.." && pwd)
-APP="$OUT/Wundur.app"
+APP="$OUT/Wundur Studio.app"
 
 cd "$REPO"
 TARGET=${CARGO_TARGET_DIR:-target}
@@ -39,9 +39,9 @@ cat > "$APP/Contents/Info.plist" <<EOF
     <key>CFBundleIdentifier</key>
     <string>ai.wundur.app</string>
     <key>CFBundleName</key>
-    <string>Wundur</string>
+    <string>Wundur Studio</string>
     <key>CFBundleDisplayName</key>
-    <string>Wundur</string>
+    <string>Wundur Studio</string>
     <key>CFBundleIconFile</key>
     <string>Wundur</string>
     <key>CFBundlePackageType</key>

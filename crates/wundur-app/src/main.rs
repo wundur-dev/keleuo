@@ -252,7 +252,7 @@ fn window_options(title: String, w: f32, h: f32, cx: &App) -> WindowOptions {
 }
 
 fn open_window(start: shell::Start, cx: &mut App) {
-    let options = window_options("Wundur".into(), 1500., 940., cx);
+    let options = window_options("Wundur Studio".into(), 1500., 940., cx);
     match gpui_kit::open_window(options, cx, |window, cx| {
         // The system went light or dark: follow it (unless the setting says otherwise).
         window.observe_window_appearance(|_, cx| theme::sync(cx)).detach();

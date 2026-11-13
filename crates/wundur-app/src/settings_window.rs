@@ -223,7 +223,7 @@ fn general(page: WeakEntity<SettingsPage>) -> SettingPage {
             ),
             pref(
                 "Reopen sessions at start",
-                "The sessions open when Wundur quit open again when it starts.",
+                "The sessions open when Wundur Studio quit open again when it starts.",
                 |p| &mut p.reopen_sessions,
             ),
         ]),
@@ -340,7 +340,7 @@ fn terminals() -> SettingPage {
             .description("In points, for an agent's own interface (a session's Terminal view), where you read and type."),
             pref(
                 "Keep terminal history",
-                "A terminal shows what it showed before Wundur quit. Kept 30 days.",
+                "A terminal shows what it showed before Wundur Studio quit. Kept 30 days.",
                 |p| &mut p.keep_terminal_history,
             ),
         ]),
@@ -349,7 +349,7 @@ fn terminals() -> SettingPage {
 
 fn notifications() -> SettingPage {
     SettingPage::new("Notifications").icon(IconName::Bell).resettable(true).group(
-        SettingGroup::new().title("The Dock").description("A bounce, and a count on Wundur's icon, while the window is not in front.").items([
+        SettingGroup::new().title("The Dock").description("A bounce, and a count on Wundur Studio's icon, while the window is not in front.").items([
             SettingItem::new(
                 "When a session asks",
                 SettingField::switch(
@@ -486,7 +486,7 @@ fn summaries() -> SettingPage {
                 )
                 .description("Its address, such as http://192.168.1.20:1234 (LM Studio) or http://localhost:11434 (Ollama)."),
                 SettingItem::new("Key", api_key_field())
-                    .description("For servers that want one (sent as a bearer token). Kept in Wundur's settings file."),
+                    .description("For servers that want one (sent as a bearer token). Kept in Wundur Studio's settings file."),
                 SettingItem::new(
                     "Model",
                     SettingField::render(|_, _, cx: &mut App| {

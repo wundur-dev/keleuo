@@ -203,7 +203,7 @@ impl Sandbox for Seatbelt {
         } else if already_sandboxed() {
             // A sandbox cannot be applied inside another: Wundur was started from a confined
             // agent, and what it starts is confined by that already.
-            Support::Unavailable("Wundur itself runs in a sandbox (it was started from a confined agent); agents it starts stay inside that one.".into())
+            Support::Unavailable("Wundur Studio itself runs in a sandbox (it was started from a confined agent); agents it starts stay inside that one.".into())
         } else {
             Support::Available
         }

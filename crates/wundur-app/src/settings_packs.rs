@@ -232,7 +232,7 @@ pub fn render(page: &WeakEntity<SettingsPage>, window: &mut Window, cx: &mut App
                     .gap_2()
                     .child(tile(Lucide::Box, 44., cx))
                     .child(div().font_weight(FontWeight::SEMIBOLD).text_color(fg).child("No tool packs installed"))
-                    .child(div().text_sm().text_color(muted).child("Ready-made tools for every agent, run inside Wundur: nothing else to install."))
+                    .child(div().text_sm().text_color(muted).child("Ready-made tools for every agent, run inside Wundur Studio: nothing else to install."))
                     .child(Button::new("pack-install").small().outline().icon(Icon::new(Lucide::FolderOpen)).label("Install from folder…").on_click(move |_, _, cx| install(p_install.clone(), cx))),
             );
         }
@@ -381,7 +381,7 @@ fn card(page: &WeakEntity<SettingsPage>, entity: &Entity<SettingsPage>, pack: &P
     let mut about = div().flex().flex_col().gap_1().pl_6().text_sm().text_color(muted);
     if open.contains(&about_key) {
         about = about
-            .child("Runs inside Wundur, with no access to your files beyond the session's folder, where it saves what it makes.")
+            .child("Runs inside Wundur Studio, with no access to your files beyond the session's folder, where it saves what it makes.")
             .child("Reads only its own keys, and only for its own requests: what it returns never contains them.")
             .child("Tools that cost money ask before each run; \"Always for this session\" stops asking.");
     }

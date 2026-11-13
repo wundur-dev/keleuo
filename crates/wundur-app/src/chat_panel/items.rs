@@ -762,6 +762,7 @@ impl ChatPanel {
 
     /// Plain text, its find matches marked (as `find_marks` marks Markdown's).
     fn marked_text(&self, text: &str) -> AnyElement {
+        let text = &keep_with_word(text);
         let Some(marks) = &self.marking else { return text.to_string().into_any_element() };
         let found = wundur_core::find::ranges(text, &marks.query);
         if found.is_empty() {
@@ -1308,7 +1309,7 @@ pub(super) fn run_pill(id: impl Into<ElementId>, command: String, background: us
     };
     let tip: SharedString = match stops {
         0 => "Run it in a terminal in this folder".into(),
-        n => format!("{n} background agent(s) are still working: restarting quits Wundur and stops them. Wait for them to report back, or run it anyway.").into(),
+        n => format!("{n} background agent(s) are still working: restarting quits Wundur Studio and stops them. Wait for them to report back, or run it anyway.").into(),
     };
     div()
         .id(id)
@@ -1500,5 +1501,40 @@ mod table_tests {
         let saved = std::fs::read_to_string(&path).unwrap();
         let _ = std::fs::remove_file(&path);
         assert_eq!(saved, "\u{feff}Region,Revenue\r\n\"North, East\",\"1,234\"\r\nsouth.rs,980\r\n");
+    }
+}
+
+/// The person's words as shown: a space just before a closing mark (`?`, `!`, `:`, `)` and the
+/// like) becomes a no-break space, so a line never starts with the mark alone ("… Wundur ?").
+/// Only what is drawn; the message itself is left as typed.
+fn keep_with_word(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    for (i, &c) in chars.iter().enumerate() {
+        let before = i.checked_sub(1).map(|j| chars[j]);
+        // What follows the space, up to the next one: only marks ("?", "!)"), not a word.
+        let next: Vec<char> = chars[i + 1..].iter().copied().take_while(|c| !c.is_whitespace()).collect();
+        let closing = !next.is_empty() && next.iter().all(|a| "?!:;,.)]}»…%\"'".contains(*a));
+        if c == ' ' && closing && before.is_some_and(|b| !b.is_whitespace()) {
+            out.push('\u{00A0}');
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod keep_with_word_tests {
+    use super::keep_with_word;
+
+    #[test]
+    fn a_closing_mark_stays_with_its_word() {
+        assert_eq!(keep_with_word("just Wundur ?"), "just Wundur\u{00A0}?");
+        assert_eq!(keep_with_word("yes ! (or no )"), "yes\u{00A0}! (or no\u{00A0})");
+        // A mark starting a word, or after a line break, is left alone.
+        assert_eq!(keep_with_word("use ?query here"), "use ?query here");
+        assert_eq!(keep_with_word("line\n? next"), "line\n? next");
+        assert_eq!(keep_with_word("plain words"), "plain words");
     }
 }

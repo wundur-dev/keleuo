@@ -347,7 +347,7 @@ pub fn send(config: &Config, title: &str, text: &str, urgent: bool) -> Result<()
     };
     let http: ureq::Agent = ureq::Agent::config_builder().timeout_global(Some(Duration::from_secs(20))).build().into();
     http.post(&format!("{server}/{topic}"))
-        .header("Title", format!("Wundur parent mode: {title}"))
+        .header("Title", format!("Wundur Studio parent mode: {title}"))
         .header("Priority", if urgent { "high" } else { "default" })
         .header("Tags", "wundur")
         .send(text)
@@ -485,7 +485,7 @@ mod tests {
         send_alert(&c, &Alert { kind: Kind::Friend, count: 3, since: 0 }, "4:12 pm").unwrap();
         let request = seen.join().unwrap();
         assert!(request.starts_with("POST /tyler-abc123 "), "{request}");
-        assert!(request.to_lowercase().contains("title: wundur parent mode: talking to the ai like a friend"), "{request}");
+        assert!(request.to_lowercase().contains("title: wundur studio parent mode: talking to the ai like a friend"), "{request}");
         assert!(request.ends_with("Tyler talked to the AI like a friend 3 times today (since 4:12 pm)."), "{request}");
     }
 }

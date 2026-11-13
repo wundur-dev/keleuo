@@ -1250,7 +1250,7 @@ impl ChatPanel {
                             (false, false)
                         }
                         Heard::Allowed(false) => {
-                            p.voice_note("Wundur may not use speech recognition: allow it in System Settings > Privacy & Security > Speech Recognition".into(), cx);
+                            p.voice_note("Wundur Studio may not use speech recognition: allow it in System Settings > Privacy & Security > Speech Recognition".into(), cx);
                             (true, false)
                         }
                         Heard::Text { text, done } => {

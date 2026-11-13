@@ -472,7 +472,7 @@ impl Shell {
             if !names.is_empty() || commands > 0 {
                 let (message, detail, answers) = if names.is_empty() {
                     // Only commands: they stop with Wundur, and there is nothing to carry on.
-                    (format!("{what}. Quit anyway?"), "The command stops when Wundur quits.".to_string(), vec![
+                    (format!("{what}. Quit anyway?"), "The command stops when Wundur Studio quits.".to_string(), vec![
                         PromptButton::Ok("Quit".into()),
                         PromptButton::Cancel("Cancel".into()),
                     ])
@@ -480,9 +480,9 @@ impl Shell {
                     let (them, they, carry, wait) =
                         if names.len() > 1 { ("them", "they", "carry", "wait") } else { ("it", "it", "carries", "waits") };
                     (
-                        format!("{what}. Continue {them} when Wundur starts again?"),
+                        format!("{what}. Continue {them} when Wundur Studio starts again?"),
                         format!(
-                            "{}\n\nYes: {they} {carry} on when Wundur starts again.\nNo: quit; {they} {wait} for your next message.",
+                            "{}\n\nYes: {they} {carry} on when Wundur Studio starts again.\nNo: quit; {they} {wait} for your next message.",
                             names.join("\n"),
                         ),
                         vec![PromptButton::Ok("Yes".into()), PromptButton::Other("No".into()), PromptButton::Cancel("Cancel".into())],
@@ -1185,7 +1185,7 @@ impl Shell {
         self.refresh_row(&ws, cx);
         self.save_open(cx);
         crate::perf::switch_step("saved");
-        let title = format!("{} - Wundur", self.name(ix, cx));
+        let title = format!("{} - Wundur Studio", self.name(ix, cx));
         window.set_window_title(&title);
         self.attend(window, cx);
         cx.notify();
@@ -1317,7 +1317,7 @@ impl Shell {
     fn name_shown(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
         let Some(key) = (self.active < self.tabs.len()).then(|| self.key(self.active)) else { return };
         let _ = cx.global::<panels::Names>().0.borrow_mut().set(&key, name);
-        window.set_window_title(&format!("{} - Wundur", self.name(self.active, cx)));
+        window.set_window_title(&format!("{} - Wundur Studio", self.name(self.active, cx)));
         cx.notify();
     }
 
@@ -2847,7 +2847,7 @@ impl Shell {
                     .text_sm()
                     .line_height(rems(1.4))
                     .text_color(muted)
-                    .child("Nothing yet. Agents in any session can send you a notice here (Wundur's notify tool): a long task done, a decision waiting on you, something that went wrong."),
+                    .child("Nothing yet. Agents in any session can send you a notice here (Wundur Studio's notify tool): a long task done, a decision waiting on you, something that went wrong."),
             );
         }
         for n in items {
@@ -3281,7 +3281,7 @@ impl Render for Shell {
                             .gap_1()
                             .text_xs()
                             .text_color(muted)
-                            .child(div().flex_none().font_weight(FontWeight::SEMIBOLD).text_color(fg).child("Wundur"))
+                            .child(div().flex_none().font_weight(FontWeight::SEMIBOLD).text_color(fg).child("Wundur Studio"))
                             // Parent mode shows, so the child knows.
                             .when(crate::parent_mode::on(cx), |d| {
                                 d.child(

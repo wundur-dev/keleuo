@@ -255,7 +255,7 @@ pub fn render(page: &WeakEntity<SettingsPage>, window: &mut Window, cx: &mut App
         )
         .child(div().text_xs().text_color(muted).child(match &scope {
             Some(f) => format!("Only for sessions in {} · the rest follows App", name_of(f)),
-            None => "Every agent Wundur starts gets these, unless a folder turns one off".into(),
+            None => "Every agent Wundur Studio starts gets these, unless a folder turns one off".into(),
         }));
 
     // One server's card.

@@ -39,7 +39,7 @@ mkdir -p "$OUT"
 rm -f "$DMG"
 "$VENV/bin/dmgbuild" -s "$HERE/dmg/settings.py" \
   -D app="$APP" -D background="$WORK/background.tiff" \
-  "Wundur" "$DMG"
+  "Wundur Studio" "$DMG"
 
 if [ -n "${WUNDUR_SIGN_IDENTITY:-}" ]; then
   codesign --sign "$WUNDUR_SIGN_IDENTITY" --timestamp "$DMG"

@@ -46,7 +46,7 @@ pub fn open(cx: &mut App) {
     let options = WindowOptions {
         window_bounds: Some(WindowBounds::centered(size(px(640.), px(520.)), cx)),
         titlebar: Some(TitlebarOptions {
-            title: Some("About Wundur".into()),
+            title: Some("About Wundur Studio".into()),
             appears_transparent: true,
             traffic_light_position: Some(point(px(12.), px(12.))),
         }),
@@ -172,7 +172,7 @@ impl About {
             .gap_2()
             .pt_2()
             .child(img(self.icon.clone()).size(px(128.)))
-            .child(div().text_size(px(28.)).font_weight(FontWeight::SEMIBOLD).text_color(fg).child("Wundur"))
+            .child(div().text_size(px(28.)).font_weight(FontWeight::SEMIBOLD).text_color(fg).child("Wundur Studio"))
             .child(div().text_sm().text_color(muted).child(format!("Version {}", env!("CARGO_PKG_VERSION"))))
             .child(
                 div()
@@ -244,7 +244,7 @@ impl About {
                 div()
                     .flex()
                     .gap_3()
-                    .child(big("Wundur", procstats::bytes(now.footprint), format!("Peak this minute {}", procstats::bytes(peak)), accent))
+                    .child(big("Wundur Studio", procstats::bytes(now.footprint), format!("Peak this minute {}", procstats::bytes(peak)), accent))
                     .child(big(
                         "Agents and their tools",
                         procstats::bytes(now.children_footprint),
@@ -271,7 +271,7 @@ impl About {
                     .rounded_lg()
                     .border_1()
                     .border_color(border)
-                    .child(div().text_xs().text_color(muted).child("Wundur's memory, the last minute"))
+                    .child(div().text_xs().text_color(muted).child("Wundur Studio's memory, the last minute"))
                     .child(bars),
             )
             .child(
@@ -279,7 +279,7 @@ impl About {
                     .text_xs()
                     .line_height(rems(1.4))
                     .text_color(muted)
-                    .child("Memory is the physical footprint, the figure Activity Monitor shows. The agents' interfaces (Claude Code is a Node.js program) and the commands they run are counted apart: they would use the same in a terminal. Web pages run in WebKit's own processes, outside Wundur."),
+                    .child("Memory is the physical footprint, the figure Activity Monitor shows. The agents' interfaces (Claude Code is a Node.js program) and the commands they run are counted apart: they would use the same in a terminal. Web pages run in WebKit's own processes, outside Wundur Studio."),
             )
             .into_any_element()
     }
@@ -299,13 +299,13 @@ impl About {
         rows.push(("Display scale", format!("{}×", window.scale_factor())));
         rows.push(("Rendering", "GPU (Metal), native".into()));
         if let Some(start) = crate::START.get() {
-            rows.push(("Wundur open for", format_uptime(start.elapsed())));
+            rows.push(("Wundur Studio open for", format_uptime(start.elapsed())));
         }
         if let Some(u) = self.latest() {
             rows.push(("Threads", u.threads.to_string()));
         }
         if let Some(cpu) = self.cpu_percent() {
-            rows.push(("CPU (Wundur)", format!("{cpu:.1}% of one core")));
+            rows.push(("CPU (Wundur Studio)", format!("{cpu:.1}% of one core")));
         }
         let mut list = div().flex().flex_col().rounded_lg().border_1().border_color(border).overflow_hidden();
         let n = rows.len();

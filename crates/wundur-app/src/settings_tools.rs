@@ -210,7 +210,7 @@ fn save(page: &WeakEntity<SettingsPage>, cx: &mut App) -> Result<(), String> {
         return Err("Give it a short name, as the agent will call it: letters, digits, _ and -.".into());
     }
     if cli_tools::RESERVED.contains(&name.as_str()) {
-        return Err(format!("{name} is one of Wundur's own tools; give it another name."));
+        return Err(format!("{name} is one of Wundur Studio's own tools; give it another name."));
     }
     if editing.as_deref() != Some(name.as_str()) && scope_tools(&scope, cx).iter().any(|t| t.name == name) {
         return Err(format!("There is a tool called {name} here already."));
@@ -316,7 +316,7 @@ pub fn render(page: &WeakEntity<SettingsPage>, window: &mut Window, cx: &mut App
         )
         .child(div().text_xs().text_color(muted).child(match &scope {
             Some(f) => format!("Only for sessions in {} · the rest follows App", name_of(f)),
-            None => "Every agent Wundur starts gets these, unless a folder turns one off".into(),
+            None => "Every agent Wundur Studio starts gets these, unless a folder turns one off".into(),
         }));
 
     // One tool's card.
@@ -632,7 +632,7 @@ pub fn render(page: &WeakEntity<SettingsPage>, window: &mut Window, cx: &mut App
         .child(crate::settings_packs::render(page, window, cx))
         .child(div().pt_4().text_lg().font_weight(FontWeight::SEMIBOLD).text_color(cx.theme().foreground).child("Custom tools"))
         .child(div().text_sm().text_color(muted).child(
-            "Your own tools, made from command-line programs: every agent gets them beside Wundur's (send_message and the rest). Wundur runs them, in the session's folder, with their secrets from the key store: the agent never sees those.",
+            "Your own tools, made from command-line programs: every agent gets them beside Wundur Studio's (send_message and the rest). Wundur Studio runs them, in the session's folder, with their secrets from the key store: the agent never sees those.",
         ))
         .child(list)
         .child(add)
