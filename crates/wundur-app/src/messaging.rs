@@ -133,9 +133,14 @@ fn add_tasks(me: &Entity<AgentSession>, args: &Value, cx: &mut App) -> (String, 
     let Some(peer) = peers.iter().find(|p| &p.session == me) else {
         return ("This session is not in Wundur's window.".into(), true);
     };
-    let (_, ids) = crate::tasks::add_list(title, peer.folder.clone(), peer.name.clone(), tasks, cx);
-    let ids = ids.iter().map(u64::to_string).collect::<Vec<_>>().join(", ");
-    (format!("Added to the person's task list in Wundur, as cards they tick off. Task ids: {ids} (for complete_task, once you have checked one is done)."), false)
+    let (_, ids) = crate::tasks::add_list(title.clone(), peer.folder.clone(), peer.name.clone(), tasks, cx);
+    let steps = ids.iter().enumerate().map(|(n, id)| format!("step {} is id {id}", n + 1)).collect::<Vec<_>>().join(", ");
+    (
+        format!(
+            "Added to the person's task list in Wundur as \"{title}\", numbered cards they tick off ({steps}). The ids are for complete_task only, once you have checked a step is done; the person sees step numbers, so when you mention one, call it by its number (\"step 2 of {title}\")."
+        ),
+        false,
+    )
 }
 
 fn complete_task(args: &Value, cx: &mut App) -> (String, bool) {
