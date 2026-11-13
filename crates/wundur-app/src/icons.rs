@@ -66,6 +66,8 @@ icon_assets!(
         Lock,
         // The toolbar's Inbox.
         Inbox,
+        // The toolbar's Tasks.
+        ListChecks,
     ]
 );
 

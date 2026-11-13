@@ -1042,7 +1042,7 @@ impl AgentSession {
             sandbox: self.write_policy(cx),
             mcp_config: self.mcp_config(cx),
             env: wundur_core::mcp::secret_env(&self.mcp_servers(cx)),
-            instructions: crate::parent_mode::instructions(cx),
+            instructions: session_instructions(cx),
         };
         self.confined = options.sandbox.is_some();
         let Some(spec) = self.backend.terminal_program(&options, &id, new) else { return };
@@ -1538,7 +1538,7 @@ impl AgentSession {
             sandbox: self.write_policy(cx),
             mcp_config: self.mcp_config(cx),
             env: wundur_core::mcp::secret_env(&self.mcp_servers(cx)),
-            instructions: crate::parent_mode::instructions(cx),
+            instructions: session_instructions(cx),
         };
         self.confined = options.sandbox.is_some();
         let (tx, rx) = async_channel::unbounded::<Message>();
@@ -2357,4 +2357,15 @@ mod fill_tests {
         assert_eq!(Fill::of(190_000, at), Fill::Nearly);
         assert_eq!(Fill::of(5, 0), Fill::Nearly);
     }
+}
+
+/// What a session's agent is told beside its own instructions (for an agent that takes them;
+/// Claude Code's --append-system-prompt): that Wundur Studio's tools are there and when to use
+/// them, in case its tool server is late or ignored, then parent mode's, when it is on.
+fn session_instructions(cx: &App) -> Option<String> {
+    let wundur = "You are running inside Wundur Studio. When the person has to do something themselves (sign up, accept an agreement, add a secret or DNS record, test on a device, decide something), hand it to them as task cards with the wundur add_tasks tool instead of listing the steps in your reply, one card per step, and never with secret values. Use the wundur notify tool when long work finishes or needs them.";
+    Some(match crate::parent_mode::instructions(cx) {
+        Some(parent) => format!("{wundur}\n\n{parent}"),
+        None => wundur.to_string(),
+    })
 }

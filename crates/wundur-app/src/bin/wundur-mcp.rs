@@ -40,7 +40,7 @@ fn main() {
                     "protocolVersion": version,
                     "capabilities": { "tools": {} },
                     "serverInfo": { "name": "wundur", "version": env!("CARGO_PKG_VERSION") },
-                    "instructions": "Tools to reach the other sessions open in Wundur (other agents, in other folders). Messages you send are shown to the person, who may need to allow them before they go.",
+                    "instructions": INSTRUCTIONS,
                 }))
             }
             "ping" => Ok(json!({})),
@@ -68,6 +68,16 @@ fn main() {
     }
 }
 
+/// What every agent is told about these tools at the start of its session (Claude Code keeps
+/// a server's instructions in context even while its tools wait to be searched for, and cuts
+/// them past 4,096 characters): the behaviour wanted most first.
+const INSTRUCTIONS: &str = "Wundur Studio is the app this session runs in, and these are its tools.\n\
+- add_tasks: whenever the person has to do something themselves (sign up or sign in somewhere, accept an agreement, add a secret or a DNS record, test on a device, decide something), hand it to them as task cards with add_tasks instead of listing the steps in your reply. One card per step, in order, with the command to run and the page to open when there is one. Never put secret values in a card. See what is still open with list_tasks, and tick a step off with complete_task once you have checked it is done.\n\
+- notify: tell the person when long work finishes, needs their decision, or went wrong (one notice per thing, not progress updates).\n\
+- ask_for_review: ask another agent for a read-only second opinion on work in this folder.\n\
+- list_sessions, send_message: reach the person's other open sessions (other agents, other folders); the person sees every message and may have to allow it.\n\
+- The person's tool packs (make_image, edit_image, model_from_*, rig_model, view_model, music, sound_effect, voice_line and others) make game assets and more: search for them when a task needs one.";
+
 /// The tools, as MCP describes them.
 fn tools() -> Value {
     json!([
@@ -90,6 +100,9 @@ fn tools() -> Value {
         },
         {
             "name": "notify",
+            // Loaded from the start of the session (not waiting to be searched for): wanted
+            // whenever the person has steps of their own.
+            "_meta": { "anthropic/alwaysLoad": true },
             "description": "Tell the person something in Wundur's inbox: the one place they see notices from all their sessions at once. Use it when something deserves their attention while they may be looking elsewhere: a long task is done, a decision waits on them, or something went wrong that they should know about. One notice per thing worth their attention, not progress updates; it doesn't wait for an answer. Clicking it opens this session.",
             "inputSchema": {
                 "type": "object",
@@ -101,6 +114,56 @@ fn tools() -> Value {
                 },
                 "required": ["title"],
             },
+        },
+        {
+            "name": "add_tasks",
+            // Loaded from the start of the session (not waiting to be searched for): wanted
+            // whenever the person has steps of their own.
+            "_meta": { "anthropic/alwaysLoad": true },
+            "description": "Use this instead of listing steps the person must take in your reply. Gives the person a checklist of things THEY need to do, shown in Wundur Studio as cards they tick off (outside the chat, kept until done): steps you cannot take yourself, such as signing in somewhere, accepting an agreement, adding a DNS record, setting a secret, testing on their device, or deciding something. Use it instead of listing such steps in your reply. One task per step, in the order to do them; put a command they should run in `command` (shown with a copy button) and a page in `link`. Not for your own plan or steps you will do yourself. Never put secret values in a task.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "title": { "type": "string", "description": "What the list is for, short: \"API service chores\", \"Before the 0.3 release\"." },
+                    "tasks": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "title": { "type": "string", "description": "The step, as an instruction: \"Accept Apple's developer agreement\"." },
+                                "detail": { "type": "string", "description": "Optional: a sentence or two on how, or why it matters." },
+                                "command": { "type": "string", "description": "Optional: a command to run for it." },
+                                "link": { "type": "string", "description": "Optional: a page to open for it." },
+                            },
+                            "required": ["title"],
+                        },
+                    },
+                },
+                "required": ["title", "tasks"],
+            },
+        },
+        {
+            "name": "complete_task",
+            // Loaded from the start of the session (not waiting to be searched for): wanted
+            // whenever the person has steps of their own.
+            "_meta": { "anthropic/alwaysLoad": true },
+            "description": "Tick off one of the person's tasks (from add_tasks) once you have checked it is done (for example, the DNS record now resolves). Pass done: false to put one back.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": { "type": "integer", "description": "The task's id, as add_tasks or list_tasks gave it." },
+                    "done": { "type": "boolean", "description": "Done (the default) or not." },
+                },
+                "required": ["id"],
+            },
+        },
+        {
+            "name": "list_tasks",
+            // Loaded from the start of the session (not waiting to be searched for): wanted
+            // whenever the person has steps of their own.
+            "_meta": { "anthropic/alwaysLoad": true },
+            "description": "The person's task lists for this folder, with each task's id and whether it is done.",
+            "inputSchema": { "type": "object", "properties": {} },
         },
         {
             "name": "ask_for_review",

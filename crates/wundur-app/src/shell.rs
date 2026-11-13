@@ -42,6 +42,8 @@ const TOOLS_HEIGHT: f32 = 340.;
 const TOOLBAR_WIDTH: f32 = 44.;
 /// The inbox's list, over the content beside the toolbar.
 const INBOX_WIDTH: f32 = 360.;
+/// The person's tasks, there too (a little wider, for commands).
+const TASKS_WIDTH: f32 = 420.;
 /// What a session that was working when Wundur quit is told when it starts again.
 const CONTINUE_MESSAGE: &str = "Wundur was restarted while you were working. Continue where you left off.";
 
@@ -193,6 +195,8 @@ pub struct Shell {
     folded: bool,
     /// The inbox's list is open over the content (the toolbar's Inbox).
     inbox_open: bool,
+    /// The person's task lists are open over the content (the toolbar's Tasks).
+    tasks_open: bool,
     /// A notice being answered in the person's own words: its id and the field.
     inbox_reply: Option<(u64, Entity<InputState>, Subscription)>,
     /// The folder being renamed, asked for its new name.
@@ -257,6 +261,7 @@ impl Shell {
             settings: None,
             folded,
             inbox_open: false,
+            tasks_open: false,
             inbox_reply: None,
             folder_rename: None,
             project_form: None,
@@ -1672,6 +1677,27 @@ impl Shell {
                 self.new_session_for_project(PathBuf::from(arg), window, cx);
                 format!("browser={}", self.browser.is_some())
             }
+            "tasks" => {
+                // Tests: open or close the tasks.
+                self.tasks_open = !self.tasks_open;
+                cx.notify();
+                format!("tasks={} open={}", self.tasks_open, crate::tasks::open_count(cx))
+            }
+            "add-tasks" => {
+                // Tests: a list from the shown session: `add-tasks title|task one|task two;cmd`.
+                let mut parts = arg.split('|');
+                let title = parts.next().unwrap_or("Tasks").to_string();
+                let tasks = parts
+                    .map(|p| {
+                        let mut bits = p.splitn(2, ';');
+                        let title = bits.next().unwrap_or_default().to_string();
+                        crate::tasks::Task { title, command: bits.next().map(str::to_string), detail: "A step for the test.".into(), ..Default::default() }
+                    })
+                    .collect();
+                let (folder, from) = (self.tabs[self.active].row.root.clone(), self.name(self.active, cx));
+                let (_, ids) = crate::tasks::add_list(title, folder, from, tasks, cx);
+                format!("ids={ids:?}")
+            }
             "inbox" => {
                 // Tests: open or close the inbox.
                 self.inbox_open = !self.inbox_open;
@@ -2739,9 +2765,39 @@ impl Shell {
                     })
                     .on_click(cx.listener(|s, _, _, cx| {
                         s.inbox_open = !s.inbox_open;
+                        s.tasks_open = false;
                         cx.notify();
                     })),
             )
+            .child({
+                let open_tasks = crate::tasks::open_count(cx);
+                item("tb-tasks", Icon::new(gpui_kit::assets::IconName::ListChecks), "Tasks: what agents have handed you to do", self.tasks_open)
+                    .when(open_tasks > 0, |d| {
+                        d.child(
+                            div()
+                                .absolute()
+                                .top(px(1.))
+                                .right(px(0.))
+                                .min_w(px(15.))
+                                .h(px(15.))
+                                .px(px(3.))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded_full()
+                                .bg(accent)
+                                .text_size(px(9.5))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(gpui_kit::white())
+                                .child(if open_tasks > 99 { "99+".to_string() } else { open_tasks.to_string() }),
+                        )
+                    })
+                    .on_click(cx.listener(|s, _, _, cx| {
+                        s.tasks_open = !s.tasks_open;
+                        s.inbox_open = false;
+                        cx.notify();
+                    }))
+            })
             .child(div().flex_1())
             .child(
                 item("tb-settings", Icon::new(IconName::Settings), "Settings (Cmd+,)", self.settings.is_some()).on_click(cx.listener(|s, _, window, cx| {
@@ -2751,6 +2807,188 @@ impl Shell {
                         s.show_settings(window, cx)
                     }
                 })),
+            )
+            .into_any_element()
+    }
+
+    /// The person's tasks, over the content beside the toolbar: each list an agent handed over,
+    /// newest first, its tasks as cards to tick off (open ones first), a command with a copy
+    /// button, a link to open. Clicking outside closes it.
+    fn render_tasks(&self, cx: &mut Context<Self>) -> AnyElement {
+        let lists = crate::tasks::lists(cx);
+        let theme = cx.theme();
+        let (fg, muted, border, bg, hover, ring, mono, green) =
+            (theme.foreground, theme.muted_foreground, theme.border, theme.background, theme.secondary_hover, theme.ring, theme.mono_font_family.clone(), theme.green);
+        let card_bg = crate::theme::tool_ground(cx);
+        let mut body = div().id("tasks-list").flex_1().min_h_0().overflow_y_scroll().flex().flex_col().gap_3().px_3().pb_3();
+        if lists.is_empty() {
+            body = body.child(
+                div()
+                    .p_1()
+                    .text_sm()
+                    .line_height(rems(1.45))
+                    .text_color(muted)
+                    .child("Nothing to do. When an agent has steps only you can take (sign in somewhere, add a DNS record, test on your device), it can hand them to you here as a checklist."),
+            );
+        }
+        for list in lists {
+            let list_id = list.id;
+            let (open, total) = (list.open(), list.tasks.len());
+            let folder = list.folder.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+            let when = ago(std::time::UNIX_EPOCH + std::time::Duration::from_secs(list.made));
+            let mut cards = div().flex().flex_col().gap(px(6.));
+            // Open ones first, then those done.
+            let mut tasks = list.tasks.clone();
+            tasks.sort_by_key(|t| t.done);
+            for t in tasks {
+                let (id, done) = (t.id, t.done);
+                let check = div()
+                    .id(("task-check", id as usize))
+                    .flex_none()
+                    .mt(px(1.))
+                    .size(px(18.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(5.))
+                    .border_1()
+                    .border_color(if done { ring } else { muted.opacity(0.6) })
+                    .when(done, |d| d.bg(ring).child(Icon::new(IconName::Check).xsmall().text_color(gpui_kit::white())))
+                    .cursor_pointer()
+                    .on_click(move |_, _, cx| {
+                        crate::tasks::set_done(id, !done, cx);
+                    });
+                let command = t.command.clone().map(|c| {
+                    let copy = c.clone();
+                    div()
+                        .mt_1()
+                        .px_2()
+                        .py(px(4.))
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .rounded(px(6.))
+                        .bg(bg)
+                        .border_1()
+                        .border_color(border)
+                        .child(div().flex_1().min_w_0().truncate().font_family(mono.clone()).text_xs().text_color(fg).child(c))
+                        .child(
+                            Button::new(("task-copy", id as usize))
+                                .icon(gpui_kit::assets::IconName::Copy)
+                                .xsmall()
+                                .ghost()
+                                .tooltip("Copy the command")
+                                .on_click(move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(copy.clone()))),
+                        )
+                });
+                let link = t.link.clone().map(|l| {
+                    let url = l.clone();
+                    div()
+                        .id(("task-link", id as usize))
+                        .mt_1()
+                        .text_xs()
+                        .text_color(ring)
+                        .cursor_pointer()
+                        .truncate()
+                        .child(l)
+                        .on_click(move |_, _, cx| cx.open_url(&url))
+                });
+                cards = cards.child(
+                    div()
+                        .px_3()
+                        .py(px(10.))
+                        .flex()
+                        .gap(px(10.))
+                        .rounded(px(10.))
+                        .bg(card_bg)
+                        .border_1()
+                        .border_color(border)
+                        .when(done, |d| d.opacity(0.55))
+                        .child(check)
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .flex()
+                                .flex_col()
+                                .gap(px(2.))
+                                .child(div().text_sm().font_weight(FontWeight::MEDIUM).text_color(fg).child(t.title.clone()))
+                                .when(!t.detail.is_empty(), |d| d.child(div().text_xs().line_height(rems(1.4)).text_color(muted).child(t.detail.clone())))
+                                .children(command)
+                                .children(link),
+                        ),
+                );
+            }
+            body = body.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .flex()
+                                    .flex_col()
+                                    .child(div().truncate().text_base().font_weight(FontWeight::SEMIBOLD).text_color(fg).child(list.title.clone()))
+                                    .child(div().truncate().text_size(px(11.)).text_color(muted).child(format!("{folder} · {} · {when}", list.from))),
+                            )
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .px(px(7.))
+                                    .py(px(1.))
+                                    .rounded_full()
+                                    .bg(if open == 0 { green.opacity(0.16) } else { ring.opacity(0.14) })
+                                    .text_size(px(11.))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(if open == 0 { green } else { ring })
+                                    .child(if open == 0 { "All done".to_string() } else { format!("{open} of {total} to do") }),
+                            )
+                            .child(
+                                Button::new(("task-list-remove", list_id as usize))
+                                    .icon(IconName::Close)
+                                    .xsmall()
+                                    .ghost()
+                                    .tooltip("Remove this list")
+                                    .on_click(move |_, _, cx| crate::tasks::remove_list(list_id, cx)),
+                            ),
+                    )
+                    .child(cards),
+            );
+        }
+        let _ = hover;
+        div()
+            .id("tasks")
+            .absolute()
+            .inset_0()
+            .occlude()
+            .on_mouse_down(MouseButton::Left, cx.listener(|s, _, _, cx| {
+                s.tasks_open = false;
+                cx.notify();
+            }))
+            .child(
+                div()
+                    .id("tasks-panel")
+                    .absolute()
+                    .top_0()
+                    .bottom_0()
+                    .left(px(TOOLBAR_WIDTH))
+                    .w(px(TASKS_WIDTH))
+                    .flex()
+                    .flex_col()
+                    .bg(bg)
+                    .border_r_1()
+                    .border_color(border)
+                    .shadow_lg()
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .child(div().flex_none().h(px(44.)).px(px(14.)).flex().items_center().child(div().text_size(px(16.)).font_weight(FontWeight::SEMIBOLD).text_color(fg).child("Tasks")))
+                    .child(body),
             )
             .into_any_element()
     }
@@ -3337,13 +3575,14 @@ impl Render for Shell {
         let list = (!self.tabs.is_empty() && !self.folded && self.settings.is_none()).then(|| self.render_list(cx));
         let toolbar = self.render_toolbar(cx);
         let inbox = self.inbox_open.then(|| self.render_inbox(cx));
+        let tasks = self.tasks_open.then(|| self.render_tasks(cx));
         let list_shown = list.is_some();
         let folder_rename = self.render_folder_rename(cx);
         let project_form = self.render_project_form(cx);
         let switcher = self.render_switcher(cx);
         // Web pages are native views over the window: they hide while an overlay is open.
         crate::web_panel::set_covered(
-            self.folder_rename.is_some() || self.project_form.is_some() || self.switcher.is_some() || self.inbox_open || crate::image_view::is_open(cx)
+            self.folder_rename.is_some() || self.project_form.is_some() || self.switcher.is_some() || self.inbox_open || self.tasks_open || crate::image_view::is_open(cx)
                 || crate::skill_installer::is_open(cx),
         );
         div()
@@ -3447,7 +3686,8 @@ impl Render for Shell {
                             // beside the toolbar; beside the list, the list's corner is.
                             .when(!list_shown, |d| d.child(crate::dock_skin::corner_cap(true, true, bg))),
                     )
-                    .children(inbox),
+                    .children(inbox)
+                    .children(tasks),
             )
             .children(folder_rename)
             .children(project_form)
