@@ -95,12 +95,65 @@ pub fn tool_call(session: Entity<AgentSession>, call: Call, cx: &mut App) {
         "send_message" => send(&session, &args, cx),
         "ask_for_review" => review(&session, &args, cx),
         "notify" => notify(&session, &args, cx),
+        "add_tasks" => add_tasks(&session, &args, cx),
+        "complete_task" => complete_task(&args, cx),
+        "list_tasks" => list_tasks(&session, cx),
         // The person's tools answer when their run ends.
         _ => return crate::tool_runs::call(session, &tool, args, call.reply, cx),
     };
     if let Some(reply) = call.reply {
         reply.send(&json!({ "text": text, "error": error }).to_string());
     }
+}
+
+/// A list of tasks for the person, from `me`'s agent.
+fn add_tasks(me: &Entity<AgentSession>, args: &Value, cx: &mut App) -> (String, bool) {
+    let title = args.get("title").and_then(Value::as_str).unwrap_or_default().trim().to_string();
+    let s = |v: &Value, k: &str| v.get(k).and_then(Value::as_str).map(|x| x.trim().to_string()).filter(|x| !x.is_empty());
+    let tasks: Vec<crate::tasks::Task> = args
+        .get("tasks")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|t| {
+                    let title = match t {
+                        Value::String(x) => Some(x.trim().to_string()).filter(|x| !x.is_empty()),
+                        _ => s(t, "title"),
+                    }?;
+                    Some(crate::tasks::Task { title, detail: s(t, "detail").unwrap_or_default(), command: s(t, "command"), link: s(t, "link"), ..Default::default() })
+                })
+                .take(40)
+                .collect()
+        })
+        .unwrap_or_default();
+    if title.is_empty() || tasks.is_empty() {
+        return ("A task list needs a title and at least one task.".into(), true);
+    }
+    let peers = peers(cx);
+    let Some(peer) = peers.iter().find(|p| &p.session == me) else {
+        return ("This session is not in Wundur's window.".into(), true);
+    };
+    let (_, ids) = crate::tasks::add_list(title, peer.folder.clone(), peer.name.clone(), tasks, cx);
+    let ids = ids.iter().map(u64::to_string).collect::<Vec<_>>().join(", ");
+    (format!("Added to the person's task list in Wundur, as cards they tick off. Task ids: {ids} (for complete_task, once you have checked one is done)."), false)
+}
+
+fn complete_task(args: &Value, cx: &mut App) -> (String, bool) {
+    let Some(id) = args.get("id").and_then(Value::as_u64) else { return ("complete_task needs a task's id.".into(), true) };
+    let done = args.get("done").and_then(Value::as_bool).unwrap_or(true);
+    if crate::tasks::set_done(id, done, cx) {
+        (if done { "Ticked off." } else { "Back on the list." }.into(), false)
+    } else {
+        (format!("No task {id}."), true)
+    }
+}
+
+fn list_tasks(me: &Entity<AgentSession>, cx: &mut App) -> (String, bool) {
+    let peers = peers(cx);
+    let Some(peer) = peers.iter().find(|p| &p.session == me) else {
+        return ("This session is not in Wundur's window.".into(), true);
+    };
+    (crate::tasks::describe(&peer.folder, cx), false)
 }
 
 /// A notice for the person's inbox, from `me`'s agent.

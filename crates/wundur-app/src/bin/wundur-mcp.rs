@@ -103,6 +103,47 @@ fn tools() -> Value {
             },
         },
         {
+            "name": "add_tasks",
+            "description": "Give the person a checklist of things THEY need to do, shown in Wundur as cards they tick off (outside the chat, kept until done): steps you cannot take yourself, such as signing in somewhere, accepting an agreement, adding a DNS record, setting a secret, testing on their device, or deciding something. Use it instead of listing such steps in your reply. One task per step, in the order to do them; put a command they should run in `command` (shown with a copy button) and a page in `link`. Not for your own plan or steps you will do yourself.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "title": { "type": "string", "description": "What the list is for, short: \"API service chores\", \"Before the 0.3 release\"." },
+                    "tasks": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "title": { "type": "string", "description": "The step, as an instruction: \"Accept Apple's developer agreement\"." },
+                                "detail": { "type": "string", "description": "Optional: a sentence or two on how, or why it matters." },
+                                "command": { "type": "string", "description": "Optional: a command to run for it." },
+                                "link": { "type": "string", "description": "Optional: a page to open for it." },
+                            },
+                            "required": ["title"],
+                        },
+                    },
+                },
+                "required": ["title", "tasks"],
+            },
+        },
+        {
+            "name": "complete_task",
+            "description": "Tick off one of the person's tasks (from add_tasks) once you have checked it is done (for example, the DNS record now resolves). Pass done: false to put one back.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": { "type": "integer", "description": "The task's id, as add_tasks or list_tasks gave it." },
+                    "done": { "type": "boolean", "description": "Done (the default) or not." },
+                },
+                "required": ["id"],
+            },
+        },
+        {
+            "name": "list_tasks",
+            "description": "The person's task lists for this folder, with each task's id and whether it is done.",
+            "inputSchema": { "type": "object", "properties": {} },
+        },
+        {
             "name": "ask_for_review",
             "description": "Ask another agent for a second opinion on work in this folder: Wundur opens a new, read-only session of that agent here (it can read and run read-only commands, not change files), gives it your request, and its review comes back to this session as a message. The person allows it first. Don't wait for it: finish your turn; the review arrives as a new message.",
             "inputSchema": {

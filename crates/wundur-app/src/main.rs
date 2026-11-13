@@ -23,6 +23,7 @@ use wundur_core::settings::Settings;
 
 mod about;
 mod inbox;
+mod tasks;
 mod asset_panel;
 mod asset_store;
 mod actions;
