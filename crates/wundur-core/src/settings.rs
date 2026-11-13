@@ -270,7 +270,8 @@ pub struct Settings {
     /// The terminals' font, and code's in the chat: a monospace Wundur carries, or empty for
     /// the system's.
     pub terminal_font: String,
-    /// How tabs are drawn: `"block"` (the default), `"sheet"` or `"underline"`.
+    /// How tabs are drawn: `"modern"` (the default, also when empty), `"block"`, `"sheet"` or
+    /// `"underline"`.
     pub tab_style: String,
     /// Model names typed in beyond a backend's own list, most recent first.
     pub recent_models: Vec<String>,

@@ -406,6 +406,7 @@ impl SheetGroup {
                 .when(closable, |d| d.pr(sheet_tabs::label_pad() - px(6.)))
                 .text_size(px(if documents { 12. } else { 11. }))
                 .text_color(if is_shown { palette.content_text } else { palette.face_text })
+                .when(is_shown && sheet_tabs::style() == sheet_tabs::TabStyle::Modern, |d| d.font_weight(FontWeight::SEMIBOLD))
                 .child(div().min_w_0().truncate().child(title))
                 .when(closable, |d| {
                     d.child(

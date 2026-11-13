@@ -184,9 +184,9 @@ fn general(page: WeakEntity<SettingsPage>) -> SettingPage {
             .description("Light or dark, or following macOS."),
         ).item(choice(
             "Tab style",
-            "How tabs look: square blocks, flat labels with a line under the shown one, or slanted sheets.",
-            &[("block", "Blocks"), ("underline", "Underline"), ("sheet", "Sheets")],
-            "block",
+            "How tabs look: the shown one tinted with a line along its edge, square blocks, flat labels with a line under the shown one, or slanted sheets.",
+            &[("modern", "Modern"), ("block", "Blocks"), ("underline", "Underline"), ("sheet", "Sheets")],
+            "modern",
             |s| s.tab_style.clone(),
             |s, v| {
                 s.tab_style = v.to_string();

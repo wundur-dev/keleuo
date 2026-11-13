@@ -2306,7 +2306,7 @@ impl Shell {
         // As a tool panel in a session's layout looked: its light grey, a title bar that sits
         // slightly in, and sheet tabs hanging from the panel along the bottom.
         let (ground, content, border) = (theme.sidebar, crate::theme::tool_ground(cx), theme.border);
-        let palette = Palette::new(ground, theme.foreground, content, theme.foreground, border, border);
+        let palette = Palette::new(ground, theme.foreground, content, theme.foreground, border, theme.ring);
         let title = self.tools_title(self.tools_tab_name(&tools, picked), true, cx);
         let labels: Vec<SharedString> = tools.iter().map(|(n, _)| SharedString::from(*n)).collect();
         let names: Vec<&'static str> = tools.iter().map(|(n, _)| *n).collect();

@@ -23,10 +23,13 @@ pub enum TabStyle {
     Block,
     /// Flat labels, the shown one with an accent line along the content's edge.
     Underline,
+    /// Flat labels; the shown one filled with a tint of the accent, with a solid accent line
+    /// along the edge that meets the content (the default).
+    Modern,
 }
 
 thread_local! {
-    static STYLE: Cell<TabStyle> = const { Cell::new(TabStyle::Block) };
+    static STYLE: Cell<TabStyle> = const { Cell::new(TabStyle::Modern) };
 }
 
 /// Set the tab style from its setting (`sheet`, `block`, `underline`; anything else: block).
@@ -34,7 +37,8 @@ pub fn set_style(name: &str) {
     let style = match name {
         "sheet" => TabStyle::Sheet,
         "underline" => TabStyle::Underline,
-        _ => TabStyle::Block,
+        "block" => TabStyle::Block,
+        _ => TabStyle::Modern,
     };
     STYLE.with(|s| s.set(style));
 }
@@ -221,6 +225,23 @@ pub fn paint_tab(bounds: Bounds<Pixels>, joined: Joined, shown: bool, hot: bool,
         TabStyle::Sheet => paint_sheet(bounds, joined, shown, hot, palette, window),
         TabStyle::Block => paint_block(bounds, joined, shown, hot, palette, window),
         TabStyle::Underline => paint_underline(bounds, joined, shown, hot, palette, window),
+        TabStyle::Modern => paint_modern(bounds, joined, shown, hot, palette, window),
+    }
+}
+
+/// The shown tab filled with the content's colour under a tint of the accent, a solid accent
+/// line along the edge that meets the content; the one under the pointer a soft grey.
+fn paint_modern(bounds: Bounds<Pixels>, joined: Joined, shown: bool, hot: bool, palette: &Palette, window: &mut Window) {
+    if shown {
+        window.paint_quad(fill(bounds, palette.content));
+        window.paint_quad(fill(bounds, palette.accent.opacity(0.12)));
+        let y = match joined {
+            Joined::Top => bounds.origin.y,
+            Joined::Bottom => bounds.origin.y + bounds.size.height - px(ACCENT),
+        };
+        window.paint_quad(fill(Bounds::new(point(bounds.origin.x, y), size(bounds.size.width, px(ACCENT))), palette.accent));
+    } else if hot {
+        window.paint_quad(fill(bounds, palette.face_hover));
     }
 }
 
@@ -388,7 +409,7 @@ impl StripState {
 pub fn label_pad() -> Pixels {
     match style() {
         TabStyle::Sheet => px(GEOMETRY.pad + GEOMETRY.slant),
-        TabStyle::Block | TabStyle::Underline => px(12.),
+        TabStyle::Block | TabStyle::Underline | TabStyle::Modern => px(12.),
     }
 }
 
@@ -403,7 +424,7 @@ pub fn tab_box(state: &Rc<StripState>, id: impl Into<ElementId>, ix: usize, n: u
         .when(n > 0, |d| match style() {
             // Sheets overlap; blocks and labels sit side by side.
             TabStyle::Sheet => d.ml(px(-GEOMETRY.overlap)),
-            TabStyle::Block | TabStyle::Underline => d,
+            TabStyle::Block | TabStyle::Underline | TabStyle::Modern => d,
         })
         .flex()
         .items_center()
@@ -448,6 +469,7 @@ pub fn simple_strip(
                 .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(why.clone()).build(window, cx)),
             None => tab
                 .text_color(if ix == shown { palette.content_text } else { palette.face_text })
+                .when(ix == shown && style() == TabStyle::Modern, |d| d.font_weight(FontWeight::SEMIBOLD))
                 .cursor_pointer()
                 .child(label.clone())
                 .on_click(move |_, window, cx| select(ix, window, cx)),
