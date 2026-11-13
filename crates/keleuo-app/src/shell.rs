@@ -2301,46 +2301,9 @@ impl Shell {
         let theme = cx.theme();
         // As a tool panel in a session's layout looked: its light grey, a title bar that sits
         // slightly in, and sheet tabs hanging from the panel along the bottom.
-        let (ground, content, border, muted) = (theme.sidebar, crate::theme::tool_ground(cx), theme.border, theme.muted_foreground);
-        let title_fg = crate::sheet_tabs::mix(theme.foreground, muted, 0.55);
-        let inset = BoxShadow {
-            color: gpui_kit::black().opacity(if theme.is_dark() { 0.35 } else { 0.07 }),
-            offset: point(px(0.), px(1.)),
-            blur_radius: px(3.),
-            spread_radius: px(0.),
-            inset: true,
-        };
+        let (ground, content, border) = (theme.sidebar, crate::theme::tool_ground(cx), theme.border);
         let palette = Palette::new(ground, theme.foreground, content, theme.foreground, border, border);
-        // The title bar: the panel shown and whose it is (the session's folder and branch),
-        // and a button that hides the panels (as Cmd+B does).
-        let row = &self.tabs[self.active].row;
-        let whose = match &row.branch {
-            Some(b) => format!("{} · {b}", row.folder),
-            None => row.folder.clone(),
-        };
-        let title = div()
-            .flex_none()
-            .h(px(crate::dock_skin::HEADER_HEIGHT))
-            .pl(px(12.))
-            .pr(px(8.))
-            .flex()
-            .items_center()
-            .gap_2()
-            .bg(content)
-            .shadow(vec![inset])
-            .border_t_1()
-            .border_b_1()
-            .border_color(border)
-            .child(div().flex_none().text_size(px(15.)).text_color(title_fg).child(self.tools_tab_name(&tools, picked)))
-            .child(div().flex_1().min_w_0().truncate().text_size(px(11.5)).text_color(muted).child(whose))
-            .child(
-                Button::new("tools-hide")
-                    .icon(IconName::ChevronDown)
-                    .xsmall()
-                    .ghost()
-                    .tooltip("Hide the panels (Cmd+B)")
-                    .on_click(cx.listener(|s, _, _, cx| s.toggle_tools(cx))),
-            );
+        let title = self.tools_title(self.tools_tab_name(&tools, picked), true, cx);
         let labels: Vec<SharedString> = tools.iter().map(|(n, _)| SharedString::from(*n)).collect();
         let names: Vec<&'static str> = tools.iter().map(|(n, _)| *n).collect();
         let me = cx.entity().downgrade();
@@ -2368,31 +2331,56 @@ impl Shell {
         )
     }
 
-    /// The tool panels' tabs alone, under the list while the panels are hidden: one opens them
-    /// on that panel.
-    fn render_tools_tabs(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        use crate::sheet_tabs::{Joined, Palette, simple_strip};
-        let ws = self.active_workspace()?;
-        let names: Vec<&'static str> = ws.read(cx).tools(cx).into_iter().map(|(n, _)| n).collect();
+    /// The tool panels' title bar: the panel's name, and a button that hides them (⌄) or, while
+    /// hidden, shows them again (⌃; the whole bar does too).
+    fn tools_title(&self, name: &'static str, open: bool, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
-        let (ground, content, border) = (theme.sidebar, crate::theme::tool_ground(cx), theme.border);
-        let palette = Palette::new(ground, theme.foreground, content, theme.foreground, border, border);
-        let labels: Vec<SharedString> = names.iter().map(|n| SharedString::from(*n)).collect();
-        let picked = names.iter().position(|n| *n == self.tools_tab).unwrap_or(0);
-        let me = cx.entity().downgrade();
-        let select: crate::sheet_tabs::OnSelect = Rc::new(move |ix, _, cx| {
-            let name = names[ix];
-            let _ = me.update(cx, |s, cx| s.show_tool(name, cx));
-        });
-        Some(
-            div()
-                .flex_none()
-                .border_t_1()
-                .border_color(border)
-                .child(simple_strip(&self.tools_strip, "tool-tab-hidden", &labels, picked, Joined::Top, palette, crate::dock_skin::BOTTOM_STRIP, None, select))
-                .child(div().h(px(crate::dock_skin::STRIP_GAP_BELOW)).bg(ground))
-                .into_any_element(),
-        )
+        let (content, border, muted, hover) = (crate::theme::tool_ground(cx), theme.border, theme.muted_foreground, theme.secondary_hover);
+        let title_fg = crate::sheet_tabs::mix(theme.foreground, muted, 0.55);
+        let inset = BoxShadow {
+            color: gpui_kit::black().opacity(if theme.is_dark() { 0.35 } else { 0.07 }),
+            offset: point(px(0.), px(1.)),
+            blur_radius: px(3.),
+            spread_radius: px(0.),
+            inset: true,
+        };
+        div()
+            .id("tools-title")
+            .flex_none()
+            .h(px(crate::dock_skin::HEADER_HEIGHT))
+            .pl(px(12.))
+            .pr(px(8.))
+            .flex()
+            .items_center()
+            .gap_2()
+            .bg(content)
+            .shadow(vec![inset])
+            .border_t_1()
+            .when(open, |d| d.border_b_1())
+            .border_color(border)
+            .when(!open, |d| d.cursor_pointer().hover(|d| d.bg(hover)).on_click(cx.listener(|s, _, _, cx| s.toggle_tools(cx))))
+            .child(div().flex_1().min_w_0().truncate().text_size(px(15.)).text_color(title_fg).child(name))
+            .child(
+                Button::new("tools-hide")
+                    .icon(if open { IconName::ChevronDown } else { IconName::ChevronUp })
+                    .xsmall()
+                    .ghost()
+                    .tooltip(if open { "Hide the panels (Cmd+B)" } else { "Show the panels (Cmd+B)" })
+                    .on_click(cx.listener(|s, _, _, cx| {
+                        cx.stop_propagation();
+                        s.toggle_tools(cx)
+                    })),
+            )
+            .into_any_element()
+    }
+
+    /// The tool panels while hidden: their title bar alone, under the list.
+    fn render_tools_tabs(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let ws = self.active_workspace()?;
+        let tools = ws.read(cx).tools(cx);
+        let picked = tools.iter().position(|(n, _)| *n == self.tools_tab).unwrap_or(0);
+        let name = self.tools_tab_name(&tools, picked);
+        Some(self.tools_title(name, false, cx))
     }
 
     fn tools_tab_name(&self, tools: &[(&'static str, AnyView)], picked: usize) -> &'static str {
