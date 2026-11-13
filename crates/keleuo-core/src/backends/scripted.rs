@@ -234,13 +234,29 @@ impl Turn {
             diff: Some(file_diff.clone()),
             parent: None,
         });
-        send(Event::Permission {
-            request_id: self.request.clone(),
-            tool: "edit".into(),
-            summary: "notes.txt".into(),
-            description: Some("Change one line".into()),
-            input,
-        });
+        // "ask …": it puts a question to the person instead (as Claude Code's asking tool does).
+        if self.text.starts_with("ask") {
+            send(Event::Permission {
+                request_id: self.request.clone(),
+                tool: crate::questions::TOOL.into(),
+                summary: "a question".into(),
+                description: None,
+                input: serde_json::json!({ "questions": [{
+                    "question": "Where should the site be hosted?",
+                    "header": "Host",
+                    "options": [{ "label": "Cloudflare Pages", "description": "" }, { "label": "The VPS", "description": "" }],
+                    "multiSelect": false,
+                }] }),
+            });
+        } else {
+            send(Event::Permission {
+                request_id: self.request.clone(),
+                tool: "edit".into(),
+                summary: "notes.txt".into(),
+                description: Some("Change one line".into()),
+                input,
+            });
+        }
         let allowed = answer.recv().unwrap_or(false);
         send(Event::ToolResult {
             id: tool,

@@ -111,12 +111,23 @@ fn notify(me: &Entity<AgentSession>, args: &Value, cx: &mut App) -> (String, boo
     }
     let body = args.get("message").and_then(Value::as_str).unwrap_or_default().trim().to_string();
     let kind = crate::inbox::Kind::parse(args.get("kind").and_then(Value::as_str).unwrap_or_default());
+    let choices: Vec<String> = args
+        .get("choices")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(Value::as_str).map(|c| c.trim().to_string()).filter(|c| !c.is_empty()).take(6).collect())
+        .unwrap_or_default();
     let peers = peers(cx);
     let Some(peer) = peers.iter().find(|p| &p.session == me) else {
         return ("This session is not in Keleuo's window.".into(), true);
     };
-    crate::inbox::add(peer.number, peer.name.clone(), title, body, kind, cx);
-    ("Sent to the person's Keleuo inbox.".into(), false)
+    let asks = kind == crate::inbox::Kind::NeedsYou || !choices.is_empty();
+    crate::inbox::add(peer.number, peer.name.clone(), title, body, kind, choices, cx);
+    let text = if asks {
+        "Sent to the person's Keleuo inbox. They can answer from there; their answer comes to this session as their next message. Don't wait for it: finish your turn."
+    } else {
+        "Sent to the person's Keleuo inbox."
+    };
+    (text.into(), false)
 }
 
 fn list(me: &Entity<AgentSession>, cx: &App) -> String {

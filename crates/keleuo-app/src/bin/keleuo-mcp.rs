@@ -97,6 +97,7 @@ fn tools() -> Value {
                     "title": { "type": "string", "description": "A short headline, under about 60 characters: \"Release 0.2.4 is built\", \"Pick a database for the save system\"." },
                     "message": { "type": "string", "description": "Optional detail, a sentence or two." },
                     "kind": { "type": "string", "enum": ["info", "done", "needs_you", "problem"], "description": "What it is about: done (finished), needs_you (a decision or input waits on the person), problem (something went wrong), or info." },
+                    "choices": { "type": "array", "items": { "type": "string" }, "description": "For needs_you: up to six short answers to offer as buttons (\"Cloudflare Pages\", \"The VPS\"); the person can also write their own. Their answer comes to this session as their next message." },
                 },
                 "required": ["title"],
             },

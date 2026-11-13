@@ -193,6 +193,8 @@ pub struct Shell {
     folded: bool,
     /// The inbox's list is open over the content (the toolbar's Inbox).
     inbox_open: bool,
+    /// A notice being answered in the person's own words: its id and the field.
+    inbox_reply: Option<(u64, Entity<InputState>, Subscription)>,
     /// The folder being renamed, asked for its new name.
     folder_rename: Option<FolderRename>,
     /// A folder being made a project: the name asked for first.
@@ -255,6 +257,7 @@ impl Shell {
             settings: None,
             folded,
             inbox_open: false,
+            inbox_reply: None,
             folder_rename: None,
             project_form: None,
             switcher: None,
@@ -1678,7 +1681,8 @@ impl Shell {
                 let kind = crate::inbox::Kind::parse(parts.next().unwrap_or_default());
                 let (title, body) = (parts.next().unwrap_or("A notice").to_string(), parts.next().unwrap_or_default().to_string());
                 let (number, from) = (self.tabs[self.active].number, self.name(self.active, cx));
-                crate::inbox::add(number, from, title, body, kind, cx);
+                let choices = if kind == crate::inbox::Kind::NeedsYou { vec!["Yes".to_string(), "No".to_string()] } else { Vec::new() };
+                crate::inbox::add(number, from, title, body, kind, choices, cx);
                 format!("unread={}", crate::inbox::unread(cx))
             }
             "switch" => {
@@ -2577,12 +2581,61 @@ impl Shell {
         });
     }
 
+    /// What waits on the person in every session, for the inbox: each open question or
+    /// permission request, with its session's place in the list.
+    fn waiting(&self, cx: &App) -> Vec<(usize, keleuo_core::conversation::PermissionPrompt)> {
+        let mut found = Vec::new();
+        for (ix, t) in self.tabs.iter().enumerate() {
+            let session = t.ws.read(cx).session.read(cx);
+            for p in session.chat.pending_permissions().filter(|p| p.answer.is_none()) {
+                found.push((ix, p.clone()));
+            }
+        }
+        found
+    }
+
+    /// Notices unread plus what waits on the person: the toolbar's count.
+    fn inbox_count(&self, cx: &App) -> usize {
+        crate::inbox::unread(cx) + self.waiting(cx).len()
+    }
+
+    /// Answer notice `id` with `answer`: it goes to the session it came from as the person's
+    /// next message (waiting its turn while the agent works).
+    fn answer_notice(&mut self, id: u64, answer: String, cx: &mut Context<Self>) {
+        let Some(n) = crate::inbox::get(id, cx) else { return };
+        if answer.trim().is_empty() {
+            return;
+        }
+        if let Some(t) = self.tabs.iter().find(|t| t.number == n.session) {
+            let session = t.ws.read(cx).session.clone();
+            let text = crate::inbox::reply_text(&n, &answer);
+            session.update(cx, |s, cx| s.send(&text, cx));
+            crate::inbox::answered(id, answer.trim().to_string(), cx);
+        }
+        self.inbox_reply = None;
+        cx.notify();
+    }
+
+    /// A field to answer notice `id` in the person's own words (Enter sends).
+    fn open_notice_reply(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder("Your answer…"));
+        input.update(cx, |i, cx| i.focus(window, cx));
+        let sub = cx.subscribe_in(&input, window, move |s, input, ev: &InputEvent, _, cx| {
+            if let InputEvent::PressEnter { .. } = ev {
+                let text = input.read(cx).value().to_string();
+                s.answer_notice(id, text, cx);
+            }
+        });
+        self.inbox_reply = Some((id, input, sub));
+        cx.notify();
+    }
+
     /// The toolbar along the window's left edge: Projects (shows or hides the list), Inbox (the
     /// agents' notices, with how many are unread), and Settings at the bottom.
     fn render_toolbar(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
         let (muted, fg, hover, sel, accent, bg) = (theme.muted_foreground, theme.foreground, theme.secondary_hover, theme.secondary, theme.ring, theme.sidebar);
-        let unread = crate::inbox::unread(cx);
+        let unread = self.inbox_count(cx);
         let item = |id: &'static str, icon: Icon, tip: &'static str, on: bool| {
             div()
                 .id(id)
@@ -2662,8 +2715,85 @@ impl Shell {
         let (fg, muted, border, bg, hover) = (theme.foreground, theme.muted_foreground, theme.border, theme.background, theme.secondary_hover);
         let (green, yellow, red, blue) = (theme.green, theme.yellow, theme.red, theme.blue);
         let items = crate::inbox::items(cx);
+        let waiting = self.waiting(cx);
+        let any_waiting = !waiting.is_empty();
         let mut list = div().id("inbox-list").flex_1().min_h_0().overflow_y_scroll().flex().flex_col().px_2().pb_2();
-        if items.is_empty() {
+        // What waits on the person now, in any session: answered here, or opened.
+        if !waiting.is_empty() {
+            list = list.child(div().px_2().pt_1().pb_1().text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(yellow).child("Waiting on you"));
+        }
+        for (ix, p) in waiting {
+            let number = self.tabs[ix].number;
+            let name = self.name(ix, cx);
+            let session = self.tabs[ix].ws.read(cx).session.clone();
+            let questions = keleuo_core::questions::parse(&p.tool_name, &p.input);
+            let open = cx.listener(move |s, _, window, cx| {
+                cx.stop_propagation();
+                s.inbox_open = false;
+                if let Some(ix) = s.tabs.iter().position(|t| t.number == number) {
+                    s.activate(ix, window, cx);
+                }
+                cx.notify();
+            });
+            let mut row = div().px_2().py(px(8.)).flex().flex_col().gap_1().rounded(px(8.)).bg(hover.opacity(0.5));
+            match questions.as_deref() {
+                // One question, one answer: its choices as buttons.
+                Some([q]) if !q.multi && !q.options.is_empty() => {
+                    let mut choices = div().flex().flex_wrap().gap_1();
+                    for (i, (label, _)) in q.options.iter().enumerate() {
+                        let (session, rid, question, label2) = (session.clone(), p.request_id.clone(), q.question.clone(), label.clone());
+                        choices = choices.child(
+                            Button::new(SharedString::from(format!("wait-{}-{i}", p.request_id))).xsmall().label(label.clone()).on_click(move |_, _, cx| {
+                                cx.stop_propagation();
+                                session.update(cx, |s, cx| s.answer_question(&rid, vec![(question.clone(), vec![label2.clone()])], cx));
+                            }),
+                        );
+                    }
+                    row = row
+                        .child(div().text_sm().text_color(fg).child(q.question.clone()))
+                        .child(choices)
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .child(div().flex_1().text_size(px(10.5)).text_color(muted).child(format!("{name} asks")))
+                                .child(Button::new(SharedString::from(format!("wait-open-{}", p.request_id))).xsmall().ghost().label("Open").on_click(open)),
+                        );
+                }
+                // Several questions, or several answers: answered in the session's own card.
+                Some(qs) => {
+                    row = row
+                        .child(div().text_sm().text_color(fg).child(qs.first().map(|q| q.question.clone()).unwrap_or_default()))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .child(div().flex_1().text_size(px(10.5)).text_color(muted).child(format!("{name} asks {} question{}", qs.len(), if qs.len() == 1 { "" } else { "s" })))
+                                .child(Button::new(SharedString::from(format!("wait-open-{}", p.request_id))).xsmall().label("Answer in the session").on_click(open)),
+                        );
+                }
+                // Permission to use a tool: shown, answered in the session (where all of it is).
+                None => {
+                    row = row
+                        .child(div().text_sm().text_color(fg).child(format!("{}: {}", p.tool_name, p.summary)))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .child(div().flex_1().text_size(px(10.5)).text_color(muted).child(format!("{name} needs permission")))
+                                .child(Button::new(SharedString::from(format!("wait-open-{}", p.request_id))).xsmall().label("Open").on_click(open)),
+                        );
+                }
+            }
+            list = list.child(row);
+        }
+        if !items.is_empty() && any_waiting {
+            list = list.child(div().px_2().pt_3().pb_1().text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(muted).child("Notices"));
+        }
+        if items.is_empty() && !any_waiting {
             list = list.child(
                 div()
                     .p_3()
@@ -2675,6 +2805,37 @@ impl Shell {
         }
         for n in items {
             let (id, number) = (n.id, n.session);
+            // Answering it: its choices, and the person's own words.
+            let answer_row = if let Some(a) = &n.answer {
+                Some(div().text_xs().text_color(muted).child(format!("You answered: {a}")).into_any_element())
+            } else if n.asks() {
+                let mut row = div().pt_1().flex().flex_wrap().gap_1();
+                for (i, c) in n.choices.iter().enumerate() {
+                    let c2 = c.clone();
+                    row = row.child(Button::new(SharedString::from(format!("notice-{id}-{i}"))).xsmall().label(c.clone()).on_click(cx.listener(move |s, _, _, cx| {
+                        cx.stop_propagation();
+                        s.answer_notice(id, c2.clone(), cx);
+                    })));
+                }
+                let replying = self.inbox_reply.as_ref().filter(|(rid, _, _)| *rid == id).map(|(_, input, _)| input.clone());
+                Some(match replying {
+                    Some(input) => div()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(row)
+                        .child(div().on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()).child(Input::new(&input).small()))
+                        .into_any_element(),
+                    None => row
+                        .child(Button::new(SharedString::from(format!("notice-{id}-reply"))).xsmall().ghost().label("Reply…").on_click(cx.listener(move |s, _, window, cx| {
+                            cx.stop_propagation();
+                            s.open_notice_reply(id, window, cx);
+                        })))
+                        .into_any_element(),
+                })
+            } else {
+                None
+            };
             let color = match n.kind {
                 crate::inbox::Kind::Done => green,
                 crate::inbox::Kind::NeedsYou => yellow,
@@ -2701,6 +2862,7 @@ impl Shell {
                             .gap(px(2.))
                             .child(div().text_sm().text_color(fg).when(!n.read, |d| d.font_weight(FontWeight::SEMIBOLD)).child(n.title.clone()))
                             .when(!n.body.is_empty(), |d| d.child(div().text_xs().line_height(rems(1.35)).text_color(muted).child(n.body.clone())))
+                            .children(answer_row)
                             .child(div().text_size(px(10.5)).text_color(muted.opacity(0.8)).child(format!("{} · {}", n.from, ago(n.at)))),
                     )
                     .on_click(cx.listener(move |s, _, window, cx| {

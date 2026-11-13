@@ -2,7 +2,9 @@
 //! Keleuo's `notify` tool (through `keleuo-mcp`, like the messaging tools): that a long task is
 //! done, that something waits on the person, that something went wrong. The toolbar's Inbox
 //! button shows how many are unread and opens the list; a notice opens the session it came
-//! from. Kept while the window is open (not saved).
+//! from. A notice that asks something can carry choices; the person answers from the inbox
+//! (a choice, or their own words) and the answer goes to the session as their next message.
+//! Kept while the window is open (not saved).
 
 use std::time::SystemTime;
 
@@ -38,8 +40,19 @@ pub struct Notice {
     pub title: String,
     pub body: String,
     pub kind: Kind,
+    /// Answers to offer, when it asks something.
+    pub choices: Vec<String>,
+    /// What the person answered from the inbox.
+    pub answer: Option<String>,
     pub at: SystemTime,
     pub read: bool,
+}
+
+impl Notice {
+    /// It asks something the person can answer from the inbox.
+    pub fn asks(&self) -> bool {
+        self.answer.is_none() && (self.kind == Kind::NeedsYou || !self.choices.is_empty())
+    }
 }
 
 #[derive(Default)]
@@ -54,11 +67,12 @@ impl Global for Inbox {}
 /// At most this many notices are kept (the oldest go).
 const KEEP: usize = 200;
 
-pub fn add(session: usize, from: String, title: String, body: String, kind: Kind, cx: &mut App) {
+#[allow(clippy::too_many_arguments)]
+pub fn add(session: usize, from: String, title: String, body: String, kind: Kind, choices: Vec<String>, cx: &mut App) {
     let inbox = cx.default_global::<Inbox>();
     inbox.next += 1;
     let id = inbox.next;
-    inbox.items.insert(0, Notice { id, session, from, title, body, kind, at: SystemTime::now(), read: false });
+    inbox.items.insert(0, Notice { id, session, from, title, body, kind, choices, answer: None, at: SystemTime::now(), read: false });
     inbox.items.truncate(KEEP);
     cx.refresh_windows();
 }
@@ -76,6 +90,26 @@ pub fn mark_read(id: u64, cx: &mut App) {
         n.read = true;
     }
     cx.refresh_windows();
+}
+
+/// The notice `id`, if it is still there.
+pub fn get(id: u64, cx: &App) -> Option<Notice> {
+    cx.try_global::<Inbox>().and_then(|i| i.items.iter().find(|n| n.id == id).cloned())
+}
+
+/// The person answered notice `id` from the inbox.
+pub fn answered(id: u64, answer: String, cx: &mut App) {
+    if let Some(n) = cx.default_global::<Inbox>().items.iter_mut().find(|n| n.id == id) {
+        n.answer = Some(answer);
+        n.read = true;
+    }
+    cx.refresh_windows();
+}
+
+/// What the agent is sent when the person answers notice `n` with `answer`: the answer, said
+/// to be about that notice (the agent may have sent several).
+pub fn reply_text(n: &Notice, answer: &str) -> String {
+    format!("(Answering your notice \"{}\" from Keleuo's inbox.) {}", n.title, answer.trim())
 }
 
 pub fn mark_all_read(cx: &mut App) {
@@ -101,5 +135,23 @@ mod tests {
         assert_eq!(Kind::parse("error"), Kind::Problem);
         assert_eq!(Kind::parse("done"), Kind::Done);
         assert_eq!(Kind::parse("whatever"), Kind::Info);
+    }
+
+    #[test]
+    fn a_reply_names_the_notice_it_answers() {
+        let n = super::Notice {
+            id: 1,
+            session: 1,
+            from: "site".into(),
+            title: "Pick a host".into(),
+            body: String::new(),
+            kind: Kind::NeedsYou,
+            choices: vec!["VPS".into()],
+            answer: None,
+            at: std::time::SystemTime::now(),
+            read: false,
+        };
+        assert!(n.asks());
+        assert_eq!(super::reply_text(&n, " VPS "), "(Answering your notice \"Pick a host\" from Keleuo's inbox.) VPS");
     }
 }
