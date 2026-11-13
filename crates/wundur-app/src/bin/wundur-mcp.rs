@@ -72,7 +72,7 @@ fn main() {
 /// a server's instructions in context even while its tools wait to be searched for, and cuts
 /// them past 4,096 characters): the behaviour wanted most first.
 const INSTRUCTIONS: &str = "Wundur Studio is the app this session runs in, and these are its tools.\n\
-- add_tasks: whenever the person has to do something themselves (sign up or sign in somewhere, accept an agreement, add a secret or a DNS record, test on a device, decide something), hand it to them as task cards with add_tasks instead of listing the steps in your reply. One card per step, in order, with the command to run and the page to open when there is one. Never put secret values in a card. See what is still open with list_tasks, and tick a step off with complete_task once you have checked it is done.\n\
+- add_tasks: whenever the person has to do something themselves (sign up or sign in somewhere, accept an agreement, add a secret or a DNS record, test on a device, decide something), hand it to them as task cards with add_tasks instead of listing the steps in your reply. One card per step, in order, with the command to run and the page to open when there is one. Never put secret values in a card. The cards are numbered within their list: mention one by list and number (\"step 2 of API service chores\"), not by its id. See what is still open with list_tasks, and tick a step off with complete_task once you have checked it is done.\n\
 - notify: tell the person when long work finishes, needs their decision, or went wrong (one notice per thing, not progress updates).\n\
 - ask_for_review: ask another agent for a read-only second opinion on work in this folder.\n\
 - list_sessions, send_message: reach the person's other open sessions (other agents, other folders); the person sees every message and may have to allow it.\n\
@@ -120,7 +120,7 @@ fn tools() -> Value {
             // Loaded from the start of the session (not waiting to be searched for): wanted
             // whenever the person has steps of their own.
             "_meta": { "anthropic/alwaysLoad": true },
-            "description": "Use this instead of listing steps the person must take in your reply. Gives the person a checklist of things THEY need to do, shown in Wundur Studio as cards they tick off (outside the chat, kept until done): steps you cannot take yourself, such as signing in somewhere, accepting an agreement, adding a DNS record, setting a secret, testing on their device, or deciding something. Use it instead of listing such steps in your reply. One task per step, in the order to do them; put a command they should run in `command` (shown with a copy button) and a page in `link`. Not for your own plan or steps you will do yourself. Never put secret values in a task.",
+            "description": "Use this instead of listing steps the person must take in your reply. Gives the person a checklist of things THEY need to do, shown in Wundur Studio as cards they tick off (outside the chat, kept until done): steps you cannot take yourself, such as signing in somewhere, accepting an agreement, adding a DNS record, setting a secret, testing on their device, or deciding something. Use it instead of listing such steps in your reply. One task per step, in the order to do them; put a command they should run in `command` (shown with a copy button) and a page in `link`. Not for your own plan or steps you will do yourself. Never put secret values in a task. The person sees the cards numbered 1, 2, 3 within the list; when you mention one, call it by that number, not by its id.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -162,7 +162,7 @@ fn tools() -> Value {
             // Loaded from the start of the session (not waiting to be searched for): wanted
             // whenever the person has steps of their own.
             "_meta": { "anthropic/alwaysLoad": true },
-            "description": "The person's task lists for this folder, with each task's id and whether it is done.",
+            "description": "The person's task lists for this folder: each task's step number (as the person sees it), its id (for complete_task) and whether it is done.",
             "inputSchema": { "type": "object", "properties": {} },
         },
         {

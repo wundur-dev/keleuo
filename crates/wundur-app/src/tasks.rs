@@ -121,7 +121,8 @@ pub fn remove_list(id: u64, cx: &mut App) {
     save(cx);
 }
 
-/// The lists made in `folder`, as an agent reads them: each task with its id and whether done.
+/// The lists made in `folder`, as an agent reads them: each task with its step number (what the
+/// person sees on its card), its id (what `complete_task` takes) and whether done.
 pub fn describe(folder: &std::path::Path, cx: &mut App) -> String {
     let lists: Vec<TaskList> = store(cx).lists.iter().filter(|l| l.folder == folder).cloned().collect();
     if lists.is_empty() {
@@ -129,10 +130,31 @@ pub fn describe(folder: &std::path::Path, cx: &mut App) -> String {
     }
     let mut out = String::new();
     for l in lists {
-        out.push_str(&format!("{} ({} open of {}):\n", l.title, l.open(), l.tasks.len()));
-        for t in &l.tasks {
-            out.push_str(&format!("- [{}] {} (id {})\n", if t.done { "x" } else { " " }, t.title, t.id));
+        out.push_str(&format!("\"{}\" ({} open of {}):\n", l.title, l.open(), l.tasks.len()));
+        for (n, t) in l.tasks.iter().enumerate() {
+            out.push_str(&format!("{}. [{}] {} (id {})\n", n + 1, if t.done { "x" } else { " " }, t.title, t.id));
         }
+    }
+    out
+}
+
+/// Step `step` of a list as plain text, for the card's copy button: its title, then its detail,
+/// command and link, one to a paragraph.
+pub fn as_text(step: usize, t: &Task) -> String {
+    let mut parts = vec![format!("{step}. {}", t.title)];
+    parts.extend([Some(t.detail.clone()).filter(|d| !d.is_empty()), t.command.clone(), t.link.clone()].into_iter().flatten());
+    parts.join("\n\n")
+}
+
+/// `text` as markdown that shows it as written: a task's title is plain text, so a `*` or a
+/// leading `1.` stays a character instead of starting emphasis or a list.
+pub fn escape_markdown(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        if "\\`*_{}[]<>()#+-.!|~".contains(c) {
+            out.push('\\');
+        }
+        out.push(c);
     }
     out
 }
@@ -148,6 +170,17 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(l.open(), 1);
+    }
+
+    #[::core::prelude::v1::test]
+    fn a_step_copies_as_text() {
+        let t = Task { title: "Add the DNS record".into(), command: Some("dig wundur.ai".into()), ..Default::default() };
+        assert_eq!(as_text(2, &t), "2. Add the DNS record\n\ndig wundur.ai");
+    }
+
+    #[::core::prelude::v1::test]
+    fn a_title_is_escaped_for_markdown() {
+        assert_eq!(escape_markdown("1. *Sign* in"), "1\\. \\*Sign\\* in");
     }
 
     #[::core::prelude::v1::test]
