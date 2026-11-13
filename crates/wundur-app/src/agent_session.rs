@@ -527,10 +527,8 @@ impl AgentSession {
         if !self.backend.capabilities().terminal_view {
             return;
         }
-        let want = cx.global::<crate::AppSettings>().0.borrow().view_for(self.chat.session_id.as_deref()).to_string();
-        if want == "terminal" {
-            self.view = View::Terminal;
-        }
+        // Sessions open in Chat: the agent's own terminal interface is no longer offered as a
+        // view (a terminal tab is there for a shell).
         // Chat without the hybrid: its agent starts with the first message.
         if !self.interactive() {
             return;

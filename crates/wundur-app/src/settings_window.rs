@@ -213,14 +213,6 @@ fn general(page: WeakEntity<SettingsPage>) -> SettingPage {
             SettingItem::render(move |_, _, cx| crate::settings_fonts::render(&page, which, cx))
         })),
         SettingGroup::new().title("Sessions").items([
-            choice(
-                "New sessions open in",
-                "The chat, or the agent's own terminal interface (for agents that have one).",
-                &[("chat", "Chat"), ("terminal", "Terminal")],
-                "chat",
-                |s| s.default_view.clone(),
-                |s, v| s.default_view = v.to_string(),
-            ),
             pref(
                 "Reopen sessions at start",
                 "The sessions open when Wundur Studio quit open again when it starts.",
