@@ -2810,6 +2810,7 @@ impl Shell {
                 // clicks, and pushed the panels' tabs off the bottom).
                 // The room left under the heading and New session, not the column's whole height.
                 Some(tools) => div().flex_1().min_h_0().w_full().child(v_resizable("list-and-tools")
+                    .with_handle_appearance(Rc::new(|handle, _, cx| Some(crate::dock_skin::split_line(handle, cx))))
                     .child(
                         resizable_panel()
                             .size_range(px(120.)..Pixels::MAX)

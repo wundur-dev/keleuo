@@ -52,6 +52,23 @@ pub const TOP_STRIP: f32 = 28.;
 
 const PREVIEW: Size<Pixels> = size(px(120.), px(26.));
 
+/// How every divider in the window looks (between the chat, documents and terminals, the
+/// session list and its panels, and the left column's edge): a hairline in the border colour,
+/// three wide in the accent colour under the pointer and while held.
+pub fn split_line(handle: &gpui_kit::base::ResizeHandleContext, cx: &App) -> AnyElement {
+    use gpui_kit::base::ResizeHandleState;
+    let lit = handle.state() != ResizeHandleState::Idle;
+    let theme = cx.theme();
+    let color = if lit { theme.ring } else { theme.border };
+    // The handle's line is one wide; lit, it spreads a point to either side of it.
+    let line = div().flex_none().bg(color);
+    match handle.axis() {
+        gpui_kit::Axis::Horizontal => line.h_full().when_else(lit, |d| d.w(px(3.)).ml(px(-1.)), |d| d.w(px(1.))),
+        gpui_kit::Axis::Vertical => line.w_full().when_else(lit, |d| d.h(px(3.)).mt(px(-1.)), |d| d.h(px(1.))),
+    }
+    .into_any_element()
+}
+
 pub struct KeleuoSkin {
     inner: Rc<DockSkin>,
 }
@@ -130,10 +147,10 @@ impl DockAreaRenderer for KeleuoSkin {
     fn render_split_handle(
         &self,
         handle: &gpui_kit::base::ResizeHandleContext,
-        window: &mut Window,
+        _: &mut Window,
         cx: &mut App,
     ) -> Option<AnyElement> {
-        self.inner.render_split_handle(handle, window, cx)
+        Some(split_line(handle, cx))
     }
     fn render_dock(&self, dock: &DockContext, content: AnyElement, window: &mut Window, cx: &mut App) -> AnyElement {
         self.inner.render_dock(dock, content, window, cx)
