@@ -94,12 +94,40 @@ pub fn tool_call(session: Entity<AgentSession>, call: Call, cx: &mut App) {
         "list_sessions" => (list(&session, cx), false),
         "send_message" => send(&session, &args, cx),
         "ask_for_review" => review(&session, &args, cx),
+        "notify" => notify(&session, &args, cx),
         // The person's tools answer when their run ends.
         _ => return crate::tool_runs::call(session, &tool, args, call.reply, cx),
     };
     if let Some(reply) = call.reply {
         reply.send(&json!({ "text": text, "error": error }).to_string());
     }
+}
+
+/// A notice for the person's inbox, from `me`'s agent.
+fn notify(me: &Entity<AgentSession>, args: &Value, cx: &mut App) -> (String, bool) {
+    let title = args.get("title").and_then(Value::as_str).unwrap_or_default().trim().to_string();
+    if title.is_empty() {
+        return ("A notice needs a title.".into(), true);
+    }
+    let body = args.get("message").and_then(Value::as_str).unwrap_or_default().trim().to_string();
+    let kind = crate::inbox::Kind::parse(args.get("kind").and_then(Value::as_str).unwrap_or_default());
+    let choices: Vec<String> = args
+        .get("choices")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(Value::as_str).map(|c| c.trim().to_string()).filter(|c| !c.is_empty()).take(6).collect())
+        .unwrap_or_default();
+    let peers = peers(cx);
+    let Some(peer) = peers.iter().find(|p| &p.session == me) else {
+        return ("This session is not in Keleuo's window.".into(), true);
+    };
+    let asks = kind == crate::inbox::Kind::NeedsYou || !choices.is_empty();
+    crate::inbox::add(peer.number, peer.name.clone(), title, body, kind, choices, cx);
+    let text = if asks {
+        "Sent to the person's Keleuo inbox. They can answer from there; their answer comes to this session as their next message. Don't wait for it: finish your turn."
+    } else {
+        "Sent to the person's Keleuo inbox."
+    };
+    (text.into(), false)
 }
 
 fn list(me: &Entity<AgentSession>, cx: &App) -> String {

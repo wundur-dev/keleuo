@@ -92,6 +92,88 @@ fn dispatch(line: &str, cx: &mut App) -> String {
             })
             .unwrap_or_else(|_| "window closed".into());
     }
+    if let Some(args) = line.strip_prefix("click ") {
+        // A left click inside the app (no system input): `click X Y`, in the window's points.
+        let n: Vec<f32> = args.split_whitespace().filter_map(|a| a.parse().ok()).collect();
+        let [x, y] = n[..] else { return "click X Y".into() };
+        return handle
+            .update(cx, |_, window, cx| {
+                let position = point(px(x), px(y));
+                // What is under the pointer comes from its last move.
+                let moved = MouseMoveEvent { position, pressed_button: None, modifiers: Modifiers::default() };
+                window.dispatch_event(PlatformInput::MouseMove(moved), cx);
+                window.refresh();
+                let down = MouseDownEvent { button: MouseButton::Left, position, modifiers: Modifiers::default(), click_count: 1, first_mouse: false };
+                window.dispatch_event(PlatformInput::MouseDown(down), cx);
+                let up = MouseUpEvent { button: MouseButton::Left, position, modifiers: Modifiers::default(), click_count: 1 };
+                window.dispatch_event(PlatformInput::MouseUp(up), cx);
+                window.refresh();
+                "click".to_string()
+            })
+            .unwrap_or_else(|_| "window closed".into());
+    }
+    // A drag in steps, a frame or more apart (as a hand's is): `press X Y`, then `held X Y`
+    // for each move with the button down, then `release X Y`.
+    for (verb, kind) in [("press ", 0), ("held ", 1), ("release ", 2)] {
+        if let Some(args) = line.strip_prefix(verb) {
+            let n: Vec<f32> = args.split_whitespace().filter_map(|a| a.parse().ok()).collect();
+            let [x, y] = n[..] else { return format!("{verb}X Y") };
+            return handle
+                .update(cx, |_, window, cx| {
+                    let (position, m) = (point(px(x), px(y)), Modifiers::default());
+                    let ev = match kind {
+                        0 => {
+                            window.dispatch_event(PlatformInput::MouseMove(MouseMoveEvent { position, pressed_button: None, modifiers: m }), cx);
+                            PlatformInput::MouseDown(MouseDownEvent { button: MouseButton::Left, position, modifiers: m, click_count: 1, first_mouse: false })
+                        }
+                        1 => PlatformInput::MouseMove(MouseMoveEvent { position, pressed_button: Some(MouseButton::Left), modifiers: m }),
+                        _ => PlatformInput::MouseUp(MouseUpEvent { button: MouseButton::Left, position, modifiers: m, click_count: 1 }),
+                    };
+                    window.dispatch_event(ev, cx);
+                    window.refresh();
+                    verb.trim().to_string()
+                })
+                .unwrap_or_else(|_| "window closed".into());
+        }
+    }
+    if let Some(args) = line.strip_prefix("move ") {
+        // The pointer moved, no button held (no system input): `move X Y`.
+        let n: Vec<f32> = args.split_whitespace().filter_map(|a| a.parse().ok()).collect();
+        let [x, y] = n[..] else { return "move X Y".into() };
+        return handle
+            .update(cx, |_, window, cx| {
+                let ev = MouseMoveEvent { position: point(px(x), px(y)), pressed_button: None, modifiers: Modifiers::default() };
+                window.dispatch_event(PlatformInput::MouseMove(ev), cx);
+                window.refresh();
+                "move".to_string()
+            })
+            .unwrap_or_else(|_| "window closed".into());
+    }
+    if let Some(args) = line.strip_prefix("drag ") {
+        // A left-button drag inside the app (no system input): `drag X1 Y1 X2 Y2`, pressed at
+        // the first point, moved in steps with the button held, let go at the second.
+        let n: Vec<f32> = args.split_whitespace().filter_map(|a| a.parse().ok()).collect();
+        let [x1, y1, x2, y2] = n[..] else { return "drag X1 Y1 X2 Y2".into() };
+        return handle
+            .update(cx, |_, window, cx| {
+                let at = |t: f32| point(px(x1 + (x2 - x1) * t), px(y1 + (y2 - y1) * t));
+                let m = Modifiers::default();
+                window.dispatch_event(PlatformInput::MouseMove(MouseMoveEvent { position: at(0.), pressed_button: None, modifiers: m }), cx);
+                window.refresh();
+                window.dispatch_event(
+                    PlatformInput::MouseDown(MouseDownEvent { button: MouseButton::Left, position: at(0.), modifiers: m, click_count: 1, first_mouse: false }),
+                    cx,
+                );
+                for i in 1..=10 {
+                    let position = at(i as f32 / 10.);
+                    window.dispatch_event(PlatformInput::MouseMove(MouseMoveEvent { position, pressed_button: Some(MouseButton::Left), modifiers: m }), cx);
+                }
+                window.dispatch_event(PlatformInput::MouseUp(MouseUpEvent { button: MouseButton::Left, position: at(1.), modifiers: m, click_count: 1 }), cx);
+                window.refresh();
+                "drag".to_string()
+            })
+            .unwrap_or_else(|_| "window closed".into());
+    }
     if let Some(keys) = line.strip_prefix("key ") {
         // Keystrokes dispatched inside the app (no system input): `key cmd-n`.
         let keys = keys.trim().to_string();

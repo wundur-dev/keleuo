@@ -122,6 +122,8 @@ pub struct ChatPanel {
     spelled_as: Option<bool>,
     /// Choices made on an open question card, by request: the labels picked for each question.
     picks: HashMap<String, Vec<Vec<String>>>,
+    /// The question shown on each open question card (they come one at a time).
+    q_step: HashMap<String, usize>,
     /// The known failure whose fixes are being offered.
     fixing: Option<Issue>,
     /// Kinds of failure fixed from this panel (their notices say so).
@@ -328,6 +330,7 @@ impl ChatPanel {
             spell_held: None,
             spelled_as: None,
             picks: HashMap::new(),
+            q_step: HashMap::new(),
             fixing: None,
             fixed: Default::default(),
             toggled: HashSet::new(),

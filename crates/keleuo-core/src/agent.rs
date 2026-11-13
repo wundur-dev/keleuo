@@ -419,6 +419,10 @@ pub trait Backend: Send + Sync {
     fn session_has_messages(&self, _host: &dyn Host, _project: &Path, _id: &str) -> bool {
         true
     }
+    /// When session `id` was last written, for "12m ago" in the list: its file's time.
+    fn session_modified(&self, _host: &dyn Host, _project: &Path, _id: &str) -> Option<std::time::SystemTime> {
+        None
+    }
     /// How long session `id`'s file is now, to ask [`Backend::session_moved_on`] later.
     fn session_len(&self, _host: &dyn Host, _project: &Path, _id: &str) -> Option<u64> {
         None

@@ -1,5 +1,5 @@
 #!/bin/sh
-# restart [--no-build]
+# restart [--no-build] [--reset-layout]
 #
 # Build the release binary, find the running Keleuo, ask it to quit and start the new build in
 # the same folder with the same arguments. The sessions that were open come back (Keleuo saves
@@ -8,10 +8,23 @@
 # build, quitting and starting again is done by a detached process that outlives the app.
 # Test copies of the debug build are left running. KELEUO_BIN overrides the binary, as in
 # scripts/keleuo.
+#
+# --reset-layout: between quitting and starting, put every folder's saved arrangement aside
+# (layouts/ becomes layouts.reset-<time>) and forget the saved panel widths, so each window
+# opens in the default layout. Nothing else in the settings changes.
 
 REPO=$(cd "$(dirname "$0")/.." && pwd)
 TARGET="${CARGO_TARGET_DIR:-$HOME/Library/Caches/workbench-target}"
 BIN="${KELEUO_BIN:-$TARGET/release/keleuo}"
+
+NO_BUILD=
+RESET=
+for a in "$@"; do
+    case $a in
+        --no-build) NO_BUILD=1 ;;
+        --reset-layout) RESET=1 ;;
+    esac
+done
 
 if [ "$1" = "--relaunch" ]; then
     # The detached half: ask the old app to quit (it may ask the person first), wait for it,
@@ -35,6 +48,12 @@ if [ "$1" = "--relaunch" ]; then
         while alive "$@" && [ $i -lt 50 ]; do sleep 0.2; i=$((i + 1)); done
         for p in "$@"; do kill -9 "$p" 2>/dev/null; done
     fi
+    if [ -n "$RESET_LAYOUT" ]; then
+        CFG="${KELEUO_CONFIG_DIR:-$HOME/Library/Application Support/keleuo}"
+        [ -d "$CFG/layouts" ] && mv "$CFG/layouts" "$CFG/layouts.reset-$(date +%Y%m%d-%H%M%S)"
+        [ -f "$CFG/settings.json" ] && python3 -I -c 'import json,sys
+p=sys.argv[1]; s=json.load(open(p)); s.pop("layout",None); json.dump(s,open(p,"w"),indent=2)' "$CFG/settings.json"
+    fi
     cd "$folder" || cd "$HOME" || exit 1
     # What it prints (warnings, and timings with KELEUO_PERF=1) goes to a log, new each start.
     LOG="$HOME/Library/Logs/Keleuo/keleuo.log"
@@ -43,7 +62,7 @@ if [ "$1" = "--relaunch" ]; then
     exec "$REPO/scripts/keleuo" $args >"$LOG" 2>&1
 fi
 
-if [ "$1" != "--no-build" ]; then
+if [ -z "$NO_BUILD" ]; then
     # The external drive's AppleDouble files (._*) break the build.
     (cd "$REPO" && find . -name '._*' -type f -not -path './target/*' -delete 2>/dev/null)
     CARGO_TARGET_DIR="$TARGET" cargo build --manifest-path "$REPO/Cargo.toml" -p keleuo-app --release || exit 1
@@ -65,4 +84,5 @@ else
 fi
 # A new session (setsid), so closing the app's terminals cannot take it down.
 # shellcheck disable=SC2086
-nohup perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV' "$REPO/scripts/restart" --relaunch "$FOLDER" "$ARGS" $PIDS >/dev/null 2>&1 &
+[ -n "$RESET" ] && echo "The layout goes back to the default (the old one is kept as layouts.reset-<time>)."
+RESET_LAYOUT=$RESET nohup perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV' "$REPO/scripts/restart" --relaunch "$FOLDER" "$ARGS" $PIDS >/dev/null 2>&1 &

@@ -176,6 +176,14 @@ impl Backend for ClaudeBackend {
         history::has_messages(host, &path)
     }
 
+    fn session_modified(&self, host: &dyn Host, project: &Path, id: &str) -> Option<std::time::SystemTime> {
+        if host.is_remote() {
+            return None;
+        }
+        let home = skills::claude_home(host)?;
+        std::fs::metadata(history::project_sessions_dir(&home, project).join(format!("{id}.jsonl"))).and_then(|m| m.modified()).ok()
+    }
+
     fn session_len(&self, host: &dyn Host, project: &Path, id: &str) -> Option<u64> {
         let home = skills::claude_home(host)?;
         host.len(&history::project_sessions_dir(&home, project).join(format!("{id}.jsonl"))).ok()

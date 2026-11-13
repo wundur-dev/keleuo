@@ -673,97 +673,198 @@ impl ChatPanel {
 impl ChatPanel {
     /// A question the agent asks: each with its choices as buttons. One question with one
     /// answer goes at the click; otherwise Submit once each has a choice. Skip declines.
+    /// A question card: the agent's questions one at a time ("Question 2 of 4", a bar of how
+    /// far along), each with its choices as large rows, their descriptions shown. Choosing
+    /// moves on to the next question; Back and Next go between them, and the last one is
+    /// submitted with all the answers. One question with one answer goes with a click.
     fn render_question(&self, p: &PermissionPrompt, qs: std::rc::Rc<Vec<Question>>, cx: &mut Context<Self>) -> AnyElement {
         use gpui_kit::component::button::{Button, ButtonVariants as _};
-        use gpui_kit::component::{Disableable as _, Selectable as _};
+        use gpui_kit::component::Disableable as _;
         let theme = cx.theme();
-        let (ring, muted, fg, border) = (theme.ring, theme.muted_foreground, theme.foreground, theme.border);
+        let (ring, muted, fg, border, hover) = (theme.ring, theme.muted_foreground, theme.foreground, theme.border, theme.secondary_hover);
         let open = p.answer.is_none();
         let picks = self.picks.get(&p.request_id).cloned().unwrap_or_else(|| vec![Vec::new(); qs.len()]);
         let name = self.session.read(cx).backend.name();
+        let count = qs.len();
+        let step = self.q_step.get(&p.request_id).copied().unwrap_or(0).min(count.saturating_sub(1));
         let mut card = div()
             .flex()
             .flex_col()
-            .gap_2()
-            .p_2()
-            .rounded_md()
+            .gap_3()
+            .p_4()
+            .rounded_lg()
             .border_1()
             .border_color(if open { ring } else { border })
-            .text_xs()
             .child(
                 div()
                     .flex()
-                    .gap_1()
-                    .items_center()
-                    .child(Icon::new(gpui_kit::assets::IconName::MessageCircleQuestionMark).xsmall().text_color(ring))
-                    .child(div().font_weight(FontWeight::SEMIBOLD).text_color(fg).child(format!("{name} asks"))),
-            );
-        for (i, q) in qs.iter().enumerate() {
-            let mut options = div().flex().flex_wrap().gap_1();
-            for (label, description) in &q.options {
-                let on = picks.get(i).is_some_and(|p| p.contains(label));
-                let (rid, qs2, label2) = (p.request_id.clone(), qs.clone(), label.clone());
-                let description = description.clone();
-                options = options.child(
-                    Button::new(SharedString::from(format!("q-{}-{i}-{label}", p.request_id)))
-                        .xsmall()
-                        .label(label.clone())
-                        .selected(on)
-                        .when(on, |b| b.primary())
-                        .disabled(!open)
-                        .when(!description.is_empty(), |b| b.tooltip(description))
-                        .on_click(cx.listener(move |panel, _, _, cx| panel.pick(&rid, &qs2, i, &label2, cx))),
-                );
-            }
-            card = card.child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .when(!q.header.is_empty(), |d| d.child(div().text_color(muted).child(q.header.clone())))
-                    .child(div().text_sm().text_color(fg).child(q.question.clone()))
-                    .when(q.multi, |d| d.child(div().text_color(muted).child("Choose any that apply.")))
-                    .child(options),
-            );
-        }
-        if open {
-            let one_click = qs.len() == 1 && !qs[0].multi;
-            let ready = picks.iter().all(|p| !p.is_empty());
-            let (rid1, rid2, qs2) = (p.request_id.clone(), p.request_id.clone(), qs.clone());
-            card = card.child(
-                div()
-                    .flex()
                     .gap_2()
-                    .when(!one_click, |d| {
-                        d.child(
-                            Button::new(SharedString::from(format!("q-submit-{}", p.request_id)))
-                                .xsmall()
-                                .primary()
-                                .label("Submit")
-                                .disabled(!ready)
-                                .on_click(cx.listener(move |panel, _, _, cx| panel.submit_question(&rid1, &qs2, cx))),
-                        )
-                    })
-                    .child(
-                        Button::new(SharedString::from(format!("q-skip-{}", p.request_id)))
-                            .xsmall()
-                            .ghost()
-                            .label("Skip")
-                            .on_click(cx.listener(move |panel, _, _, cx| {
-                                panel.picks.remove(&rid2);
-                                panel.session.update(cx, |s, cx| s.answer(&rid2, false, cx));
-                            })),
-                    ),
+                    .items_center()
+                    .child(Icon::new(gpui_kit::assets::IconName::MessageCircleQuestionMark).small().text_color(ring))
+                    .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).text_color(fg).child(format!("{name} asks")))
+                    .when(count > 1 && open, |d| d.child(div().text_sm().text_color(muted).child(format!("· Question {} of {count}", step + 1)))),
             );
-        } else {
+        // Answered or skipped: each question with what was chosen.
+        if !open {
             let said = match (&p.reply, p.answer) {
-                (Some(r), _) => format!("Answered: {r}"),
+                (Some(r), _) => {
+                    let answers: Vec<&str> = r.split("; ").collect();
+                    let mut list = div().flex().flex_col().gap_1();
+                    for (i, q) in qs.iter().enumerate() {
+                        list = list.child(
+                            div()
+                                .text_sm()
+                                .child(div().text_color(muted).child(if q.header.is_empty() { q.question.clone() } else { q.header.clone() }))
+                                .child(div().text_color(fg).child(answers.get(i).copied().unwrap_or("").to_string())),
+                        );
+                    }
+                    return card.child(list).into_any_element();
+                }
                 (None, Some(true)) => "Answered in the terminal".to_string(),
                 _ => "Skipped".to_string(),
             };
-            card = card.child(div().text_color(muted).child(said));
+            return card.child(div().text_sm().text_color(muted).child(said)).into_any_element();
         }
-        card.into_any_element()
+        // How far along: a segment per question, filled once answered, the shown one marked.
+        if count > 1 {
+            let mut bar = div().flex().gap_1();
+            for i in 0..count {
+                let done = picks.get(i).is_some_and(|p| !p.is_empty());
+                let rid = p.request_id.clone();
+                bar = bar.child(
+                    div()
+                        .id(SharedString::from(format!("q-seg-{}-{i}", p.request_id)))
+                        .flex_1()
+                        .h(px(4.))
+                        .rounded_full()
+                        .cursor_pointer()
+                        // Answered: the accent, a little lighter than the one shown; not yet: the border's grey.
+                        .bg(if i == step { ring } else if done { ring.opacity(0.7) } else { border.opacity(0.6) })
+                        .on_click(cx.listener(move |panel, _, _, cx| {
+                            panel.q_step.insert(rid.clone(), i);
+                            cx.notify();
+                        })),
+                );
+            }
+            card = card.child(bar);
+        }
+        let q = &qs[step];
+        let mut options = div().flex().flex_col().gap(px(6.));
+        for (label, description) in &q.options {
+            let on = picks.get(step).is_some_and(|p| p.contains(label));
+            let (rid, qs2, label2) = (p.request_id.clone(), qs.clone(), label.clone());
+            // A radio for one answer, a box for several.
+            let mark = div()
+                .flex_none()
+                .size(px(16.))
+                .mt(px(2.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .border_1()
+                .border_color(if on { ring } else { muted.opacity(0.6) })
+                .when(!q.multi, |d| d.rounded_full())
+                .when(q.multi, |d| d.rounded(px(4.)))
+                .when(on, |d| {
+                    d.bg(ring).child(if q.multi {
+                        Icon::new(IconName::Check).xsmall().text_color(gpui_kit::white()).into_any_element()
+                    } else {
+                        div().size(px(6.)).rounded_full().bg(gpui_kit::white()).into_any_element()
+                    })
+                });
+            options = options.child(
+                div()
+                    .id(SharedString::from(format!("q-{}-{step}-{label}", p.request_id)))
+                    .px_3()
+                    .py(px(10.))
+                    .flex()
+                    .gap_3()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(if on { ring } else { border })
+                    .when(on, |d| d.bg(ring.opacity(0.10)))
+                    .when(!on, |d| d.hover(|d| d.bg(hover)))
+                    .cursor_pointer()
+                    .child(mark)
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.))
+                            .child(div().text_sm().font_weight(FontWeight::MEDIUM).text_color(fg).child(label.clone()))
+                            .when(!description.is_empty(), |d| d.child(div().text_xs().line_height(rems(1.4)).text_color(muted).child(description.clone()))),
+                    )
+                    .on_click(cx.listener(move |panel, _, _, cx| panel.pick(&rid, &qs2, step, &label2, cx))),
+            );
+        }
+        card = card.child(
+            div()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .when(!q.header.is_empty(), |d| d.child(div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(muted).child(q.header.to_uppercase())))
+                .child(div().text_base().line_height(rems(1.45)).text_color(fg).child(q.question.clone()))
+                .when(q.multi, |d| d.child(div().text_xs().text_color(muted).child("Choose any that apply.")))
+                .child(options),
+        );
+        // Back, Next or Submit, and Skip.
+        let one_click = count == 1 && !q.multi;
+        let ready = picks.iter().all(|p| !p.is_empty());
+        let last = step + 1 == count;
+        let this_done = picks.get(step).is_some_and(|p| !p.is_empty());
+        let (rid_back, rid_next, rid_submit, rid_skip, qs2) =
+            (p.request_id.clone(), p.request_id.clone(), p.request_id.clone(), p.request_id.clone(), qs.clone());
+        card.child(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(
+                    Button::new(SharedString::from(format!("q-skip-{}", p.request_id)))
+                        .small()
+                        .ghost()
+                        .label("Skip")
+                        .on_click(cx.listener(move |panel, _, _, cx| {
+                            panel.picks.remove(&rid_skip);
+                            panel.q_step.remove(&rid_skip);
+                            panel.session.update(cx, |s, cx| s.answer(&rid_skip, false, cx));
+                        })),
+                )
+                .child(div().flex_1())
+                .when(step > 0, |d| {
+                    d.child(Button::new(SharedString::from(format!("q-back-{}", p.request_id))).small().label("Back").on_click(cx.listener(move |panel, _, _, cx| {
+                        let at = panel.q_step.entry(rid_back.clone()).or_insert(0);
+                        *at = at.saturating_sub(1);
+                        cx.notify();
+                    })))
+                })
+                .when(!last, |d| {
+                    d.child(
+                        Button::new(SharedString::from(format!("q-next-{}", p.request_id)))
+                            .small()
+                            .label("Next")
+                            .disabled(!this_done)
+                            .on_click(cx.listener(move |panel, _, _, cx| {
+                                let at = panel.q_step.entry(rid_next.clone()).or_insert(0);
+                                *at += 1;
+                                cx.notify();
+                            })),
+                    )
+                })
+                .when(last && !one_click, |d| {
+                    d.child(
+                        Button::new(SharedString::from(format!("q-submit-{}", p.request_id)))
+                            .small()
+                            .primary()
+                            .label(if count > 1 { "Submit answers" } else { "Submit" })
+                            .disabled(!ready)
+                            .on_click(cx.listener(move |panel, _, _, cx| panel.submit_question(&rid_submit, &qs2, cx))),
+                    )
+                }),
+        )
+        .into_any_element()
     }
 
     /// A choice on a question card; one question with one answer goes at once.
@@ -782,12 +883,16 @@ impl ChatPanel {
         }
         if qs.len() == 1 && !qs[0].multi {
             self.submit_question(rid, qs, cx);
+        } else if !qs[i].multi && i + 1 < qs.len() {
+            // One answer chosen: on to the next question.
+            self.q_step.insert(rid.to_string(), i + 1);
         }
         cx.notify();
     }
 
     fn submit_question(&mut self, rid: &str, qs: &[Question], cx: &mut Context<Self>) {
         let Some(picks) = self.picks.remove(rid) else { return };
+        self.q_step.remove(rid);
         let answers = qs.iter().zip(picks).map(|(q, p)| (q.question.clone(), p)).collect();
         self.session.update(cx, |s, cx| s.answer_question(rid, answers, cx));
     }

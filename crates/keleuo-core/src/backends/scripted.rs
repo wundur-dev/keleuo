@@ -234,13 +234,63 @@ impl Turn {
             diff: Some(file_diff.clone()),
             parent: None,
         });
-        send(Event::Permission {
-            request_id: self.request.clone(),
-            tool: "edit".into(),
-            summary: "notes.txt".into(),
-            description: Some("Change one line".into()),
-            input,
-        });
+        // "ask …": it puts a question to the person instead (as Claude Code's asking tool does).
+        if self.text.starts_with("ask") {
+            send(Event::Permission {
+                request_id: self.request.clone(),
+                tool: crate::questions::TOOL.into(),
+                summary: "a question".into(),
+                description: None,
+                input: if self.text.starts_with("ask many") {
+                    serde_json::json!({ "questions": [
+                        {
+                            "question": "Roughly how many people do you expect in the first few months?",
+                            "header": "Users",
+                            "options": [
+                                { "label": "A handful (under 20)", "description": "Hand-issued keys are enough; no accounts yet." },
+                                { "label": "A few dozen to ~100", "description": "Real accounts and usage limits." },
+                                { "label": "Open sign-up", "description": "Accounts, limits, billing later." },
+                            ],
+                            "multiSelect": false,
+                        },
+                        {
+                            "question": "When the GPU has scaled to zero, is a wait of several minutes for the first model acceptable?",
+                            "header": "Cold start",
+                            "options": [
+                                { "label": "Yes, a few minutes is fine", "description": "Cheapest: no GPU running while idle." },
+                                { "label": "No, always under a minute", "description": "Keeps a GPU warm, about $1,400 a month." },
+                            ],
+                            "multiSelect": false,
+                        },
+                        {
+                            "question": "Which parts should the service offer first?",
+                            "header": "Scope",
+                            "options": [
+                                { "label": "Images", "description": "" },
+                                { "label": "3D models", "description": "" },
+                                { "label": "Rigging", "description": "" },
+                            ],
+                            "multiSelect": true,
+                        },
+                    ] })
+                } else {
+                    serde_json::json!({ "questions": [{
+                        "question": "Where should the site be hosted?",
+                        "header": "Host",
+                        "options": [{ "label": "Cloudflare Pages", "description": "" }, { "label": "The VPS", "description": "" }],
+                        "multiSelect": false,
+                    }] })
+                },
+            });
+        } else {
+            send(Event::Permission {
+                request_id: self.request.clone(),
+                tool: "edit".into(),
+                summary: "notes.txt".into(),
+                description: Some("Change one line".into()),
+                input,
+            });
+        }
         let allowed = answer.recv().unwrap_or(false);
         send(Event::ToolResult {
             id: tool,

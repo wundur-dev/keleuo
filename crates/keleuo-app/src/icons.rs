@@ -64,6 +64,8 @@ icon_assets!(
         AudioLines,
         Box,
         Lock,
+        // The toolbar's Inbox.
+        Inbox,
     ]
 );
 

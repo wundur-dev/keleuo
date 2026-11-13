@@ -13,6 +13,8 @@ use std::sync::Arc;
 
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::resizable::{resizable_panel, v_resizable};
+use std::rc::Rc;
 use gpui_kit::component::menu::{ContextMenuExt, PopupMenu, PopupMenuItem};
 use gpui_kit::component::menu::DropdownMenu as _;
 use gpui_kit::component::{ActiveTheme, Icon, IconName, Sizable, TitleBar, WindowExt};
@@ -31,19 +33,17 @@ use crate::browser::{Browser, BrowserEvent, OpenSession};
 use crate::panels::{self, start_tab_rename};
 use crate::workspace::{Workspace, WorkspaceEvent};
 
-const LIST_WIDTH: f32 = 250.;
-const RAIL_WIDTH: f32 = 44.;
+/// The left column's width limits (dragged by its right edge; kept in the layout settings).
+const LIST_MIN: f32 = 200.;
+const LIST_MAX: f32 = 520.;
+/// The tool panels' share of the column under the sessions, to start with.
+const TOOLS_HEIGHT: f32 = 340.;
+/// The toolbar along the window's left edge (Projects, Inbox, Settings).
+const TOOLBAR_WIDTH: f32 = 44.;
+/// The inbox's list, over the content beside the toolbar.
+const INBOX_WIDTH: f32 = 360.;
 /// What a session that was working when Keleuo quit is told when it starts again.
 const CONTINUE_MESSAGE: &str = "Keleuo was restarted while you were working. Continue where you left off.";
-/// The rail's layout, shared with the list that peeks out over it, so the session under the
-/// pointer stays under it when the list comes out: the "+" row, then a row per session.
-const RAIL_NEW: f32 = 30.;
-const RAIL_ROW: f32 = 32.;
-const RAIL_GAP: f32 = 4.;
-/// How wide the list that peeks out over the rail is.
-const PEEK_WIDTH: f32 = 260.;
-/// How long the pointer rests on the rail before the whole list peeks out.
-const PEEK_DELAY_MS: u64 = 250;
 
 /// No notifications, Dock bounces or badge: in tests, and in the background (test) mode.
 fn silent() -> bool {
@@ -55,6 +55,9 @@ struct Tab {
     ws: Entity<Workspace>,
     /// What its row shows, kept up to date as the session changes (see [`Row`]).
     row: Row,
+    /// When it last did something: its transcript's time when it was opened, then each time
+    /// it starts or stops working or does something new.
+    changed: Option<std::time::SystemTime>,
 }
 
 /// What a session's row in the list (and the rail) shows, kept on the tab. The list draws from
@@ -70,6 +73,10 @@ struct Row {
     name: String,
     root: PathBuf,
     remote: bool,
+    /// The machine, for a session on another one.
+    host: Option<String>,
+    /// The folder's git branch, when it has one.
+    branch: Option<String>,
     folder: String,
     /// Folder, branch and machine.
     place: String,
@@ -121,6 +128,8 @@ impl Row {
             name: w.list_name(cx),
             root: w.root().to_path_buf(),
             remote: w.host().is_remote(),
+            host: w.host().is_remote().then(|| w.host().label().to_string()),
+            branch: w.branch().map(|b| b.to_string()),
             folder,
             place,
             worktree: w.worktree.is_some(),
@@ -182,15 +191,22 @@ pub struct Shell {
     /// Settings, shown in place of the session while open.
     settings: Option<(Entity<crate::settings_window::SettingsPage>, Subscription)>,
     folded: bool,
-    /// The folded list is shown in full over the content (the rail was hovered).
-    peek: bool,
-    /// The pointer is over the rail (the list peeks out after a moment).
-    rail_hover: bool,
-    /// A press on the rail: no list peeks out until the pointer leaves it (the click goes to
-    /// the session pressed).
-    peek_held: bool,
+    /// The inbox's list is open over the content (the toolbar's Inbox).
+    inbox_open: bool,
+    /// A notice being answered in the person's own words: its id and the field.
+    inbox_reply: Option<(u64, Entity<InputState>, Subscription)>,
     /// The folder being renamed, asked for its new name.
     folder_rename: Option<FolderRename>,
+    /// A folder being made a project: the name asked for first.
+    project_form: Option<ProjectForm>,
+    /// Go to session (Cmd+K): what is typed, and the match picked.
+    switcher: Option<Switcher>,
+    /// The tool panel shown under the sessions (Files, Changes, Agent, Skills).
+    tools_tab: &'static str,
+    /// The left column's right edge is being dragged.
+    list_resizing: bool,
+    /// Its tabs along the bottom (drawn as the documents' are).
+    tools_strip: Rc<crate::sheet_tabs::StripState>,
     /// Sessions from the last run are being opened again: the saved list is not touched.
     restoring: bool,
     /// The open sessions as last saved (written again only when they change).
@@ -213,6 +229,15 @@ pub struct Shell {
 impl Shell {
     pub fn new(start: Start, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let folded = cx.global::<AppSettings>().0.borrow().sessions_folded;
+        // The list says how long ago each session did something: drawn again once a minute so
+        // that stays true while nothing else changes.
+        cx.spawn(async move |this, cx| loop {
+            cx.background_executor().timer(std::time::Duration::from_secs(60)).await;
+            if this.update(cx, |_, cx| cx.notify()).is_err() {
+                break;
+            }
+        })
+        .detach();
         // The window's close button: with something to lose, ask (as quitting does) and keep
         // the window until the answer.
         let weak = cx.entity().downgrade();
@@ -231,10 +256,14 @@ impl Shell {
             browser: None,
             settings: None,
             folded,
-            peek: false,
-            peek_held: false,
-            rail_hover: false,
+            inbox_open: false,
+            inbox_reply: None,
             folder_rename: None,
+            project_form: None,
+            switcher: None,
+            tools_tab: "Files",
+            list_resizing: false,
+            tools_strip: Rc::new(crate::sheet_tabs::StripState::default()),
             restoring: false,
             saved: None,
             focus: cx.focus_handle(),
@@ -1085,6 +1114,12 @@ impl Shell {
             cx.subscribe_in(&ws, window, |shell, ws, ev: &WorkspaceEvent, window, cx| match ev {
                 WorkspaceEvent::AgentEdited(path) => shell.edited(ws.clone(), path.clone(), window, cx),
                 WorkspaceEvent::FreshStart => shell.fresh_from_summary(ws.clone(), window, cx),
+                WorkspaceEvent::ShowTool(name) => {
+                    // Only the shown session's tools are drawn.
+                    if shell.active_workspace().as_ref() == Some(ws) {
+                        shell.show_tool(name, cx);
+                    }
+                }
             }),
             // The row's name, dot, activity and cost follow the session and its workspace (drawn
             // again only when the row changed); its conversation id, once it has one, is kept
@@ -1117,7 +1152,8 @@ impl Shell {
         self.subs.insert(ws.entity_id(), subs);
         let row = Row::of(ws.read(cx), cx);
         let at = at.min(self.tabs.len());
-        self.tabs.insert(at, Tab { number, ws, row });
+        let changed = transcript_time(ws.read(cx), &row, cx);
+        self.tabs.insert(at, Tab { number, ws, row, changed });
         if at <= self.active && self.tabs.len() > 1 {
             self.active += 1;
         }
@@ -1131,8 +1167,6 @@ impl Shell {
         // Picking a session leaves Settings.
         self.settings = None;
         self.active = ix;
-        // A session picked from the peeking list leaves the list out: it goes when the pointer
-        // moves on over the content.
         self.browser = None;
         self._browser_sub = None;
         let ws = self.tabs[ix].ws.clone();
@@ -1212,6 +1246,9 @@ impl Shell {
         if tab.row == row {
             return false;
         }
+        if tab.row.dot != row.dot || tab.row.activity != row.activity || tab.row.summary != row.summary {
+            tab.changed = Some(std::time::SystemTime::now());
+        }
         tab.row = row;
         true
     }
@@ -1237,11 +1274,10 @@ impl Shell {
             let path = folder.display().to_string();
             menu.item(PopupMenuItem::new("Rename").on_click(move |_, window, cx| {
                 start_tab_rename(k.clone(), a.clone(), c.clone(), window, cx);
-                // Folded, the name is edited in the list peeking out over the rail.
+                // Hidden, the list shows again so its name can be edited there.
                 let _ = w3.update(cx, |s, cx| {
                     if s.folded {
-                        s.peek = true;
-                        cx.notify();
+                        s.toggle_folded(cx);
                     }
                 });
             }))
@@ -1250,7 +1286,10 @@ impl Shell {
             .when(!remote, |m| {
                 let (w2, f, f2) = (weak.clone(), folder.clone(), folder.clone());
                 let f3 = folder.clone();
-                m.item(PopupMenuItem::new("Make a project of this folder").on_click(move |_, _, cx| add_project(f3.clone(), cx)))
+                let w3 = weak.clone();
+                m.item(PopupMenuItem::new("Make a project of this folder…").on_click(move |_, window, cx| {
+                    let _ = w3.update(cx, |s, cx| s.ask_new_project(f3.clone(), window, cx));
+                }))
                     .item(PopupMenuItem::new("Reveal in Finder").on_click(move |_, _, cx| cx.reveal_path(&f2)))
                     .item(PopupMenuItem::new("Rename folder…").on_click(move |_, window, cx| {
                         let _ = w2.update(cx, |s, cx| s.ask_rename_folder(f.clone(), window, cx));
@@ -1280,7 +1319,6 @@ impl Shell {
 
     fn toggle_folded(&mut self, cx: &mut Context<Self>) {
         self.folded = !self.folded;
-        self.peek = false;
         let settings = cx.global::<AppSettings>().0.clone();
         settings.borrow_mut().sessions_folded = self.folded;
         let _ = settings.borrow().save();
@@ -1381,6 +1419,27 @@ impl Shell {
             let _ = window_handle.update(cx, |_, window, cx| chat.update(cx, |p, cx| p.take_handoff(&text, window, cx)));
         })
         .detach();
+    }
+
+    /// The new-session screen for the folder of the project keyed `root` (its name, agent and
+    /// model to choose, ready to start), on the machine of the project's latest session.
+    fn new_session_for_project(&mut self, root: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let latest = self.tabs.iter().rev().find(|t| project_root_of(&t.row).starts_with(&root)).map(|t| t.ws.clone());
+        let host = match &latest {
+            Some(ws) => ws.read(cx).host(),
+            None => Arc::new(LocalHost) as Arc<dyn Host>,
+        };
+        // A project on another machine is keyed `ssh://host/folder`: its folder is the rest.
+        let folder = match root.to_string_lossy().strip_prefix("ssh://") {
+            Some(rest) => {
+                if latest.is_none() {
+                    return;
+                }
+                PathBuf::from(rest.find('/').map_or("/", |i| &rest[i..]))
+            }
+            None => root,
+        };
+        self.open_browser(host, folder, None, window, cx);
     }
 
     pub fn new_session_in(&mut self, host: Arc<dyn Host>, root: PathBuf, backend: Arc<dyn Backend>, window: &mut Window, cx: &mut Context<Self>) {
@@ -1571,6 +1630,78 @@ impl Shell {
                 add_project(PathBuf::from(arg), cx);
                 "ok".into()
             }
+            "project-ask" => {
+                // Tests: the New project dialog for a folder.
+                self.ask_new_project(PathBuf::from(arg), window, cx);
+                "ok".into()
+            }
+            "project-rename" => {
+                // Tests: the Rename project dialog for a project's folder.
+                self.ask_project_name(PathBuf::from(arg), folder_name(Path::new(arg)), true, window, cx);
+                "ok".into()
+            }
+            "project-name" => {
+                // Tests: type into the project dialog.
+                if let Some(f) = &self.project_form {
+                    let input = f.input.clone();
+                    input.update(cx, |i, cx| i.set_value(arg.to_string(), window, cx));
+                }
+                "ok".into()
+            }
+            "tools" => {
+                // Tests: `tools` toggles the tool panels; `tools <name>` shows that one.
+                match arg {
+                    "" => self.toggle_tools(cx),
+                    "Files" => self.show_tool("Files", cx),
+                    "Changes" => self.show_tool("Changes", cx),
+                    "Agent" => self.show_tool("Agent", cx),
+                    _ => self.show_tool("Skills", cx),
+                }
+                format!("tools={} tab={}", Self::tools_shown(cx), self.tools_tab)
+            }
+            "active" => {
+                // Tests: the shown session.
+                format!("active={} ({}) browser={}", self.name(self.active, cx), self.active, self.browser.is_some())
+            }
+            "project-new-session" => {
+                // Tests: New session from a project's menu (`arg`: its folder).
+                self.new_session_for_project(PathBuf::from(arg), window, cx);
+                format!("browser={}", self.browser.is_some())
+            }
+            "inbox" => {
+                // Tests: open or close the inbox.
+                self.inbox_open = !self.inbox_open;
+                cx.notify();
+                format!("inbox={} unread={}", self.inbox_open, crate::inbox::unread(cx))
+            }
+            "notify" => {
+                // Tests: a notice from the shown session, as its agent's notify tool sends one:
+                // `notify kind|title|message`.
+                let mut parts = arg.splitn(3, '|');
+                let kind = crate::inbox::Kind::parse(parts.next().unwrap_or_default());
+                let (title, body) = (parts.next().unwrap_or("A notice").to_string(), parts.next().unwrap_or_default().to_string());
+                let (number, from) = (self.tabs[self.active].number, self.name(self.active, cx));
+                let choices = if kind == crate::inbox::Kind::NeedsYou { vec!["Yes".to_string(), "No".to_string()] } else { Vec::new() };
+                crate::inbox::add(number, from, title, body, kind, choices, cx);
+                format!("unread={}", crate::inbox::unread(cx))
+            }
+            "switch" => {
+                // Tests: Go to session, typing `arg`.
+                self.open_switcher(window, cx);
+                if let Some(sw) = &self.switcher {
+                    let input = sw.input.clone();
+                    input.update(cx, |i, cx| i.set_value(arg.to_string(), window, cx));
+                }
+                "ok".into()
+            }
+            "switch-go" => {
+                self.switch_to_picked(window, cx);
+                format!("active={}", self.name(self.active, cx))
+            }
+            "project-create" => {
+                self.create_project(cx);
+                "ok".into()
+            }
             "show-image" => {
                 // Tests: open an image full size, as a click on one in the chat does.
                 crate::image_view::show(PathBuf::from(arg), cx);
@@ -1625,12 +1756,6 @@ impl Shell {
                 };
                 self.resume(host, root, backend, s.id, fork, wait, false, None, window, cx);
                 "ok".into()
-            }
-            "peek" => {
-                // Tests: the folded list peeks out (`peek off` puts it back).
-                self.peek = arg != "off" && self.folded;
-                cx.notify();
-                format!("peek={}", self.peek)
             }
             "fold-sessions" => {
                 self.toggle_folded(cx);
@@ -1803,7 +1928,8 @@ impl Shell {
 
     /// A session's row in the list: its dot, name, folder, what it's doing; rename and close on
     /// hover; drag to reorder.
-    fn session_row(&self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
+    /// A session's row in the full list; `project`, the root of the project it is listed under.
+    fn session_row(&self, ix: usize, project: Option<&Path>, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
         let (fg, muted, border, hover, ring, sel) =
             (crate::theme::list_text(cx), theme.muted_foreground, theme.border, theme.secondary_hover, theme.ring, theme.secondary);
@@ -1811,7 +1937,23 @@ impl Shell {
         let active = ix == self.active && self.browser.is_none();
         let number = self.tabs[ix].number;
         let row = &self.tabs[ix].row;
-        let place = row.place.clone();
+        // Under its project: where in it (when deeper), its branch, and when it last did
+        // something. Else its folder, branch and machine.
+        let place = match project {
+            Some(root) => {
+                let key = project_root_of(row);
+                let deeper = key.strip_prefix(root).ok().filter(|r| !r.as_os_str().is_empty()).map(|r| r.display().to_string());
+                let parts: Vec<String> = deeper.into_iter().chain(row.branch.clone()).chain(self.tabs[ix].changed.map(ago)).collect();
+                if parts.is_empty() { row.place.clone() } else { parts.join(" · ") }
+            }
+            None => row.place.clone(),
+        };
+        // What it is doing, in words, where its cost would show.
+        let status = row.dot.map(|d| match d {
+            Dot::Permission | Dot::Asking => ("Needs you", theme.yellow),
+            Dot::Working => ("Working", theme.green),
+            Dot::Agents => ("Agents working", theme.green.opacity(0.8)),
+        });
         let worktree = row.worktree.then_some(());
         let activity = row.activity.clone();
         // Once a turn is over and summarised: its headline, how it ended when it needs the
@@ -1874,7 +2016,10 @@ impl Shell {
                                 .items_center()
                                 .gap_1()
                                 .child(div().flex_1().min_w_0().truncate().text_sm().text_color(fg).child(title))
-                                .children(cost.map(|(c, color)| div().flex_none().text_size(px(10.5)).text_color(color).child(c))),
+                                .children(match status {
+                                    Some((word, color)) => Some(div().flex_none().text_size(px(11.)).font_weight(FontWeight::MEDIUM).text_color(color).child(word)),
+                                    None => cost.map(|(c, color)| div().flex_none().text_size(px(10.5)).text_color(color).child(c)),
+                                }),
                         )
                         .child(
                             div()
@@ -1970,15 +2115,373 @@ impl Shell {
                 .into_any_element()
     }
 
-    /// Ask for a folder and make it a project (named after it; renamed in the list).
-    fn new_project(&mut self, cx: &mut Context<Self>) {
+    /// Go to session (Cmd+K): a field over the window listing the sessions whose name or
+    /// project matches what is typed.
+    pub fn open_switcher(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.tabs.is_empty() {
+            return;
+        }
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder("Go to a session or project…"));
+        input.update(cx, |i, cx| i.focus(window, cx));
+        let sub = cx.subscribe_in(&input, window, |s, _, ev: &InputEvent, window, cx| match ev {
+            InputEvent::PressEnter { .. } => s.switch_to_picked(window, cx),
+            InputEvent::Change => {
+                if let Some(sw) = s.switcher.as_mut() {
+                    sw.picked = 0;
+                }
+                cx.notify();
+            }
+            _ => {}
+        });
+        self.switcher = Some(Switcher { input, picked: 0, _sub: sub });
+        cx.notify();
+    }
+
+    /// The sessions matching what is typed in Go to session, in the list's order, each with
+    /// its project's name. Every word typed must be in the session's name or its project's.
+    fn switcher_matches(&self, cx: &App) -> Vec<(usize, String)> {
+        let Some(sw) = &self.switcher else { return Vec::new() };
+        let query = sw.input.read(cx).value().to_lowercase();
+        let words: Vec<&str> = query.split_whitespace().collect();
+        let (projects, groups) = self.groups(cx);
+        let mut found = Vec::new();
+        for (group, members) in groups {
+            let project = group.map(|pi| panels::tab_label(&project_key(&projects[pi].root), projects[pi].name.clone(), cx)).unwrap_or_default();
+            for ix in members {
+                let hay = format!("{} {}", self.name(ix, cx), project).to_lowercase();
+                if words.iter().all(|w| hay.contains(w)) {
+                    found.push((ix, project.clone()));
+                }
+            }
+        }
+        found
+    }
+
+    fn switch_to_picked(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let picked = self.switcher.as_ref().map_or(0, |s| s.picked);
+        let target = self.switcher_matches(cx).get(picked).map(|(ix, _)| self.tabs[*ix].number);
+        self.switcher = None;
+        if let Some(ix) = target.and_then(|n| self.tabs.iter().position(|t| t.number == n)) {
+            self.activate(ix, window, cx);
+        }
+        cx.notify();
+    }
+
+    fn render_switcher(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let sw = self.switcher.as_ref()?;
+        let matches = self.switcher_matches(cx);
+        let theme = cx.theme();
+        let (fg, muted, border, bg, sel) = (theme.foreground, theme.muted_foreground, theme.border, theme.background, theme.secondary);
+        let picked = sw.picked.min(matches.len().saturating_sub(1));
+        let mut list = div().id("switcher-list").flex().flex_col().max_h(px(360.)).overflow_y_scroll();
+        for (i, (ix, project)) in matches.iter().enumerate() {
+            let number = self.tabs[*ix].number;
+            let status = self.tabs[*ix].row.dot.map(|d| match d {
+                Dot::Permission | Dot::Asking => "Needs you",
+                Dot::Working => "Working",
+                Dot::Agents => "Agents working",
+            });
+            let detail = [Some(project.clone()).filter(|p| !p.is_empty()), status.map(String::from)].into_iter().flatten().collect::<Vec<_>>().join(" · ");
+            list = list.child(
+                div()
+                    .id(("switcher-row", number))
+                    .px_2()
+                    .py(px(5.))
+                    .rounded_md()
+                    .flex()
+                    .flex_col()
+                    .cursor_pointer()
+                    .when(i == picked, |d| d.bg(sel))
+                    .child(div().truncate().text_sm().text_color(fg).child(self.name(*ix, cx)))
+                    .child(div().truncate().text_xs().text_color(muted).child(detail))
+                    .on_click(cx.listener(move |s, _, window, cx| {
+                        s.switcher = None;
+                        if let Some(ix) = s.tabs.iter().position(|t| t.number == number) {
+                            s.activate(ix, window, cx);
+                        }
+                        cx.notify();
+                    })),
+            );
+        }
+        let count = matches.len();
+        Some(
+            div()
+                .id("switcher")
+                .absolute()
+                .inset_0()
+                .flex()
+                .justify_center()
+                .items_start()
+                .pt(px(90.))
+                .bg(gpui_kit::black().opacity(0.25))
+                .occlude()
+                .on_mouse_down(MouseButton::Left, cx.listener(|s, _, _, cx| {
+                    s.switcher = None;
+                    cx.notify();
+                }))
+                .capture_key_down(cx.listener(move |s, ev: &KeyDownEvent, _, cx| {
+                    let step: isize = match ev.keystroke.key.as_str() {
+                        "escape" => {
+                            s.switcher = None;
+                            cx.stop_propagation();
+                            cx.notify();
+                            return;
+                        }
+                        "down" => 1,
+                        "up" => -1,
+                        _ => return,
+                    };
+                    if let Some(sw) = s.switcher.as_mut()
+                        && count > 0
+                    {
+                        sw.picked = (sw.picked as isize + step).rem_euclid(count as isize) as usize;
+                    }
+                    cx.stop_propagation();
+                    cx.notify();
+                }))
+                .child(
+                    div()
+                        .id("switcher-box")
+                        .w(px(480.))
+                        .p_2()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .rounded_lg()
+                        .border_1()
+                        .border_color(border)
+                        .bg(bg)
+                        .shadow_lg()
+                        // A press inside is not a press outside (which closes it).
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .child(Input::new(&sw.input).small())
+                        .child(if count == 0 { div().p_2().text_xs().text_color(muted).child("No session matches.").into_any_element() } else { list.into_any_element() }),
+                )
+                .into_any_element(),
+        )
+    }
+
+    /// The left column's splitter was let go: keep the width.
+    fn end_list_resize(&mut self, cx: &mut Context<Self>) {
+        if std::mem::take(&mut self.list_resizing) {
+            let _ = cx.global::<AppSettings>().0.borrow().save();
+            cx.notify();
+        }
+    }
+
+    /// Whether the tool panels show under the sessions (Cmd+B hides them).
+    fn tools_shown(cx: &App) -> bool {
+        !cx.global::<AppSettings>().0.borrow().layout.sidebar_folded
+    }
+
+    /// Show the tool panels under the sessions, or hide them (Cmd+B).
+    fn toggle_tools(&mut self, cx: &mut Context<Self>) {
+        let settings = cx.global::<AppSettings>().0.clone();
+        let folded = !settings.borrow().layout.sidebar_folded;
+        settings.borrow_mut().layout.sidebar_folded = folded;
+        let _ = settings.borrow().save();
+        cx.notify();
+    }
+
+    /// Show tool panel `name` under the sessions (unfolding them).
+    fn show_tool(&mut self, name: &'static str, cx: &mut Context<Self>) {
+        self.tools_tab = name;
+        if !Self::tools_shown(cx) {
+            self.toggle_tools(cx);
+        }
+        cx.notify();
+    }
+
+    /// The shown session's tool panels under the sessions: a row of tabs, then the one picked.
+    fn render_tools(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        use crate::sheet_tabs::{Joined, Palette, simple_strip};
+        let ws = self.active_workspace()?;
+        let tools = ws.read(cx).tools(cx);
+        let picked = tools.iter().position(|(n, _)| *n == self.tools_tab).unwrap_or(0);
+        let theme = cx.theme();
+        // As a tool panel in a session's layout looked: its light grey, a title bar that sits
+        // slightly in, and sheet tabs hanging from the panel along the bottom.
+        let (ground, content, border) = (theme.sidebar, crate::theme::tool_ground(cx), theme.border);
+        let palette = Palette::new(ground, theme.foreground, content, theme.foreground, border, border);
+        let title = self.tools_title(self.tools_tab_name(&tools, picked), true, cx);
+        let labels: Vec<SharedString> = tools.iter().map(|(n, _)| SharedString::from(*n)).collect();
+        let names: Vec<&'static str> = tools.iter().map(|(n, _)| *n).collect();
+        let me = cx.entity().downgrade();
+        let select: crate::sheet_tabs::OnSelect = Rc::new(move |ix, _, cx| {
+            let name = names[ix];
+            let _ = me.update(cx, |s, cx| {
+                s.tools_tab = name;
+                cx.notify();
+            });
+        });
+        let tabs = simple_strip(&self.tools_strip, "tool-tab", &labels, picked, Joined::Top, palette, crate::dock_skin::BOTTOM_STRIP, None, select);
+        let view = tools.into_iter().nth(picked).map(|(_, v)| v)?;
+        Some(
+            div()
+                .size_full()
+                .flex()
+                .flex_col()
+                .bg(content)
+                .child(title)
+                .child(div().flex_1().min_h_0().child(view))
+                .child(div().flex_none().h(px(crate::dock_skin::STRIP_GAP_ABOVE)))
+                .child(tabs)
+                .child(div().flex_none().h(px(crate::dock_skin::STRIP_GAP_BELOW)).bg(ground))
+                .into_any_element(),
+        )
+    }
+
+    /// The tool panels' title bar: the panel's name, and a button that hides them (⌄) or, while
+    /// hidden, shows them again (⌃; the whole bar does too).
+    fn tools_title(&self, name: &'static str, open: bool, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        // A heading as the list's ("Projects"): the same size and weight on the column's own
+        // ground, under a clear line between the two.
+        let (ground, hover, fg) = (crate::theme::tool_ground(cx), theme.secondary_hover, crate::theme::list_text(cx));
+        let line = crate::sheet_tabs::mix(theme.border, theme.foreground, 0.18);
+        div()
+            .id("tools-title")
+            .flex_none()
+            .h(px(40.))
+            .px(px(14.))
+            .flex()
+            .items_center()
+            .gap_2()
+            .bg(ground)
+            .border_t_1()
+            .border_color(line)
+            .when(!open, |d| d.cursor_pointer().hover(|d| d.bg(hover)).on_click(cx.listener(|s, _, _, cx| s.toggle_tools(cx))))
+            .child(div().flex_1().min_w_0().truncate().text_size(px(18.)).font_weight(FontWeight::SEMIBOLD).text_color(fg).child(name))
+            .child(
+                Button::new("tools-hide")
+                    .icon(if open { IconName::ChevronDown } else { IconName::ChevronUp })
+                    .xsmall()
+                    .ghost()
+                    .tooltip(if open { "Hide the panels (Cmd+B)" } else { "Show the panels (Cmd+B)" })
+                    .on_click(cx.listener(|s, _, _, cx| {
+                        cx.stop_propagation();
+                        s.toggle_tools(cx)
+                    })),
+            )
+            .into_any_element()
+    }
+
+    /// The tool panels while hidden: their title bar alone, under the list.
+    fn render_tools_tabs(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let ws = self.active_workspace()?;
+        let tools = ws.read(cx).tools(cx);
+        let picked = tools.iter().position(|(n, _)| *n == self.tools_tab).unwrap_or(0);
+        let name = self.tools_tab_name(&tools, picked);
+        Some(self.tools_title(name, false, cx))
+    }
+
+    fn tools_tab_name(&self, tools: &[(&'static str, AnyView)], picked: usize) -> &'static str {
+        tools.get(picked).map_or(self.tools_tab, |(n, _)| *n)
+    }
+
+    /// Ask for a folder, then for the project's name.
+    fn new_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let picked = cx.prompt_for_paths(PathPromptOptions { files: false, directories: true, multiple: false, prompt: Some("Make project".into()) });
-        cx.spawn(async move |_, cx: &mut AsyncApp| {
+        cx.spawn_in(window, async move |this, cx| {
             let Ok(Ok(Some(paths))) = picked.await else { return };
             let Some(root) = paths.into_iter().next() else { return };
-            cx.update(|cx| add_project(root, cx));
+            let _ = this.update_in(cx, |s, window, cx| s.ask_new_project(root, window, cx));
         })
         .detach();
+    }
+
+    /// Ask what to call the project made of `root` (its folder's name to start with).
+    pub fn ask_new_project(&mut self, root: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let name = folder_name(&root);
+        self.ask_project_name(root, name, false, window, cx);
+    }
+
+    /// The project dialog: a new project's name, or (`renaming`) a new name for one.
+    fn ask_project_name(&mut self, root: PathBuf, name: String, renaming: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let input = cx.new(|cx| InputState::new(window, cx).default_value(name));
+        input.update(cx, |i, cx| {
+            i.focus(window, cx);
+            i.select_all(window, cx);
+        });
+        let sub = cx.subscribe_in(&input, window, |s, _, ev: &InputEvent, _, cx| {
+            if let InputEvent::PressEnter { .. } = ev {
+                s.create_project(cx);
+            }
+        });
+        self.project_form = Some(ProjectForm { root, input, renaming, _sub: sub });
+        cx.notify();
+    }
+
+    /// Make the asked-about folder a project under the name typed (its folder's name if none).
+    fn create_project(&mut self, cx: &mut Context<Self>) {
+        let Some(f) = self.project_form.take() else { return };
+        let typed = f.input.read(cx).value().trim().to_string();
+        let name = if typed.is_empty() { folder_name(&f.root) } else { typed };
+        // Named here, not by a rename left over from an earlier project of the same folder.
+        let _ = cx.global::<panels::Names>().0.borrow_mut().set(&project_key(&f.root), "");
+        name_project(f.root, name, cx);
+        cx.notify();
+    }
+
+    fn render_project_form(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let f = self.project_form.as_ref()?;
+        let theme = cx.theme();
+        let (fg, muted, border, bg) = (theme.foreground, theme.muted_foreground, theme.border, theme.background);
+        Some(
+            div()
+                .id("project-form")
+                .absolute()
+                .inset_0()
+                .flex()
+                .justify_center()
+                .items_start()
+                .pt(px(90.))
+                .bg(gpui_kit::black().opacity(0.25))
+                .occlude()
+                .capture_key_down(cx.listener(|s, ev: &KeyDownEvent, _, cx| {
+                    if ev.keystroke.key == "escape" {
+                        s.project_form = None;
+                        cx.stop_propagation();
+                        cx.notify();
+                    }
+                }))
+                .child(
+                    div()
+                        .w(px(440.))
+                        .p_4()
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .rounded_lg()
+                        .border_1()
+                        .border_color(border)
+                        .bg(bg)
+                        .shadow_lg()
+                        .child(div().text_base().font_weight(FontWeight::SEMIBOLD).text_color(fg).child(if f.renaming { "Rename project" } else { "New project" }))
+                        .child(div().text_xs().text_color(muted).child(f.root.display().to_string()))
+                        .child(Input::new(&f.input).small())
+                        .child(
+                            div()
+                                .text_xs()
+                                .line_height(rems(1.4))
+                                .text_color(muted)
+                                .child("Its sessions (in this folder or inside it) are listed under this name."),
+                        )
+                        .child(
+                            div()
+                                .pt_1()
+                                .flex()
+                                .justify_end()
+                                .gap_2()
+                                .child(Button::new("project-form-cancel").small().ghost().label("Cancel").on_click(cx.listener(|s, _, _, cx| {
+                                    s.project_form = None;
+                                    cx.notify();
+                                })))
+                                .child(Button::new("project-form-go").small().primary().label(if f.renaming { "Rename" } else { "Create" }).on_click(cx.listener(|s, _, _, cx| s.create_project(cx)))),
+                        ),
+                )
+                .into_any_element(),
+        )
     }
 
     /// A project's row: fold, its name (renamed like a session), what its sessions are doing,
@@ -1991,6 +2494,7 @@ impl Shell {
         let key = project_key(&project.root);
         let title = panels::session_title(&key, project.name.clone(), cx);
         let (root, root2, root3, k1, a1) = (project.root.clone(), project.root.clone(), project.root.clone(), key.clone(), project.name.clone());
+        let weak_shell = cx.entity().downgrade();
         let folded = project.folded;
         div()
             .id(("project-row", pi))
@@ -2011,7 +2515,7 @@ impl Shell {
             .when(waiting > 0, |d| d.child(div().flex_none().text_size(px(10.5)).text_color(yellow).child(format!("{waiting} waiting"))))
             .when(working > 0, |d| d.child(div().flex_none().text_size(px(10.5)).text_color(green).child(format!("{working} working"))))
             .when(waiting == 0 && working == 0, |d| d.child(div().flex_none().text_size(px(10.5)).text_color(muted).child(members.len().to_string())))
-            .child(
+            .when(!is_remote_project(&project.root), |d| d.child(
                 Button::new(("project-session", pi))
                     .icon(IconName::Plus)
                     .xsmall()
@@ -2021,23 +2525,411 @@ impl Shell {
                         cx.stop_propagation();
                         s.open_browser(Arc::new(LocalHost), root.clone(), None, window, cx);
                     })),
-            )
-            .on_click(move |_, _, cx| {
-                let r = root2.clone();
-                crate::settings_window::change(cx, move |s| {
-                    if let Some(p) = s.projects.iter_mut().find(|p| p.root == r) {
-                        p.folded = !p.folded;
-                    }
-                });
-            })
-            .context_menu(move |menu, _, _| {
+            ))
+            .on_click(move |_, _, cx| Self::toggle_project(root2.clone(), cx))
+            .context_menu(move |menu, _, cx| {
                 let (k, a, r) = (k1.clone(), a1.clone(), root3.clone());
-                menu.item(PopupMenuItem::new("Rename").on_click(move |_, window, cx| start_tab_rename(k.clone(), a.clone(), a.clone(), window, cx)))
-                    .item(PopupMenuItem::new("Remove project (its sessions stay)").on_click(move |_, _, cx| {
-                        let r = r.clone();
-                        crate::settings_window::change(cx, move |s| s.projects.retain(|p| p.root != r));
-                    }))
+                let saved = cx.global::<AppSettings>().0.borrow().projects.iter().any(|p| p.root == r);
+                let (w, r_new) = (weak_shell.clone(), r.clone());
+                menu.item(PopupMenuItem::new("New session…").on_click(move |_, window, cx| {
+                    let _ = w.update(cx, |s, cx| s.new_session_for_project(r_new.clone(), window, cx));
+                }))
+                .separator()
+                .item(PopupMenuItem::new("Rename").on_click(move |_, window, cx| start_tab_rename(k.clone(), a.clone(), a.clone(), window, cx)))
+                    .when(saved, |m| {
+                        m.item(PopupMenuItem::new("Forget project (its sessions stay)").on_click(move |_, _, cx| {
+                            let r = r.clone();
+                            crate::settings_window::change(cx, move |s| s.projects.retain(|p| p.root != r));
+                        }))
+                    })
             })
+            .into_any_element()
+    }
+
+    /// The sessions as the lists show them, by project: the projects kept in the settings
+    /// (named, folded, or with no session open), then one for each other folder with sessions
+    /// (a folder inside another such folder goes under it), and one per folder on each other
+    /// machine. Every session is in exactly one, so there is no Other.
+    fn groups(&self, cx: &App) -> (Vec<keleuo_core::settings::Project>, Vec<Group>) {
+        let mut projects = cx.global::<AppSettings>().0.borrow().projects.clone();
+        let saved = projects.len();
+        // Each session's key: its folder, or `ssh://host/folder` on another machine.
+        let keys: Vec<PathBuf> = self.tabs.iter().map(|t| project_root_of(&t.row)).collect();
+        let mut homes: Vec<Option<usize>> =
+            keys.iter().map(|k| keleuo_core::settings::project_of(&projects, k).and_then(|p| projects.iter().position(|q| q.root == p.root))).collect();
+        // The other folders: the outermost ones become projects, in the order their first
+        // session is in.
+        let loose: Vec<&PathBuf> = keys.iter().zip(&homes).filter(|(_, h)| h.is_none()).map(|(k, _)| k).collect();
+        for ix in 0..self.tabs.len() {
+            if homes[ix].is_some() {
+                continue;
+            }
+            let key = &keys[ix];
+            let outer = loose.iter().filter(|o| key.starts_with(o)).min_by_key(|o| o.components().count()).map(|o| (*o).clone()).unwrap_or_else(|| key.clone());
+            let pi = match projects.iter().skip(saved).position(|p| p.root == outer) {
+                Some(i) => saved + i,
+                None => {
+                    projects.push(keleuo_core::settings::Project { name: project_default_name(&outer), root: outer, folded: false });
+                    projects.len() - 1
+                }
+            };
+            homes[ix] = Some(pi);
+        }
+        let groups = (0..projects.len()).map(|pi| (Some(pi), (0..self.tabs.len()).filter(|ix| homes[*ix] == Some(pi)).collect())).collect();
+        (projects, groups)
+    }
+
+    /// Fold or unfold the project at `root`.
+    fn toggle_project(root: PathBuf, cx: &mut App) {
+        crate::settings_window::change(cx, move |s| match s.projects.iter_mut().find(|p| p.root == root) {
+            Some(p) => p.folded = !p.folded,
+            // One made of a folder's sessions: kept from now on, folded.
+            None => s.projects.push(keleuo_core::settings::Project { name: project_default_name(&root), root, folded: true }),
+        });
+    }
+
+    /// What waits on the person in every session, for the inbox: each open question or
+    /// permission request, with its session's place in the list.
+    fn waiting(&self, cx: &App) -> Vec<(usize, keleuo_core::conversation::PermissionPrompt)> {
+        let mut found = Vec::new();
+        for (ix, t) in self.tabs.iter().enumerate() {
+            let session = t.ws.read(cx).session.read(cx);
+            for p in session.chat.pending_permissions().filter(|p| p.answer.is_none()) {
+                found.push((ix, p.clone()));
+            }
+        }
+        found
+    }
+
+    /// Notices unread plus what waits on the person: the toolbar's count.
+    fn inbox_count(&self, cx: &App) -> usize {
+        crate::inbox::unread(cx) + self.waiting(cx).len()
+    }
+
+    /// Answer notice `id` with `answer`: it goes to the session it came from as the person's
+    /// next message (waiting its turn while the agent works).
+    fn answer_notice(&mut self, id: u64, answer: String, cx: &mut Context<Self>) {
+        let Some(n) = crate::inbox::get(id, cx) else { return };
+        if answer.trim().is_empty() {
+            return;
+        }
+        if let Some(t) = self.tabs.iter().find(|t| t.number == n.session) {
+            let session = t.ws.read(cx).session.clone();
+            let text = crate::inbox::reply_text(&n, &answer);
+            session.update(cx, |s, cx| s.send(&text, cx));
+            crate::inbox::answered(id, answer.trim().to_string(), cx);
+        }
+        self.inbox_reply = None;
+        cx.notify();
+    }
+
+    /// A field to answer notice `id` in the person's own words (Enter sends).
+    fn open_notice_reply(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder("Your answer…"));
+        input.update(cx, |i, cx| i.focus(window, cx));
+        let sub = cx.subscribe_in(&input, window, move |s, input, ev: &InputEvent, _, cx| {
+            if let InputEvent::PressEnter { .. } = ev {
+                let text = input.read(cx).value().to_string();
+                s.answer_notice(id, text, cx);
+            }
+        });
+        self.inbox_reply = Some((id, input, sub));
+        cx.notify();
+    }
+
+    /// The toolbar along the window's left edge: Projects (shows or hides the list), Inbox (the
+    /// agents' notices, with how many are unread), and Settings at the bottom.
+    fn render_toolbar(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let (muted, fg, hover, sel, accent, bg) = (theme.muted_foreground, theme.foreground, theme.secondary_hover, theme.secondary, theme.ring, theme.sidebar);
+        let unread = self.inbox_count(cx);
+        let item = |id: &'static str, icon: Icon, tip: &'static str, on: bool| {
+            div()
+                .id(id)
+                .relative()
+                .size(px(32.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(8.))
+                .cursor_pointer()
+                .text_color(if on { fg } else { muted })
+                .when(on, |d| d.bg(sel))
+                .when(!on, |d| d.hover(|d| d.bg(hover)))
+                .child(icon)
+                .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(tip).build(w, cx))
+        };
+        div()
+            .id("toolbar")
+            .w(px(TOOLBAR_WIDTH))
+            .flex_none()
+            .h_full()
+            .flex()
+            .flex_col()
+            .items_center()
+            .gap_1()
+            .pt_1()
+            .pb_2()
+            .bg(bg)
+            .child(
+                item("tb-projects", Icon::new(gpui_kit::assets::IconName::Folder), "Projects (Cmd+Shift+B)", !self.folded && !self.tabs.is_empty() && self.settings.is_none())
+                    // From Settings: back to the sessions, with the list shown.
+                    .on_click(cx.listener(|s, _, window, cx| {
+                        if s.settings.is_some() {
+                            s.close_settings(window, cx);
+                            if s.folded {
+                                s.toggle_folded(cx);
+                            }
+                        } else {
+                            s.toggle_folded(cx);
+                        }
+                    })),
+            )
+            .child(
+                item("tb-inbox", Icon::new(gpui_kit::assets::IconName::Inbox), "Inbox: notices from your sessions' agents", self.inbox_open)
+                    .when(unread > 0, |d| {
+                        d.child(
+                            div()
+                                .absolute()
+                                .top(px(1.))
+                                .right(px(0.))
+                                .min_w(px(15.))
+                                .h(px(15.))
+                                .px(px(3.))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded_full()
+                                .bg(accent)
+                                .text_size(px(9.5))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(gpui_kit::white())
+                                .child(if unread > 99 { "99+".to_string() } else { unread.to_string() }),
+                        )
+                    })
+                    .on_click(cx.listener(|s, _, _, cx| {
+                        s.inbox_open = !s.inbox_open;
+                        cx.notify();
+                    })),
+            )
+            .child(div().flex_1())
+            .child(
+                item("tb-settings", Icon::new(IconName::Settings), "Settings (Cmd+,)", self.settings.is_some()).on_click(cx.listener(|s, _, window, cx| {
+                    if s.settings.is_some() {
+                        s.close_settings(window, cx)
+                    } else {
+                        s.show_settings(window, cx)
+                    }
+                })),
+            )
+            .into_any_element()
+    }
+
+    /// The inbox, over the content beside the toolbar: the newest notice first, each with who
+    /// sent it and when; one opens its session. Clicking outside closes it.
+    fn render_inbox(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let (fg, muted, border, bg, hover) = (theme.foreground, theme.muted_foreground, theme.border, theme.background, theme.secondary_hover);
+        let (green, yellow, red, blue) = (theme.green, theme.yellow, theme.red, theme.blue);
+        let items = crate::inbox::items(cx);
+        let waiting = self.waiting(cx);
+        let any_waiting = !waiting.is_empty();
+        let mut list = div().id("inbox-list").flex_1().min_h_0().overflow_y_scroll().flex().flex_col().px_2().pb_2();
+        // What waits on the person now, in any session: answered here, or opened.
+        if !waiting.is_empty() {
+            list = list.child(div().px_2().pt_1().pb_1().text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(yellow).child("Waiting on you"));
+        }
+        for (ix, p) in waiting {
+            let number = self.tabs[ix].number;
+            let name = self.name(ix, cx);
+            let session = self.tabs[ix].ws.read(cx).session.clone();
+            let questions = keleuo_core::questions::parse(&p.tool_name, &p.input);
+            let open = cx.listener(move |s, _, window, cx| {
+                cx.stop_propagation();
+                s.inbox_open = false;
+                if let Some(ix) = s.tabs.iter().position(|t| t.number == number) {
+                    s.activate(ix, window, cx);
+                }
+                cx.notify();
+            });
+            let mut row = div().px_2().py(px(8.)).flex().flex_col().gap_1().rounded(px(8.)).bg(hover.opacity(0.5));
+            match questions.as_deref() {
+                // One question, one answer: its choices as buttons.
+                Some([q]) if !q.multi && !q.options.is_empty() => {
+                    let mut choices = div().flex().flex_wrap().gap_1();
+                    for (i, (label, _)) in q.options.iter().enumerate() {
+                        let (session, rid, question, label2) = (session.clone(), p.request_id.clone(), q.question.clone(), label.clone());
+                        choices = choices.child(
+                            Button::new(SharedString::from(format!("wait-{}-{i}", p.request_id))).xsmall().label(label.clone()).on_click(move |_, _, cx| {
+                                cx.stop_propagation();
+                                session.update(cx, |s, cx| s.answer_question(&rid, vec![(question.clone(), vec![label2.clone()])], cx));
+                            }),
+                        );
+                    }
+                    row = row
+                        .child(div().text_sm().text_color(fg).child(q.question.clone()))
+                        .child(choices)
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .child(div().flex_1().text_size(px(10.5)).text_color(muted).child(format!("{name} asks")))
+                                .child(Button::new(SharedString::from(format!("wait-open-{}", p.request_id))).xsmall().ghost().label("Open").on_click(open)),
+                        );
+                }
+                // Several questions, or several answers: answered in the session's own card.
+                Some(qs) => {
+                    row = row
+                        .child(div().text_sm().text_color(fg).child(qs.first().map(|q| q.question.clone()).unwrap_or_default()))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .child(div().flex_1().text_size(px(10.5)).text_color(muted).child(format!("{name} asks {} question{}", qs.len(), if qs.len() == 1 { "" } else { "s" })))
+                                .child(Button::new(SharedString::from(format!("wait-open-{}", p.request_id))).xsmall().label("Answer in the session").on_click(open)),
+                        );
+                }
+                // Permission to use a tool: shown, answered in the session (where all of it is).
+                None => {
+                    row = row
+                        .child(div().text_sm().text_color(fg).child(format!("{}: {}", p.tool_name, p.summary)))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .child(div().flex_1().text_size(px(10.5)).text_color(muted).child(format!("{name} needs permission")))
+                                .child(Button::new(SharedString::from(format!("wait-open-{}", p.request_id))).xsmall().label("Open").on_click(open)),
+                        );
+                }
+            }
+            list = list.child(row);
+        }
+        if !items.is_empty() && any_waiting {
+            list = list.child(div().px_2().pt_3().pb_1().text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(muted).child("Notices"));
+        }
+        if items.is_empty() && !any_waiting {
+            list = list.child(
+                div()
+                    .p_3()
+                    .text_sm()
+                    .line_height(rems(1.4))
+                    .text_color(muted)
+                    .child("Nothing yet. Agents in any session can send you a notice here (Keleuo's notify tool): a long task done, a decision waiting on you, something that went wrong."),
+            );
+        }
+        for n in items {
+            let (id, number) = (n.id, n.session);
+            // Answering it: its choices, and the person's own words.
+            let answer_row = if let Some(a) = &n.answer {
+                Some(div().text_xs().text_color(muted).child(format!("You answered: {a}")).into_any_element())
+            } else if n.asks() {
+                let mut row = div().pt_1().flex().flex_wrap().gap_1();
+                for (i, c) in n.choices.iter().enumerate() {
+                    let c2 = c.clone();
+                    row = row.child(Button::new(SharedString::from(format!("notice-{id}-{i}"))).xsmall().label(c.clone()).on_click(cx.listener(move |s, _, _, cx| {
+                        cx.stop_propagation();
+                        s.answer_notice(id, c2.clone(), cx);
+                    })));
+                }
+                let replying = self.inbox_reply.as_ref().filter(|(rid, _, _)| *rid == id).map(|(_, input, _)| input.clone());
+                Some(match replying {
+                    Some(input) => div()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(row)
+                        .child(div().on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()).child(Input::new(&input).small()))
+                        .into_any_element(),
+                    None => row
+                        .child(Button::new(SharedString::from(format!("notice-{id}-reply"))).xsmall().ghost().label("Reply…").on_click(cx.listener(move |s, _, window, cx| {
+                            cx.stop_propagation();
+                            s.open_notice_reply(id, window, cx);
+                        })))
+                        .into_any_element(),
+                })
+            } else {
+                None
+            };
+            let color = match n.kind {
+                crate::inbox::Kind::Done => green,
+                crate::inbox::Kind::NeedsYou => yellow,
+                crate::inbox::Kind::Problem => red,
+                crate::inbox::Kind::Info => blue,
+            };
+            list = list.child(
+                div()
+                    .id(("inbox-notice", id as usize))
+                    .px_2()
+                    .py(px(8.))
+                    .flex()
+                    .gap_2()
+                    .rounded(px(8.))
+                    .cursor_pointer()
+                    .hover(|d| d.bg(hover))
+                    .child(div().pt(px(5.)).flex_none().child(div().size(px(8.)).rounded_full().when_else(n.read, |d| d.border_1().border_color(color), |d| d.bg(color))))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.))
+                            .child(div().text_sm().text_color(fg).when(!n.read, |d| d.font_weight(FontWeight::SEMIBOLD)).child(n.title.clone()))
+                            .when(!n.body.is_empty(), |d| d.child(div().text_xs().line_height(rems(1.35)).text_color(muted).child(n.body.clone())))
+                            .children(answer_row)
+                            .child(div().text_size(px(10.5)).text_color(muted.opacity(0.8)).child(format!("{} · {}", n.from, ago(n.at)))),
+                    )
+                    .on_click(cx.listener(move |s, _, window, cx| {
+                        crate::inbox::mark_read(id, cx);
+                        s.inbox_open = false;
+                        if let Some(ix) = s.tabs.iter().position(|t| t.number == number) {
+                            s.activate(ix, window, cx);
+                        }
+                        cx.notify();
+                    })),
+            );
+        }
+        div()
+            .id("inbox")
+            .absolute()
+            .inset_0()
+            .occlude()
+            .on_mouse_down(MouseButton::Left, cx.listener(|s, _, _, cx| {
+                s.inbox_open = false;
+                cx.notify();
+            }))
+            .child(
+                div()
+                    .id("inbox-panel")
+                    .absolute()
+                    .top_0()
+                    .bottom_0()
+                    .left(px(TOOLBAR_WIDTH))
+                    .w(px(INBOX_WIDTH))
+                    .flex()
+                    .flex_col()
+                    .bg(bg)
+                    .border_r_1()
+                    .border_color(border)
+                    .shadow_lg()
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .child(
+                        div()
+                            .flex_none()
+                            .h(px(40.))
+                            .px(px(14.))
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .child(div().flex_1().text_size(px(16.)).font_weight(FontWeight::SEMIBOLD).text_color(fg).child("Inbox"))
+                            .child(Button::new("inbox-read").xsmall().ghost().label("Mark all read").on_click(|_, _, cx| crate::inbox::mark_all_read(cx)))
+                            .child(Button::new("inbox-clear").xsmall().ghost().label("Clear").on_click(|_, _, cx| crate::inbox::clear(cx))),
+                    )
+                    .child(list),
+            )
             .into_any_element()
     }
 
@@ -2047,31 +2939,38 @@ impl Shell {
         let mut col = div().id("session-list").flex_1().min_h_0().flex().flex_col().overflow_y_scroll();
         // With projects: each project's sessions under it (a session in its folder or inside
         // it), then the rest under Other. Without: the plain list.
-        let projects = cx.global::<AppSettings>().0.borrow().projects.clone();
-        if projects.is_empty() {
-            for ix in 0..self.tabs.len() {
-                col = col.child(self.session_row(ix, cx));
-            }
-        } else {
-            let home = |ix: usize| {
-                let row = &self.tabs[ix].row;
-                if row.remote { None } else { keleuo_core::settings::project_of(&projects, &row.root).map(|p| p.root.clone()) }
-            };
-            let homes: Vec<Option<PathBuf>> = (0..self.tabs.len()).map(home).collect();
-            for (pi, project) in projects.iter().enumerate() {
-                let members: Vec<usize> = (0..self.tabs.len()).filter(|ix| homes[*ix].as_ref() == Some(&project.root)).collect();
-                col = col.child(self.project_header(pi, project, &members, cx));
-                if !project.folded {
-                    for ix in members {
-                        col = col.child(div().pl(px(12.)).child(self.session_row(ix, cx)));
+        let (projects, groups) = self.groups(cx);
+        // An open project's well: a hair darker than the list, its top edge shadowed inward.
+        let well_bg = crate::sheet_tabs::mix(crate::theme::tool_ground(cx), cx.theme().sidebar, 0.55);
+        let well_shadow = BoxShadow {
+            color: gpui_kit::black().opacity(if cx.theme().is_dark() { 0.35 } else { 0.08 }),
+            offset: point(px(0.), px(1.)),
+            blur_radius: px(3.),
+            spread_radius: px(0.),
+            inset: true,
+        };
+        for (group, members) in groups {
+            match group {
+                Some(pi) => {
+                    let project = &projects[pi];
+                    col = col.child(self.project_header(pi, project, &members, cx));
+                    // Open, its sessions sit in a well a shade darker than the list, set in.
+                    if !project.folded && !members.is_empty() {
+                        let root = project.root.clone();
+                        let mut well = div().w_full().mt_1().mb_1().py(px(4.)).flex().flex_col().bg(well_bg).shadow(vec![well_shadow.clone()]);
+                        for ix in members {
+                            well = well.child(self.session_row(ix, Some(&root), cx));
+                        }
+                        col = col.child(well);
                     }
                 }
-            }
-            let others: Vec<usize> = (0..self.tabs.len()).filter(|ix| homes[*ix].is_none()).collect();
-            if !others.is_empty() {
-                col = col.child(div().px(px(14.)).pt_3().pb_1().text_size(px(11.)).text_color(muted).child("Other"));
-                for ix in others {
-                    col = col.child(self.session_row(ix, cx));
+                None => {
+                    if !projects.is_empty() {
+                        col = col.child(div().px(px(14.)).pt_3().pb_1().text_size(px(11.)).text_color(muted).child("Other"));
+                    }
+                    for ix in members {
+                        col = col.child(self.session_row(ix, None, cx));
+                    }
                 }
             }
         }
@@ -2087,12 +2986,15 @@ impl Shell {
         );
         // A lighter panel set into the window's grey frame, rounded at its top left (as Codex's
         // sidebar is): a heading, then New session as a row of its own.
+        let width = cx.global::<AppSettings>().0.borrow().layout.list_width.clamp(LIST_MIN, LIST_MAX);
         div()
-            .w(px(LIST_WIDTH))
+            .w(px(width))
             .flex_none()
             .h_full()
             .ml(px(6.))
             .relative()
+            // Nothing in it reaches past its edges (to be seen or clicked).
+            .overflow_hidden()
             .flex()
             .flex_col()
             .bg(crate::theme::tool_ground(cx))
@@ -2106,7 +3008,7 @@ impl Shell {
                     .text_size(px(18.))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(fg)
-                    .child("Sessions")
+                    .child("Projects")
                     .child(div().flex_1())
                     .child(
                         Button::new("project-new")
@@ -2114,7 +3016,7 @@ impl Shell {
                             .xsmall()
                             .ghost()
                             .tooltip("New project: a folder, its sessions grouped under it")
-                            .on_click(cx.listener(|s, _, _, cx| s.new_project(cx))),
+                            .on_click(cx.listener(|s, _, window, cx| s.new_project(window, cx))),
                     ),
             )
             .child(
@@ -2140,209 +3042,65 @@ impl Shell {
                     .child(div().text_xs().text_color(muted.opacity(0.7)).child("Cmd+N"))
                     .on_click(cx.listener(|s, _, window, cx| s.new_session(window, cx))),
             )
-            .child(col)
+            .child(match Self::tools_shown(cx).then(|| self.render_tools(cx)).flatten() {
+                // Each half holds its own: the list scrolls inside its share and the panels keep
+                // theirs (a list running on under the panels was hidden there but still took
+                // clicks, and pushed the panels' tabs off the bottom).
+                // The room left under the heading and New session, not the column's whole height.
+                Some(tools) => div().flex_1().min_h_0().w_full().child(v_resizable("list-and-tools")
+                    .with_handle_appearance(Rc::new(|handle, _, cx| Some(crate::dock_skin::split_line(handle, cx))))
+                    .child(
+                        resizable_panel()
+                            .size_range(px(120.)..Pixels::MAX)
+                            .child(div().size_full().min_h_0().overflow_hidden().flex().flex_col().child(col)),
+                    )
+                    .child(
+                        resizable_panel()
+                            .size(px(TOOLS_HEIGHT))
+                            .size_range(px(140.)..Pixels::MAX)
+                            .child(div().size_full().min_h_0().overflow_hidden().child(tools)),
+                    ))
+                    .into_any_element(),
+                // Hidden, the panels leave their tabs along the bottom: one opens them on it.
+                None => match self.render_tools_tabs(cx) {
+                    Some(tabs) => div().flex_1().min_h_0().w_full().flex().flex_col().child(div().flex_1().min_h_0().flex().flex_col().child(col)).child(tabs).into_any_element(),
+                    None => col.into_any_element(),
+                },
+            })
             .child(crate::dock_skin::corner_cap(true, true, bg))
+            // Its right edge, the splitter: a thin line that thickens in the accent colour under
+            // the pointer and while dragged. Drawn last, so it is on top of the list and the
+            // panels, inside the column's edge.
+            .child({
+                let (line, accent, dragging) = (cx.theme().border, cx.theme().ring, self.list_resizing);
+                div()
+                    .id("list-resize")
+                    .group("list-resize")
+                    .absolute()
+                    .top_0()
+                    .right_0()
+                    .w(px(8.))
+                    .h_full()
+                    .occlude()
+                    .cursor_col_resize()
+                    .on_drag(ListResize, |_, _, _, cx| {
+                        cx.stop_propagation();
+                        cx.new(|_| ListResize)
+                    })
+                    .child(
+                        div()
+                            .absolute()
+                            .top_0()
+                            .bottom_0()
+                            .right_0()
+                            .w(px(if dragging { 3. } else { 1. }))
+                            .bg(if dragging { accent } else { line })
+                            .group_hover("list-resize", move |d| d.w(px(3.)).bg(accent)),
+                    )
+            })
             .into_any_element()
     }
 
-    /// The folded list: a dot and initials per session, with the name in a tooltip.
-    fn render_rail(&self, cx: &mut Context<Self>) -> AnyElement {
-        let theme = cx.theme();
-        let (fg, muted, hover, ring, bg, sel) =
-            (theme.foreground, theme.muted_foreground, theme.secondary_hover, theme.ring, theme.sidebar, theme.secondary);
-        let mut col = div()
-            .id("session-rail")
-            .w(px(RAIL_WIDTH))
-            .flex_none()
-            .h_full()
-            .flex()
-            .flex_col()
-            .items_center()
-            .gap(px(RAIL_GAP))
-            .py(px(RAIL_GAP))
-            .bg(bg)
-            // A press here is meant for what is under it: the list does not come out over it.
-            .on_mouse_down(MouseButton::Left, cx.listener(|s, _, _, _| s.peek_held = true))
-            .on_mouse_down(MouseButton::Right, cx.listener(|s, _, _, _| s.peek_held = true))
-            .child(
-                div()
-                    .id("rail-new")
-                    .size(px(RAIL_NEW))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded_md()
-                    .hover(|d| d.bg(hover))
-                    .child(Icon::new(IconName::Plus).small().text_color(muted))
-                    .tooltip(|w, cx| gpui_kit::component::tooltip::Tooltip::new("New session (Cmd+N)").build(w, cx))
-                    .on_click(cx.listener(|s, _, window, cx| s.new_session(window, cx))),
-            )
-            // Resting on the rail shows the whole list over the content; leaving it hides it.
-            .on_hover(cx.listener(|s, hovered: &bool, _, cx| {
-                s.rail_hover = *hovered;
-                if !*hovered {
-                    s.peek_held = false;
-                }
-                if *hovered {
-                    cx.spawn(async move |this, cx| {
-                        cx.background_executor().timer(std::time::Duration::from_millis(PEEK_DELAY_MS)).await;
-                        let _ = this.update(cx, |s, cx| {
-                            if s.rail_hover && s.folded && !s.peek && !s.peek_held {
-                                s.peek = true;
-                                cx.notify();
-                            }
-                        });
-                    })
-                    .detach();
-                }
-            }));
-        for ix in 0..self.tabs.len() {
-            let active = ix == self.active && self.browser.is_none();
-            let number = self.tabs[ix].number;
-            let name = self.name(ix, cx);
-            let activity = self.tabs[ix].row.activity.clone();
-            let dot = self.dot(ix, cx);
-            let tip = match (&dot, activity) {
-                (Some((_, state)), Some(a)) => format!("{name}\n{state}: {a}"),
-                (Some((_, state)), None) => format!("{name}\n{state}"),
-                (None, Some(a)) => format!("{name}\n{a}"),
-                (None, None) => name.clone(),
-            };
-            col = col.child(
-                div()
-                    .id(("rail-session", number))
-                    .relative()
-                    .size(px(RAIL_ROW))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded_md()
-                    .text_xs()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(if active { fg } else { muted })
-                    .when(active, |d| d.bg(sel).border_1().border_color(ring))
-                    .when(!active, |d| d.hover(|d| d.bg(hover)))
-                    .child(initials(&name))
-                    .children(dot.map(|(c, _)| {
-                        div().absolute().top(px(2.)).right(px(2.)).size(px(8.)).rounded_full().border_1().border_color(bg).bg(c)
-                    }))
-                    .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(w, cx))
-                    .on_click(cx.listener(move |s, _, window, cx| {
-                        if let Some(ix) = s.tabs.iter().position(|t| t.number == number) {
-                            s.activate(ix, window, cx);
-                        }
-                    }))
-                    .context_menu(self.session_menu(ix, cx)),
-            );
-        }
-        col.into_any_element()
-    }
-
-    /// The list that peeks out over the rail: the rail made wide. Each session keeps its row
-    /// (the same height, its two letters in the same place) with its name and what it last did
-    /// beside them, so what the pointer was over is what it is over now.
-    fn render_peek(&self, cx: &mut Context<Self>) -> AnyElement {
-        let theme = cx.theme();
-        let (fg, muted, hover, ring, bg, sel) =
-            (theme.foreground, theme.muted_foreground, theme.secondary_hover, theme.ring, theme.sidebar, theme.secondary);
-        // The rail centres its items: the left edge they start from.
-        let inset = |w: f32| px((RAIL_WIDTH - w) / 2.);
-        let mut col = div()
-            .id("session-peek-list")
-            .w(px(PEEK_WIDTH))
-            .h_full()
-            .flex()
-            .flex_col()
-            .gap(px(RAIL_GAP))
-            .py(px(RAIL_GAP))
-            .bg(bg)
-            .child(
-                div()
-                    .id("peek-new")
-                    .h(px(RAIL_NEW))
-                    .mx(px(4.))
-                    .pl(inset(RAIL_NEW) - px(4.))
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .rounded_md()
-                    .text_sm()
-                    .text_color(muted)
-                    .hover(|d| d.bg(hover))
-                    .child(div().size(px(RAIL_NEW)).flex().items_center().justify_center().child(Icon::new(IconName::Plus).small()))
-                    .child("New session")
-                    .on_click(cx.listener(|s, _, window, cx| s.new_session(window, cx))),
-            );
-        for ix in 0..self.tabs.len() {
-            let active = ix == self.active && self.browser.is_none();
-            let number = self.tabs[ix].number;
-            let name = self.name(ix, cx);
-            // The name, or the field renaming it.
-            let title = panels::title_element(&self.key(ix), self.list_name(ix, cx), None, None, cx);
-            let row = &self.tabs[ix].row;
-            let detail = row.activity.clone().unwrap_or_else(|| row.folder.clone());
-            let dot = self.dot(ix, cx);
-            col = col.child(
-                div()
-                    .id(("peek-session", number))
-                    .h(px(RAIL_ROW))
-                    .mx(px(4.))
-                    .pl(inset(RAIL_ROW) - px(4.))
-                    .pr_2()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .rounded_md()
-                    .when(active, |d| d.bg(sel))
-                    .when(!active, |d| d.hover(|d| d.bg(hover)))
-                    .child(
-                        div()
-                            .relative()
-                            .flex_none()
-                            .size(px(RAIL_ROW))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded_md()
-                            .text_xs()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(if active { fg } else { muted })
-                            .when(active, |d| d.border_1().border_color(ring))
-                            .child(initials(&name))
-                            .children(dot.map(|(c, _)| {
-                                div().absolute().top(px(2.)).right(px(2.)).size(px(8.)).rounded_full().border_1().border_color(bg).bg(c)
-                            })),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .flex()
-                            .flex_col()
-                            .child(div().truncate().text_size(px(12.5)).line_height(px(15.)).text_color(fg).child(title))
-                            .child(div().truncate().text_size(px(10.5)).line_height(px(13.)).text_color(muted).child(detail)),
-                    )
-                    .on_click(cx.listener(move |s, _, window, cx| {
-                        if let Some(ix) = s.tabs.iter().position(|t| t.number == number) {
-                            s.activate(ix, window, cx);
-                        }
-                    }))
-                    .context_menu(self.session_menu(ix, cx)),
-            );
-        }
-        col.into_any_element()
-    }
-}
-
-/// Two letters for the rail: the first letters of the first two words.
-fn initials(name: &str) -> String {
-    let words: Vec<&str> = name.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).collect();
-    let letters: String = match words.as_slice() {
-        [] => "?".into(),
-        [one] => one.chars().take(2).collect(),
-        [a, b, ..] => a.chars().take(1).chain(b.chars().take(1)).collect(),
-    };
-    letters.to_uppercase()
 }
 
 /// The folder the browser starts in when nothing says otherwise: the last folder, else home.
@@ -2427,6 +3185,11 @@ impl Focusable for Shell {
 
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // The splitter's drag is over once the window has none (it ends wherever the button
+        // came up, whatever was under it): keep the width and drop the highlight.
+        if self.list_resizing && !cx.has_active_drag() {
+            self.end_list_resize(cx);
+        }
         crate::perf::first_frame(window);
         crate::perf::count(crate::perf::Count::Frame);
         let theme = cx.theme();
@@ -2467,22 +3230,6 @@ impl Render for Shell {
         let has_session = !self.tabs.is_empty() && self.browser.is_none() && !showing_settings;
         // The tool panels by name, each opening the sidebar on it: what the icon strip beside
         // the folded sidebar did.
-        let tools_menu = {
-            let ws = self.active_workspace().map(|w| w.downgrade());
-            // Read when the menu opens, not on every frame.
-            move |mut menu: PopupMenu, _: &mut Window, cx: &mut Context<PopupMenu>| {
-                let tools = ws.as_ref().and_then(|w| w.upgrade()).map(|w| w.read(cx).tool_panels(cx)).unwrap_or_default();
-                for (name, id) in tools.iter().copied() {
-                    let ws = ws.clone();
-                    menu = menu.item(PopupMenuItem::new(name).on_click(move |_, window, cx| {
-                        if let Some(ws) = ws.as_ref() {
-                            let _ = ws.update(cx, |w, cx| w.show_panel(id, window, cx));
-                        }
-                    }));
-                }
-                menu
-            }
-        };
         // The whole menu (Appearance in it), from a button at the right end, as Chrome has it.
         let menu_button = gpui_kit::component::button::Button::new("t-menu")
             .icon(Icon::new(gpui_kit::assets::IconName::EllipsisVertical))
@@ -2498,8 +3245,9 @@ impl Render for Shell {
                 .flex()
                 .items_center()
                 .gap_1()
+                // Hide or show the projects list, where a Mac app keeps its sidebar's button.
                 .child(
-                    button("t-sessions", Icon::new(IconName::PanelLeft), "Session list (Cmd+Shift+B)")
+                    button("t-sessions", Icon::new(IconName::PanelLeft), "Projects list (Cmd+Shift+B)")
                         .on_click(cx.listener(|s, _, _, cx| s.toggle_folded(cx))),
                 )
                 .child(
@@ -2543,11 +3291,6 @@ impl Render for Shell {
                                     .on_click(to_ws(|w, win, cx| w.new_terminal(win, cx))),
                             )
                             .child(
-                                button("t-sidebar", Icon::new(IconName::PanelLeft), "Tool panels (Cmd+B; right-click for one)")
-                                    .on_click(to_ws(|w, win, cx| w.toggle_sidebar_pub(win, cx)))
-                                    .context_menu(tools_menu),
-                            )
-                            .child(
                                 button("t-split", Icon::new(IconName::PanelRight), "Split the shown file or terminal (Cmd+\\)")
                                     .on_click(to_ws(|w, win, cx| w.split_right(win, cx))),
                             )
@@ -2557,18 +3300,6 @@ impl Render for Shell {
                             ),
                     )
                 })
-                // Settings: pressed while open; again goes back.
-                .child(
-                    button("t-settings", Icon::new(IconName::Settings), "Settings (Cmd+,)")
-                        .when(showing_settings, |d| d.bg(hover))
-                        .on_click(cx.listener(|s, _, window, cx| {
-                            if s.settings.is_some() {
-                                s.close_settings(window, cx)
-                            } else {
-                                s.show_settings(window, cx)
-                            }
-                        })),
-                )
                 .child(div().flex_none().pr_1().occlude().child(menu_button)),
         );
         let main = match (&self.settings, &self.browser) {
@@ -2579,32 +3310,21 @@ impl Render for Shell {
                 None => div().into_any_element(),
             },
         };
-        let list = if self.tabs.is_empty() {
-            None
-        } else if self.folded {
-            Some(self.render_rail(cx))
-        } else {
-            Some(self.render_list(cx))
-        };
+        // Hidden (the toolbar's Projects, or Cmd+Shift+S), the list goes entirely and the work
+        // has the room.
+        // Settings, while open, has the whole window beside the toolbar.
+        let list = (!self.tabs.is_empty() && !self.folded && self.settings.is_none()).then(|| self.render_list(cx));
+        let toolbar = self.render_toolbar(cx);
+        let inbox = self.inbox_open.then(|| self.render_inbox(cx));
         let list_shown = list.is_some();
         let folder_rename = self.render_folder_rename(cx);
+        let project_form = self.render_project_form(cx);
+        let switcher = self.render_switcher(cx);
         // Web pages are native views over the window: they hide while an overlay is open.
         crate::web_panel::set_covered(
-            self.folder_rename.is_some() || (self.folded && self.peek && !self.tabs.is_empty()) || crate::image_view::is_open(cx)
+            self.folder_rename.is_some() || self.project_form.is_some() || self.switcher.is_some() || self.inbox_open || crate::image_view::is_open(cx)
                 || crate::skill_installer::is_open(cx),
         );
-        // The folded list, peeking out over the content until the pointer leaves it.
-        let peek = (self.folded && self.peek && !self.tabs.is_empty()).then(|| {
-            div()
-                .id("session-peek")
-                .absolute()
-                .top_0()
-                .left_0()
-                .h_full()
-                .occlude()
-                .shadow_lg()
-                .child(self.render_peek(cx))
-        });
         div()
             .size_full()
             .relative()
@@ -2631,6 +3351,8 @@ impl Render for Shell {
             }))
             .track_focus(&self.focus)
             .on_action(cx.listener(|s, _: &NewSession, w, cx| s.new_session(w, cx)))
+            .on_action(cx.listener(|s, _: &SwitchSession, w, cx| s.open_switcher(w, cx)))
+            .on_action(cx.listener(|s, _: &ToggleSidebar, _, cx| s.toggle_tools(cx)))
             .on_action(cx.listener(|s, _: &ToggleSessions, _, cx| s.toggle_folded(cx)))
             .on_action(cx.listener(|s, _: &CloseSession, w, cx| {
                 let ix = s.active;
@@ -2678,39 +3400,37 @@ impl Render for Shell {
                     .min_h_0()
                     .relative()
                     .flex()
+                    // Dragging the left column's splitter: the column follows the pointer; letting
+                    // go anywhere ends it (a drag of the window's own, which ends wherever the
+                    // button comes up), and the width is kept.
+                    .on_drag_move(cx.listener(|s, ev: &DragMoveEvent<ListResize>, _, cx| {
+                        let width = (f32::from(ev.event.position.x) - TOOLBAR_WIDTH - 6.).clamp(LIST_MIN, LIST_MAX);
+                        cx.global::<AppSettings>().0.borrow_mut().layout.list_width = width;
+                        s.list_resizing = true;
+                        cx.notify();
+                    }))
+                    .on_drop(cx.listener(|s, _: &ListResize, _, cx| s.end_list_resize(cx)))
+                    .when(self.list_resizing, |d| {
+                        d.cursor_col_resize().on_mouse_up(MouseButton::Left, cx.listener(|s, _, _, cx| s.end_list_resize(cx)))
+                    })
+                    .child(toolbar)
                     .children(list)
                     .child(
                         div()
                             .flex_1()
                             .min_w_0()
                             .h_full()
-                            // The peeking list goes when the pointer moves on over the content
-                            // (not when it merely leaves the list: a menu opened from the list
-                            // floats outside it, and holds the pointer while it is open).
-                            .when(self.peek, |d| {
-                                d.on_mouse_move(cx.listener(|s, _: &MouseMoveEvent, _, cx| {
-                                    // A session being renamed in it keeps it out.
-                                    let renaming = cx
-                                        .global::<panels::Renaming>()
-                                        .0
-                                        .as_ref()
-                                        .is_some_and(|r| s.tabs.iter().any(|t| panels::session_key(t.number) == r.key));
-                                    if s.peek && !renaming {
-                                        s.peek = false;
-                                        s.rail_hover = false;
-                                        cx.notify();
-                                    }
-                                }))
-                            })
                             .relative()
                             .child(main)
-                            // Beside the folded rail (the frame), the work area is rounded at its
-                            // top left; beside the open list, the list's corner is.
-                            .when(list_shown && self.folded, |d| d.child(crate::dock_skin::corner_cap(true, true, bg))),
+                            // With the list hidden, the work area is rounded at its top left
+                            // beside the toolbar; beside the list, the list's corner is.
+                            .when(!list_shown, |d| d.child(crate::dock_skin::corner_cap(true, true, bg))),
                     )
-                    .children(peek),
+                    .children(inbox),
             )
             .children(folder_rename)
+            .children(project_form)
+            .children(switcher)
             .children(crate::skill_installer::render(cx))
             .children(crate::image_view::render(cx))
     }
@@ -2718,6 +3438,34 @@ impl Render for Shell {
 
 /// A session closed for a folder rename, to open again: where, with what, and its id.
 type Reopen = (Arc<dyn Host>, PathBuf, Arc<dyn Backend>, Option<String>);
+
+/// A group of the session list: a project (by its index), or none (Other), and its sessions.
+type Group = (Option<usize>, Vec<usize>);
+
+/// The left column's splitter being dragged (nothing is drawn under the pointer).
+struct ListResize;
+
+impl Render for ListResize {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        Empty
+    }
+}
+
+/// Go to session: the field to type in and which match is picked.
+struct Switcher {
+    input: Entity<InputState>,
+    picked: usize,
+    _sub: Subscription,
+}
+
+/// A folder about to be made a project, and the name asked for it.
+struct ProjectForm {
+    root: PathBuf,
+    input: Entity<InputState>,
+    /// Renaming a project, not making one.
+    renaming: bool,
+    _sub: Subscription,
+}
 
 /// A folder being renamed: its new name in the input, and what is wrong with it, if anything.
 struct FolderRename {
@@ -2834,12 +3582,59 @@ fn project_key(root: &Path) -> String {
     format!("project:{}", root.display())
 }
 
+/// The project key of a session's folder: the folder, or `ssh://host/folder` for one on another
+/// machine (so its projects never mix with this machine's).
+fn project_root_of(row: &Row) -> PathBuf {
+    match &row.host {
+        Some(host) => PathBuf::from(format!("ssh://{host}{}", row.root.display())),
+        None => row.root.clone(),
+    }
+}
+
+/// When a session last wrote its transcript, as its agent can tell.
+fn transcript_time(w: &Workspace, row: &Row, cx: &App) -> Option<std::time::SystemTime> {
+    let id = row.short_id.as_ref()?;
+    w.session.read(cx).backend.session_modified(w.host().as_ref(), &row.root, id)
+}
+
+/// How long ago `t` was, shortly: "just now", "12m", "3h", "2d".
+fn ago(t: std::time::SystemTime) -> String {
+    let secs = t.elapsed().map(|d| d.as_secs()).unwrap_or(0);
+    match secs {
+        0..60 => "just now".into(),
+        60..3600 => format!("{}m", secs / 60),
+        3600..86_400 => format!("{}h", secs / 3600),
+        _ => format!("{}d", secs / 86_400),
+    }
+}
+
+/// Whether a project key is a folder on another machine.
+fn is_remote_project(root: &Path) -> bool {
+    root.to_string_lossy().starts_with("ssh://")
+}
+
+/// A project's name before it is given one: its folder's, with the machine for another one's.
+fn project_default_name(root: &Path) -> String {
+    let text = root.to_string_lossy();
+    match text.strip_prefix("ssh://") {
+        Some(rest) => {
+            let host = rest.split('/').next().unwrap_or(rest);
+            format!("{} ({host})", folder_name(Path::new(rest)))
+        }
+        None => folder_name(root),
+    }
+}
+
 /// Make `root` a project, named after its folder (once).
 pub fn add_project(root: PathBuf, cx: &mut App) {
-    let name = root.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| root.display().to_string());
-    crate::settings_window::change(cx, move |s| {
-        if !s.projects.iter().any(|p| p.root == root) {
-            s.projects.push(keleuo_core::settings::Project { name, root, folded: false });
-        }
+    let name = folder_name(&root);
+    name_project(root, name, cx);
+}
+
+/// Make `root` a project called `name`, or rename it when it is one already.
+fn name_project(root: PathBuf, name: String, cx: &mut App) {
+    crate::settings_window::change(cx, move |s| match s.projects.iter_mut().find(|p| p.root == root) {
+        Some(p) => p.name = name,
+        None => s.projects.push(keleuo_core::settings::Project { name, root, folded: false }),
     });
 }

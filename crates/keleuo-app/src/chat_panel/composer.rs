@@ -688,13 +688,14 @@ impl ChatPanel {
                             .items_center()
                             .gap_1()
                             .text_color(muted)
-                            .child(attach)
-                            .children(dictate)
+                            .min_w_0()
+                            .child(div().flex_none().child(attach))
+                            .children(dictate.map(|d| div().flex_none().child(d)))
                             .child(model_control)
-                            .children(effort_control)
-                            .children(mode_button)
+                            .children(effort_control.map(|e| div().flex_none().child(e)))
+                            .children(mode_button.map(|m| div().flex_none().child(m)))
                             .child(div().flex_1())
-                            .child(send),
+                            .child(div().flex_none().child(send)),
                     ),
             )
             .into_any_element()
@@ -894,7 +895,9 @@ impl ChatPanel {
     fn render_model_control(&self, cx: &mut Context<Self>) -> AnyElement {
         if let Some((input, _)) = &self.model_input {
             return div()
-                .w(px(240.))
+                .flex_1()
+                .min_w(px(90.))
+                .max_w(px(240.))
                 .capture_key_down(cx.listener(|p, ev: &KeyDownEvent, _, cx| {
                     if ev.keystroke.key == "escape" {
                         cx.stop_propagation();
@@ -908,16 +911,23 @@ impl ChatPanel {
         let session = self.session.read(cx);
         let model = session.chat.model.clone().or_else(|| session.model.clone()).unwrap_or_else(|| "default model".into());
         match &self.model_select {
-            Some(select) => Select::new(&select.state)
-                .xsmall()
-                .appearance(false)
+            // Up to 190 wide, narrower when the chat is (the send button keeps its place).
+            Some(select) => div()
+                .flex_shrink(1.)
+                .min_w(px(70.))
                 .w(px(190.))
-                .menu_width(px(340.))
-                .menu_max_h(px(420.))
-                .placeholder(short_model(&model))
-                .search_placeholder("Search models")
+                .child(
+                    Select::new(&select.state)
+                        .xsmall()
+                        .appearance(false)
+                        .w_full()
+                        .menu_width(px(340.))
+                        .menu_max_h(px(420.))
+                        .placeholder(short_model(&model))
+                        .search_placeholder("Search models"),
+                )
                 .into_any_element(),
-            None => div().text_xs().child(short_model(&model)).into_any_element(),
+            None => div().min_w_0().truncate().text_xs().child(short_model(&model)).into_any_element(),
         }
     }
 
