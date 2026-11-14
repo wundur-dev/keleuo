@@ -247,6 +247,10 @@ fn window_options(title: String, w: f32, h: f32, cx: &App) -> WindowOptions {
         }),
         app_owns_titlebar_drag: true,
         focus: !background(),
+        // Measuring (scripts/perf-scene): `WUNDUR_FLOAT=1` keeps the window above the others,
+        // so nothing covers it (a covered window stops drawing and the numbers mean nothing).
+        // It is a non-activating panel: it never takes the keyboard from the app in use.
+        kind: if wundur_core::env_var("FLOAT").is_ok_and(|v| v != "0") { WindowKind::PopUp } else { WindowKind::Normal },
         window_min_size: Some(size(px(640.), px(400.))),
         ..Default::default()
     }

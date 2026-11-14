@@ -20,6 +20,14 @@ path = "src/bin/wundur-hook.rs"
 name = "wundur-mcp"
 path = "src/bin/wundur-mcp.rs"
 
+# GPUI Fast: gpui-kit's other GPUI backend, which redraws less when nothing changed. On by
+# default: measured with scripts/perf-scene (2026-11-14) it drew almost nothing at idle (0.05
+# frames/s against 1.9) and about a quarter fewer frames, and 15% less CPU, while an agent works.
+# `--no-default-features` builds on the standard backend, to compare.
+[features]
+default = ["gpui-fast"]
+gpui-fast = ["gpui-kit/gpui-fast"]
+
 [dependencies]
 wundur-core = { workspace = true }
 anyhow = { workspace = true }
