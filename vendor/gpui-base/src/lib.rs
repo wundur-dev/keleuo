@@ -4,6 +4,12 @@
 //! colors, sizing, and motion belong to applications or the
 //! `gpui-component` façade.
 
+#[cfg(feature = "gpui-fast")]
+extern crate gpui_fast as gpui;
+#[cfg(all(feature = "gpui-fast", test))]
+extern crate gpui_fast_platform as gpui_platform;
+
+mod a11y_disabled;
 mod accordion;
 pub mod actions;
 mod alert_dialog;
@@ -27,6 +33,7 @@ mod event;
 mod focus_trap;
 mod geometry;
 mod global_state;
+pub mod grid_layout;
 mod history;
 mod hover_card;
 mod index_path;
@@ -41,6 +48,7 @@ mod nav_stack;
 mod number_input;
 mod observe;
 mod otp_input;
+mod overscroll;
 mod pagination;
 pub mod plot;
 mod popover;
@@ -113,6 +121,9 @@ pub use focus_trap::FocusTrapElement;
 pub use focus_trap::active_focus_trap;
 pub use geometry::*;
 pub use global_state::{DeferredPopover, GlobalState};
+pub use grid_layout::{
+    GridArea, GridItem, GridLayout, GridLayoutEvent, GridLayoutState, grid_drag_handle,
+};
 pub use history::History;
 pub use hover_card::{HoverCard, HoverCardState};
 pub use index_path::IndexPath;
@@ -128,17 +139,17 @@ pub use measure::{Measure, measure, measure_if};
 pub use motion::{
     Discrete, DiscreteError, Easing, EasingError, Interpolate, IterationCount, Keyframe,
     KeyframeError, Keyframes, LinearStop, MotionPhase, MotionReveal, MotionStatus, MotionTransform,
-    MotionValue, PlaybackDirection, Presence, PresencePhase, PresenceSample, Sequence,
-    SequenceSample, SequenceStep, SignedDuration, Spring, SpringError, Stagger, StaggerOrigin,
-    StepPosition, Timing, TimingSample, Transition, TransitionId, animate_keyframes, spring,
-    transition, transition_with_status,
+    MotionValue, PlaybackDirection, Presence, PresencePhase, PresenceSample, ReducedMotion,
+    Sequence, SequenceSample, SequenceStep, SignedDuration, Spring, SpringError, Stagger,
+    StaggerOrigin, StepPosition, Timing, TimingSample, Transition, TransitionId, TransitionState,
+    animate_keyframes, spring, transition, transition_with_status,
 };
 pub use nav_stack::{NavMotion, NavOperation, NavPage, NavStack, NavStackEvent, NavStackState};
 pub use number_input::{
     Decrement, Increment, NumberInput, NumberInputEvent, NumberInputText, NumberStep, StepAction,
     step_value,
 };
-pub use observe::{ObservedElement, TestSupportExt};
+pub use observe::{ObservedElement, ObservedTextElement, TestSupportExt, TestTextExt};
 pub use otp_input::{OtpEvent, OtpInput, OtpState};
 pub use pagination::{Pagination, PaginationItem, PaginationState};
 pub use plot::PlotMotion;
@@ -149,16 +160,18 @@ pub use progress::{Progress, ProgressIndicator, ProgressTrack};
 pub use radio::{Radio, RadioStyles};
 pub use radio_group::RadioGroup;
 pub use reduce_motion::apply_system_reduce_motion;
+#[doc(hidden)]
+pub use resizable::PANEL_MIN_SIZE;
 pub use resizable::{
     HandleEdge, ResizablePanel, ResizablePanelEvent, ResizablePanelGroup, ResizableState,
-    ResizeHandleContext, ResizeHandleRenderer, ResizeHandleState, h_resizable, resizable_panel,
-    v_resizable,
+    ResizeHandle, ResizeHandleContext, ResizeHandleRenderer, ResizeHandleState, h_resizable,
+    resizable_panel, resize_handle, v_resizable,
 };
-#[doc(hidden)]
-pub use resizable::{PANEL_MIN_SIZE, resize_handle};
 pub use root::{Root, RootPlugin};
 pub use scroll_bounce::{ScrollBounce, ScrollBounceMotion};
-pub use scrollable_mask::ScrollableMask;
+pub use scrollable_mask::{
+    HorizontalScrollClaim, RoundedFrameCover, ScrollableMask, last_horizontal_scroll_claim,
+};
 pub use scrollbar::{
     Scrollbar, ScrollbarAxis, ScrollbarEntrance, ScrollbarHandle, ScrollbarMode, ScrollbarMotion,
     ScrollbarStyles, ScrollbarThumbStyle, ScrollbarTrackStyle,
@@ -179,8 +192,8 @@ pub use tabs::{Tab, TabStyles, Tabs};
 pub use text::{
     InlineElement, InlineRenderContext, MarkdownExtensions, MarkdownNode, MarkdownParseContext,
     MarkdownPlugin, RangeHighlight, RangeHighlightError, RenderedText, SelectionFormat, TableData,
-    Text, TextView, TextViewDefaults, TextViewMotion, TextViewPlugin, TextViewState, TextViewStyle,
-    html, markdown, markdown_ast,
+    TaskToggleEvent, Text, TextView, TextViewDefaults, TextViewMotion, TextViewPlugin,
+    TextViewState, TextViewStyle, html, markdown, markdown_ast,
 };
 pub use text_selection::{
     TextSelection, TextSelectionContentKey, TextSelectionCoverage, TextSelectionEndpoint,
@@ -204,7 +217,9 @@ pub use toast::{
 pub use toggle::{Toggle, ToggleStyles};
 pub use toggle_group::ToggleGroup;
 pub use toolbar::{Toolbar, ToolbarGroup};
-pub use tooltip::{Tooltip, TooltipOverlay, TooltipPositioner, TooltipRequest, TooltipTransition};
+pub use tooltip::{
+    Tooltip, TooltipDefaults, TooltipOverlay, TooltipPositioner, TooltipRequest, TooltipTransition,
+};
 pub use touch_selection::{SelectionEdge, TouchHandle, TouchSelectionSnapshot};
 pub use tree::{Tree, TreeEntry, TreeEntryState, TreeEvent, TreeItem, TreeState};
 #[doc(hidden)]
@@ -240,6 +255,7 @@ pub fn init(cx: &mut App) {
     time_field::init(cx);
     input::init(cx);
     tree::init(cx);
+    grid_layout::init(cx);
     text::init(cx);
     root::init(cx);
 }

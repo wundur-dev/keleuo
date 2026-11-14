@@ -820,7 +820,7 @@ impl TerminalView {
         cx.notify();
     }
 
-    fn scroll(&mut self, e: &ScrollWheelEvent, _: &mut Window, cx: &mut Context<Self>) {
+    fn scroll(&mut self, e: &ScrollEvent, _: &mut Window, cx: &mut Context<Self>) {
         let Some(pty) = &self.pty else { return };
         let line_h = self.cell.get().height;
         let exact = self.wheel_rest + e.delta.pixel_delta(line_h).y / line_h;
@@ -1019,7 +1019,7 @@ impl Render for TerminalView {
             .on_drop(cx.listener(|v, paths: &ExternalPaths, _, cx| v.paste_files(paths.paths().to_vec(), cx)))
             .on_mouse_move(cx.listener(Self::mouse_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::mouse_up))
-            .on_scroll_wheel(cx.listener(Self::scroll))
+            .on_scroll(cx.listener(Self::scroll))
             .cursor(if self.hover_link.is_some() { CursorStyle::PointingHand } else { CursorStyle::IBeam });
         if let Some(err) = &self.error {
             return base.p_2().text_color(hsla(if palette::is_dark() { 0xcc6666 } else { 0xc0392b })).child(err.clone());

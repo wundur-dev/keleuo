@@ -29,9 +29,9 @@ base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
-# gpui-kit pins the matching gpui snapshot (published as gpui-pre 0.3.8) and re-exports gpui,
+# gpui-kit pins the matching gpui snapshot (published as gpui-pre) and re-exports gpui,
 # gpui-component and the Lucide icon assets.
-gpui-kit = { version = "=0.7.1", features = ["tree-sitter-languages"] }
+gpui-kit = { version = "=0.9.1", features = ["tree-sitter-languages"] }
 # Highlight queries for grammars gpui-component registers without one (src/languages.rs);
 # the same versions it builds.
 tree-sitter-c-sharp = "=0.23.5"
@@ -49,7 +49,7 @@ interprocess = "2.4"
 
 [dev-dependencies]
 # The same gpui-kit with its headless UI test harness (drags, clicks, element queries).
-gpui-kit = { version = "=0.7.1", features = ["tree-sitter-languages", "test-support"] }
+gpui-kit = { version = "=0.9.1", features = ["tree-sitter-languages", "test-support"] }
 # Compiling the highlight queries in src/languages.rs's test.
 tree-sitter = "=0.26.13"
 

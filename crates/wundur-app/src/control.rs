@@ -80,13 +80,14 @@ fn dispatch(line: &str, cx: &mut App) -> String {
         let [x, y, dy] = n[..] else { return "wheel X Y DY".into() };
         return handle
             .update(cx, |_, window, cx| {
-                let event = ScrollWheelEvent {
+                let event = ScrollEvent {
                     position: point(px(x), px(y)),
                     delta: ScrollDelta::Pixels(point(px(0.), px(dy))),
                     modifiers: Modifiers::default(),
                     touch_phase: TouchPhase::Moved,
+                    source: ScrollSource::default(),
                 };
-                window.dispatch_event(PlatformInput::ScrollWheel(event), cx);
+                window.dispatch_event(PlatformInput::Scroll(event), cx);
                 window.refresh();
                 "wheel".to_string()
             })
@@ -181,7 +182,7 @@ fn dispatch(line: &str, cx: &mut App) -> String {
             .update(cx, |_, window, cx| {
                 let mut handled = Vec::new();
                 for k in keys.split_whitespace() {
-                    match Keystroke::parse(k) {
+                    match Keystroke::parse_with_os(k, cx.platform_info().os) {
                         Ok(ks) => {
                             handled.push(format!("{k}:{}", window.dispatch_keystroke(ks, cx)))
                         }

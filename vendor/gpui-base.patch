@@ -1,0 +1,1293 @@
+diff -ruN -x Cargo.lock -x ._* -x rust-toolchain.toml -x target gpui-base-0.9.1/src/dock/dock_area.rs /Volumes/Extreme SSD/workspace/keleuo/vendor/gpui-base/src/dock/dock_area.rs
+--- a/src/dock/dock_area.rs	2006-07-23 21:21:28
++++ b/src/dock/dock_area.rs	2026-11-14 07:07:25
+@@ -108,6 +108,8 @@
+     groups: HashMap<NodeId, Cached<TabGroup>>,
+     splits: HashMap<NodeId, CachedSplit>,
+     panels: HashMap<PanelId, Arc<dyn PanelView>>,
++    /// Wundur patch: the narrowest a panel's slot in a side-by-side split may be.
++    min_widths: HashMap<PanelId, Pixels>,
+ 
+     locked: bool,
+     zoomed: Option<Zoomed>,
+@@ -140,6 +142,7 @@
+             docks: HashMap::new(),
+             groups: HashMap::new(),
+             splits: HashMap::new(),
++            min_widths: HashMap::new(),
+             panels: HashMap::new(),
+             locked: false,
+             zoomed: None,
+@@ -1367,6 +1370,23 @@
+     }
+ }
+ 
++/// Wundur patch: panel minimum widths.
++impl DockArea {
++    /// Never let the slot holding `panel` in a side-by-side split be narrower than `width`
++    /// (dragging the divider stops there; a narrower window squeezes the other slots first).
++    pub fn set_panel_min_width(&mut self, panel: PanelId, width: Pixels) {
++        self.min_widths.insert(panel, width);
++    }
++
++    /// The widest minimum of the panels in `node`, if any has one.
++    fn node_min_width(&self, node: &PaneNode) -> Option<Pixels> {
++        match node.kind() {
++            PaneRef::Split { children, .. } => children.iter().filter_map(|c| self.node_min_width(c)).reduce(|a, b| a.max(b)),
++            PaneRef::Tabs { panels: ids, .. } => ids.iter().filter_map(|id| self.min_widths.get(id).copied()).reduce(|a, b| a.max(b)),
++        }
++    }
++}
++
+ /// Rendering.
+ impl DockArea {
+     /// Lower one container to an element.
+@@ -1401,6 +1421,10 @@
+                     .map(|(ix, (child, size))| {
+                         resizable_panel()
+                             .visible(shown[ix])
++                            .when_some(
++                                (axis == Axis::Horizontal).then(|| self.node_min_width(child)).flatten(),
++                                |panel, min| panel.size_range(min..Pixels::MAX),
++                            )
+                             .child(self.render_node(child, window, cx))
+                             // `flex_none` is what makes the size stick.
+                             // `ResizablePanel` sets `flex_grow: 1` on itself,
+diff -ruN -x Cargo.lock -x ._* -x rust-toolchain.toml -x target gpui-base-0.9.1/src/dock/drag.rs /Volumes/Extreme SSD/workspace/keleuo/vendor/gpui-base/src/dock/drag.rs
+--- a/src/dock/drag.rs	2006-07-23 21:21:28
++++ b/src/dock/drag.rs	2026-11-14 07:07:25
+@@ -264,6 +264,128 @@
+     }
+ }
+ 
++/// A target of the docking compass: the five squares drawn around a group's centre while a
++/// panel is dragged over it (as Visual Studio's), each a place the panel can go: split off
++/// to a side, or join the group as a tab.
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub enum CompassTarget {
++    Up,
++    Left,
++    Right,
++    Down,
++    Tab,
++}
++
++impl CompassTarget {
++    pub const ALL: [CompassTarget; 5] =
++        [CompassTarget::Up, CompassTarget::Left, CompassTarget::Right, CompassTarget::Down, CompassTarget::Tab];
++
++    /// Where the panel goes: a split, or `None` to join the group as a tab.
++    pub fn placement(self) -> Option<Placement> {
++        match self {
++            CompassTarget::Up => Some(Placement::Top),
++            CompassTarget::Left => Some(Placement::Left),
++            CompassTarget::Right => Some(Placement::Right),
++            CompassTarget::Down => Some(Placement::Bottom),
++            CompassTarget::Tab => None,
++        }
++    }
++}
++
++/// A compass target's size and the space between targets.
++pub const COMPASS_BUTTON: f32 = 32.;
++const COMPASS_GAP: f32 = 6.;
++
++/// Whether the compass fits in `bounds` (with room around it); a smaller group keeps the
++/// zones of [`split_placement_at`].
++pub fn compass_fits(bounds: Bounds<Pixels>) -> bool {
++    let need = px(COMPASS_BUTTON * 3. + COMPASS_GAP * 2. + 24.);
++    bounds.size.width >= need && bounds.size.height >= need
++}
++
++/// Where target `target` is drawn for a group at `bounds` (same coordinates as `bounds`).
++pub fn compass_target_bounds(bounds: Bounds<Pixels>, target: CompassTarget) -> Bounds<Pixels> {
++    let step = px(COMPASS_BUTTON + COMPASS_GAP);
++    let (dx, dy) = match target {
++        CompassTarget::Up => (px(0.), -step),
++        CompassTarget::Left => (-step, px(0.)),
++        CompassTarget::Right => (step, px(0.)),
++        CompassTarget::Down => (px(0.), step),
++        CompassTarget::Tab => (px(0.), px(0.)),
++    };
++    let size = gpui::size(px(COMPASS_BUTTON), px(COMPASS_BUTTON));
++    let centre = bounds.center();
++    Bounds::new(gpui::point(centre.x + dx - size.width / 2., centre.y + dy - size.height / 2.), size)
++}
++
++/// The compass target `position` is over, if any.
++pub fn compass_target_at(bounds: Bounds<Pixels>, position: Point<Pixels>) -> Option<CompassTarget> {
++    CompassTarget::ALL.into_iter().find(|t| compass_target_bounds(bounds, *t).contains(&position))
++}
++
++/// The compass over a group while a panel is dragged over it: the group's content bounds and
++/// the target the pointer is on, if any.
++#[derive(Clone, Copy, Debug, PartialEq)]
++pub struct Compass {
++    pub bounds: Bounds<Pixels>,
++    pub hovered: Option<CompassTarget>,
++}
++
++impl Compass {
++    /// Each target and where it is drawn, relative to the group's content (its top left 0, 0).
++    pub fn targets(&self) -> impl Iterator<Item = (CompassTarget, Bounds<Pixels>)> + '_ {
++        CompassTarget::ALL.into_iter().map(|t| {
++            let b = compass_target_bounds(self.bounds, t);
++            (t, Bounds::new(b.origin - self.bounds.origin, b.size))
++        })
++    }
++
++    /// The compass drawn in the given colours: each target a small window outline (`edge`)
++    /// with the side it docks to filled in (`mark`); the target under the pointer in `hot`.
++    pub fn element(&self, ground: gpui::Hsla, edge: gpui::Hsla, mark: gpui::Hsla, hot: gpui::Hsla) -> gpui::AnyElement {
++        use gpui::{IntoElement as _, ParentElement as _, Styled as _, div, relative};
++        let mut layer = div().absolute().top_0().left_0().size_full();
++        for (target, at) in self.targets() {
++            let on = self.hovered == Some(target);
++            let ink = if on { hot } else { mark };
++            let fill = div().absolute().bg(ink.opacity(if on { 0.9 } else { 0.55 }));
++            let fill = match target {
++                CompassTarget::Up => fill.top_0().left_0().w_full().h(relative(0.45)),
++                CompassTarget::Down => fill.bottom_0().left_0().w_full().h(relative(0.45)),
++                CompassTarget::Left => fill.top_0().left_0().h_full().w(relative(0.45)),
++                CompassTarget::Right => fill.top_0().right_0().h_full().w(relative(0.45)),
++                CompassTarget::Tab => fill.top_0().left_0().size_full().opacity(0.6),
++            };
++            layer = layer.child(
++                div()
++                    .absolute()
++                    .left(at.origin.x)
++                    .top(at.origin.y)
++                    .size(at.size.width)
++                    .flex()
++                    .items_center()
++                    .justify_center()
++                    .rounded(px(6.))
++                    .bg(if on { hot.opacity(0.12) } else { ground })
++                    .border_1()
++                    .border_color(if on { hot } else { edge })
++                    .shadow_sm()
++                    .child(
++                        div()
++                            .relative()
++                            .size(px(18.))
++                            .rounded(px(2.))
++                            .border_1()
++                            .border_color(ink)
++                            .overflow_hidden()
++                            .child(fill),
++                    ),
++            );
++        }
++        layer.into_any_element()
++    }
++}
++
+ /// Which split zone `position` falls into within `bounds`, or `None` for the
+ /// centre zone (merge into the tab group rather than split).
+ pub fn split_placement_at(bounds: Bounds<Pixels>, position: Point<Pixels>) -> Option<Placement> {
+@@ -285,6 +407,25 @@
+     use gpui::point;
+ 
+     use super::*;
++
++    #[test]
++    fn the_compass_has_five_targets_around_the_centre() {
++        let bounds = Bounds::new(point(px(100.), px(50.)), gpui::size(px(400.), px(300.)));
++        assert!(compass_fits(bounds));
++        let c = bounds.center();
++        assert_eq!(compass_target_at(bounds, c), Some(CompassTarget::Tab));
++        assert_eq!(compass_target_at(bounds, point(c.x, c.y - px(38.))), Some(CompassTarget::Up));
++        assert_eq!(compass_target_at(bounds, point(c.x - px(38.), c.y)), Some(CompassTarget::Left));
++        assert_eq!(compass_target_at(bounds, point(c.x + px(38.), c.y)), Some(CompassTarget::Right));
++        assert_eq!(compass_target_at(bounds, point(c.x, c.y + px(38.))), Some(CompassTarget::Down));
++        // Between targets, and near the edges: none.
++        assert_eq!(compass_target_at(bounds, point(c.x + px(38.), c.y + px(38.))), None);
++        assert_eq!(compass_target_at(bounds, point(px(105.), px(55.))), None);
++        assert_eq!(CompassTarget::Tab.placement(), None);
++        assert_eq!(CompassTarget::Left.placement(), Some(Placement::Left));
++        // Too small a group: no compass.
++        assert!(!compass_fits(Bounds::new(point(px(0.), px(0.)), gpui::size(px(120.), px(300.)))));
++    }
+ 
+     #[test]
+     fn drop_placeholder_bounds_cover_each_target_placement() {
+diff -ruN -x Cargo.lock -x ._* -x rust-toolchain.toml -x target gpui-base-0.9.1/src/dock/mod.rs /Volumes/Extreme SSD/workspace/keleuo/vendor/gpui-base/src/dock/mod.rs
+--- a/src/dock/mod.rs	2006-07-23 21:21:28
++++ b/src/dock/mod.rs	2026-11-14 07:07:25
+@@ -181,7 +181,7 @@
+ 
+ pub use dock_area::{DockArea, DockAreaRenderer, DockContext, DockEvent};
+ pub use dock_placement::{Dock, DockSizing};
+-pub use drag::{AnyDrag, DragPanel, DropIndicator, DropPlaceholderBounds, DropTarget};
++pub use drag::{AnyDrag, Compass, CompassTarget, DragPanel, DropIndicator, DropPlaceholderBounds, DropTarget};
+ // `split_placement_at` stays internal for the same reason: where a drop lands
+ // is base's decision, and a renderer is told the result through
+ // `TabGroupContext::drop_indicator`.
+@@ -198,5 +198,6 @@
+ /// could name the trait its parameter requires.
+ pub use state_convert::{PanelBuilder, PanelSource};
+ pub use tab_group::{
++    pin_panels,
+     TabGroup, TabGroupConstraints, TabGroupContext, TabGroupEvent, TabGroupRenderer,
+ };
+diff -ruN -x Cargo.lock -x ._* -x rust-toolchain.toml -x target gpui-base-0.9.1/src/dock/tab_group.rs /Volumes/Extreme SSD/workspace/keleuo/vendor/gpui-base/src/dock/tab_group.rs
+--- a/src/dock/tab_group.rs	2006-07-23 21:21:28
++++ b/src/dock/tab_group.rs	2026-11-14 07:07:25
+@@ -6,7 +6,7 @@
+ use gpui::{
+     AnyElement, AnyView, App, Bounds, Context, Div, DragMoveEvent, Empty, EventEmitter,
+     FocusHandle, Focusable, InteractiveElement as _, IntoElement, ParentElement as _, Pixels,
+-    Render, Stateful, Styled as _, WeakEntity, Window, div, prelude::FluentBuilder as _, px,
++    Point, Render, Stateful, Styled as _, WeakEntity, Window, div, prelude::FluentBuilder as _, px,
+ };
+ 
+ use crate::Placement;
+@@ -14,8 +14,8 @@
+ use super::{
+     active::ActiveTracker,
+     drag::{
+-        AnyDrag, DragPanel, DropIndicator, DropPlaceholderBounds, DropTarget, ITEM_DRAG_SESSION_ID,
+-        split_placement_at,
++        AnyDrag, Compass, DragPanel, DropIndicator, DropPlaceholderBounds, DropTarget, ITEM_DRAG_SESSION_ID,
++        compass_fits, compass_target_at, split_placement_at,
+     },
+     layout::{InsertTarget, NodeId, PanelId},
+     panel::PanelView,
+@@ -50,6 +50,17 @@
+     ZoomOut,
+ }
+ 
++thread_local! {
++    static PINNED: std::cell::RefCell<Vec<&'static str>> = const { std::cell::RefCell::new(Vec::new()) };
++}
++
++/// Pin the panels with these names (their `panel_name`): a group holding one
++/// takes no drops (nothing docks into it or splits it) and is not dragged.
++/// An app's fixed centre, say. Replaces any earlier list.
++pub fn pin_panels(names: &[&'static str]) {
++    PINNED.with(|p| *p.borrow_mut() = names.to_vec());
++}
++
+ /// Everything the container knows about a group's place in the dock.
+ ///
+ /// Pushed as one value rather than one setter per fact. These are read
+@@ -155,6 +166,8 @@
+     focus_handle: FocusHandle,
+     active: ActiveTracker,
+     drop_indicator: Option<DropIndicator>,
++    /// The docking compass, while a panel is dragged over a group large enough for it.
++    compass: Option<Compass>,
+     renderer: Rc<dyn TabGroupRenderer>,
+ }
+ 
+@@ -174,6 +187,7 @@
+             focus_handle: cx.focus_handle(),
+             active: ActiveTracker::default(),
+             drop_indicator: None,
++            compass: None,
+             renderer: Rc::new(BareTabGroup),
+         }
+     }
+@@ -281,7 +295,7 @@
+             constraints: self.constraints,
+             active_panel_closable: self.is_closable(cx),
+             draggable: self.draggable(cx),
+-            droppable: self.droppable(),
++            droppable: self.droppable(cx),
+             // A stale indicator would otherwise outlive a drag that was
+             // cancelled while hovering this group.
+             drop_indicator: cx
+@@ -452,13 +466,22 @@
+     }
+ 
+     fn draggable(&self, cx: &App) -> bool {
+-        !self.is_locked() && !self.is_last_panel(cx)
++        !self.is_locked() && !self.is_last_panel(cx) && !self.holds_pinned(cx)
+     }
+ 
+-    fn droppable(&self) -> bool {
+-        !self.is_locked()
++    fn droppable(&self, cx: &App) -> bool {
++        !self.is_locked() && !self.holds_pinned(cx)
+     }
+ 
++    /// Whether a panel of this group is pinned (see [`pin_panels`]): the
++    /// group then stays as it is.
++    fn holds_pinned(&self, cx: &App) -> bool {
++        PINNED.with(|names| {
++            let names = names.borrow();
++            !names.is_empty() && self.panels.iter().any(|p| names.contains(&p.panel_name(cx)))
++        })
++    }
++
+     fn focus_active_panel(&self, window: &mut Window, cx: &mut Context<Self>) {
+         if let Some(panel) = self.active_panel(cx) {
+             panel.focus_handle(cx).focus(window, cx);
+@@ -522,10 +545,11 @@
+         let bounds = drag.bounds;
+         if !bounds.contains(&drag.event.position) {
+             self.clear_drop_indicator(cx);
++            self.set_compass(None, cx);
+             return;
+         }
+ 
+-        let placement = split_placement_at(bounds, drag.event.position);
++        let Some(placement) = self.placement_at(bounds, drag.event.position, cx) else { return };
+         let dragged = drag.drag(cx);
+         // The placeholder flies in from wherever the preview currently is.
+         let source = DropPlaceholderBounds::new(
+@@ -549,15 +573,47 @@
+         let bounds = drag.bounds;
+         if !bounds.contains(&drag.event.position) {
+             self.clear_drop_indicator(cx);
++            self.set_compass(None, cx);
+             return;
+         }
+ 
+-        let placement = split_placement_at(bounds, drag.event.position);
++        let Some(placement) = self.placement_at(bounds, drag.event.position, cx) else { return };
+         let source = DropPlaceholderBounds::for_placement(bounds, placement);
+ 
+         self.sync_drop_placeholder(bounds, placement, ITEM_DRAG_SESSION_ID, source, cx);
+     }
+ 
++    /// Where a drag at `position` would land: on a group large enough for the compass, the
++    /// target under the pointer (`None` when it is on none: then nothing would happen, and
++    /// the preview goes); on a smaller one, the zone it is in (`split_placement_at`).
++    fn placement_at(
++        &mut self,
++        bounds: Bounds<Pixels>,
++        position: Point<Pixels>,
++        cx: &mut Context<Self>,
++    ) -> Option<Option<Placement>> {
++        if !compass_fits(bounds) {
++            self.set_compass(None, cx);
++            return Some(split_placement_at(bounds, position));
++        }
++        let hovered = compass_target_at(bounds, position);
++        self.set_compass(Some(Compass { bounds, hovered }), cx);
++        match hovered {
++            Some(target) => Some(target.placement()),
++            None => {
++                self.clear_drop_indicator(cx);
++                None
++            }
++        }
++    }
++
++    fn set_compass(&mut self, compass: Option<Compass>, cx: &mut Context<Self>) {
++        if self.compass != compass {
++            self.compass = compass;
++            cx.notify();
++        }
++    }
++
+     fn sync_drop_placeholder(
+         &mut self,
+         bounds: Bounds<Pixels>,
+@@ -631,6 +687,12 @@
+         cx: &mut Context<Self>,
+     ) {
+         let indicator = self.drop_indicator.take();
++        // Over the compass but on none of its targets: nothing happens.
++        if ix.is_none() && indicator.is_none() && self.compass.take().is_some() {
++            cx.notify();
++            return;
++        }
++        self.compass = None;
+         let placement = match ix {
+             Some(_) => None,
+             None => indicator.and_then(|indicator| indicator.placement()),
+@@ -687,6 +749,7 @@
+         let focus_handle = self.focus_handle(cx);
+         let droppable = context.droppable;
+         let indicator = context.drop_indicator;
++        let compass = self.compass.filter(|_| cx.has_active_drag());
+ 
+         renderer
+             .frame(&context, window, cx)
+@@ -734,6 +797,12 @@
+                             }))
+                             .on_drag_move(cx.listener(Self::on_item_drag_move))
+                             .on_drop(cx.listener(|this, item: &AnyDrag, _, cx| {
++                                // Over the compass but on none of its targets: nothing happens.
++                                if this.drop_indicator.is_none() && this.compass.take().is_some() {
++                                    cx.notify();
++                                    return;
++                                }
++                                this.compass = None;
+                                 let placement = this
+                                     .drop_indicator
+                                     .and_then(|indicator| indicator.placement());
+@@ -751,6 +820,11 @@
+                     })
+                     .when_some(indicator, |this, indicator| {
+                         this.children(renderer.render_drop_indicator(indicator, window, cx))
++                    })
++                    // The compass over all, while a drag is on (one cancelled over the group
++                    // leaves none behind).
++                    .when_some(compass, |this, compass| {
++                        this.child(renderer.render_compass(compass, window, cx))
+                     }),
+             )
+     }
+@@ -959,6 +1033,17 @@
+         cx: &mut App,
+     ) -> Option<AnyElement> {
+         None
++    }
++
++    /// The docking compass, in neutral greys unless a skin draws it in its own colours.
++    fn render_compass(&self, compass: Compass, window: &mut Window, cx: &mut App) -> AnyElement {
++        let _ = (window, cx);
++        compass.element(
++            gpui::hsla(0., 0., 0.98, 1.),
++            gpui::hsla(0., 0., 0.75, 1.),
++            gpui::hsla(0., 0., 0.45, 1.),
++            gpui::hsla(0.62, 0.6, 0.55, 1.),
++        )
+     }
+ }
+ 
+diff -ruN -x Cargo.lock -x ._* -x rust-toolchain.toml -x target gpui-base-0.9.1/src/input/base/element.rs /Volumes/Extreme SSD/workspace/keleuo/vendor/gpui-base/src/input/base/element.rs
+--- a/src/input/base/element.rs	2006-07-23 21:21:28
++++ b/src/input/base/element.rs	2026-11-14 07:07:24
+@@ -119,6 +119,53 @@
+     combined
+ }
+ 
++/// The dots of a [`RangeDecorationStyle::Dots`] mark: their size and the gap between them.
++const DOT: f32 = 2.5;
++const DOT_GAP: f32 = 1.5;
++
++/// Where the dots under `left..right` go (their centres): as many as fit, at least two,
++/// the row centred under the text.
++fn dot_centers(left: Pixels, right: Pixels) -> Vec<Pixels> {
++    let pitch = DOT + DOT_GAP;
++    let width = f32::from(right - left).max(0.);
++    let count = (((width + DOT_GAP) / pitch).floor() as usize).max(2);
++    let row = count as f32 * pitch - DOT_GAP;
++    let start = f32::from(left) + (width - row) / 2. + DOT / 2.;
++    (0..count).map(|i| px(start + i as f32 * pitch)).collect()
++}
++
++/// One dot, a small octagon (round at its size), centred on `center`.
++fn dot_path(center: Point<Pixels>) -> Option<Path<Pixels>> {
++    let r = DOT / 2.;
++    let mut builder = gpui::PathBuilder::fill();
++    for i in 0..8 {
++        let angle = std::f32::consts::TAU * (i as f32 + 0.5) / 8.;
++        let p = center + point(px(r * angle.cos()), px(r * angle.sin()));
++        if i == 0 {
++            builder.move_to(p);
++        } else {
++            builder.line_to(p);
++        }
++    }
++    builder.close();
++    builder.build().ok()
++}
++
++#[cfg(test)]
++mod dot_tests {
++    use super::*;
++
++    #[test]
++    fn dots_fill_the_range_centred_and_never_fewer_than_two() {
++        let dots = dot_centers(px(10.), px(50.));
++        assert_eq!(dots.len(), 10);
++        let (first, last) = (f32::from(dots[0]), f32::from(*dots.last().unwrap()));
++        // Centred: as much room before the first dot as after the last.
++        assert!(((first - DOT / 2. - 10.) - (50. - last - DOT / 2.)).abs() < 0.01);
++        assert_eq!(dot_centers(px(0.), px(1.)).len(), 2, "a one-letter word still gets dots");
++    }
++}
++
+ fn compose_decorations(
+     mut styles: Vec<(Range<usize>, HighlightStyle)>,
+     decorations: impl IntoIterator<Item = (Range<usize>, HighlightStyle)>,
+@@ -1191,6 +1238,24 @@
+                         Self::layout_match_range(decoration.range().clone(), last_layout, bounds)
+                     {
+                         fills.push((path, color));
++                    }
++                }
++                RangeDecorationStyle::Dots => {
++                    let color = decoration.color().unwrap_or(state.editor_style.foreground);
++                    let Some(corners) = Self::layout_range_corners(decoration.range(), last_layout)
++                    else {
++                        continue;
++                    };
++                    let origin = bounds.origin + point(last_layout.line_number_width, px(0.));
++                    for row in &corners {
++                        let (left, right) = (row.bottom_left.x, row.bottom_right.x);
++                        // Just under the baseline, in the line's leading.
++                        let y = row.bottom_left.y - (last_layout.line_height * 0.11).max(px(2.));
++                        for center in dot_centers(left, right) {
++                            if let Some(path) = dot_path(origin + point(center, y)) {
++                                fills.push((path, color));
++                            }
++                        }
+                     }
+                 }
+                 RangeDecorationStyle::Frame => {
+diff -ruN -x Cargo.lock -x ._* -x rust-toolchain.toml -x target gpui-base-0.9.1/src/input/base/kind.rs /Volumes/Extreme SSD/workspace/keleuo/vendor/gpui-base/src/input/base/kind.rs
+--- a/src/input/base/kind.rs	2006-07-23 21:21:28
++++ b/src/input/base/kind.rs	2026-11-14 07:07:24
+@@ -366,8 +366,42 @@
+ impl InputModeKind for TextareaMode {
+     const MULTI_LINE: bool = true;
+ 
+-    /// Ordinary multi-line text needs nothing beyond the shared engine.
+-    type Extras = ();
++    type Extras = TextareaExtras;
++
++    fn reset_annotations(state: &mut InputBaseState<Self>) {
++        state.extras.decorations.clear();
++        state.extras.range_decorations.clear();
++    }
++
++    fn adjust_annotations(
++        state: &mut InputBaseState<Self>,
++        range: &std::ops::Range<usize>,
++        new_len: usize,
++    ) {
++        state.extras.decorations.adjust_for_edit(range, new_len);
++        state
++            .extras
++            .range_decorations
++            .adjust_for_edit(range, new_len);
++    }
++}
++
++/// What ordinary multi-line text adds on top of the shared engine: text
++/// decorations, created with `create_decorations_collection`.
++#[derive(Default)]
++pub struct TextareaExtras {
++    pub(crate) decorations: DecorationCollections,
++    pub(crate) range_decorations: DecorationCollections<RangeDecoration>,
++}
++
++impl InputExtras for TextareaExtras {
++    fn decoration_layers(&self) -> Vec<&[TextDecoration]> {
++        self.decorations.iter().collect()
++    }
++
++    fn range_decorations(&self, ranges: &[std::ops::Range<usize>]) -> Vec<&RangeDecoration> {
++        self.range_decorations.intersecting(ranges)
++    }
+ }
+ // `EditorMode`'s implementation lives with the editor code, next to the
+ // language features it dispatches to.
+diff -ruN -x Cargo.lock -x ._* -x rust-toolchain.toml -x target gpui-base-0.9.1/src/input/base/state.rs /Volumes/Extreme SSD/workspace/keleuo/vendor/gpui-base/src/input/base/state.rs
+--- a/src/input/base/state.rs	2006-07-23 21:21:28
++++ b/src/input/base/state.rs	2026-11-14 07:07:24
+@@ -953,7 +953,8 @@
+             }),
+             // Observe the blink cursor to repaint the view when it changes.
+             cx.observe(&blink_cursor, |_, _, cx| cx.notify()),
+-            // Blink the cursor when the window is active, pause when it's not.
++            // Blink the cursor when the window is active, stop when it's not: an inactive
++            // window shows no cursor, and each blink would redraw it twice a second for nothing.
+             cx.observe_window_activation(window, |input, window, cx| {
+                 if window.is_window_active() {
+                     let focus_handle = input.focus_handle.clone();
+@@ -962,6 +963,8 @@
+                             blink_cursor.start(cx);
+                         });
+                     }
++                } else {
++                    input.blink_cursor.update(cx, |blink_cursor, cx| blink_cursor.stop(cx));
+                 }
+             }),
+             cx.on_focus(&focus_handle, window, Self::on_focus),
+@@ -1731,9 +1734,12 @@
+     /// Focus the input field.
+     pub fn focus(&self, window: &mut Window, cx: &mut Context<Self>) {
+         self.focus_handle.focus(window, cx);
+-        self.blink_cursor.update(cx, |cursor, cx| {
+-            cursor.start(cx);
+-        });
++        // In a window in the background it starts blinking when the window becomes active.
++        if window.is_window_active() {
++            self.blink_cursor.update(cx, |cursor, cx| {
++                cursor.start(cx);
++            });
++        }
+     }
+ 
+     /// Refresh the input, so the next render re-runs syntax highlighting and
+@@ -4002,10 +4008,14 @@
+             && window.is_window_active()
+     }
+ 
+-    fn on_focus(&mut self, _: &mut Window, cx: &mut Context<Self>) {
+-        self.blink_cursor.update(cx, |cursor, cx| {
+-            cursor.start(cx);
+-        });
++    fn on_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
++        // Focus can move while the window is in the background: it starts blinking when the
++        // window becomes active.
++        if window.is_window_active() {
++            self.blink_cursor.update(cx, |cursor, cx| {
++                cursor.start(cx);
++            });
++        }
+         cx.emit(InputEvent::Focus);
+     }
+ 
+diff -ruN -x Cargo.lock -x ._* -x rust-toolchain.toml -x target gpui-base-0.9.1/src/input/editor/decorations.rs /Volumes/Extreme SSD/workspace/keleuo/vendor/gpui-base/src/input/editor/decorations.rs
+--- a/src/input/editor/decorations.rs	2006-07-23 21:21:28
++++ b/src/input/editor/decorations.rs	2026-11-14 07:13:11
+@@ -1,4 +1,4 @@
+-use crate::input::EditorMode;
++use crate::input::{EditorMode, InputModeKind, TextareaMode};
+ use std::{collections::BTreeMap, ops::Range};
+ 
+ use gpui::{App, Context, HighlightStyle, Hsla, Pixels, WeakEntity};
+@@ -16,6 +16,9 @@
+     /// Draw a continuous one-pixel frame around the visual range.
+     #[default]
+     Frame,
++    /// Wundur patch: a row of small round dots under the text, as macOS marks a misspelled
++    /// word.
++    Dots,
+ }
+ 
+ /// A geometric decoration over a UTF-8 byte range.
+@@ -219,13 +222,28 @@
+ ///
+ /// This is the GPUI Component counterpart of Monaco's
+ /// [`IEditorDecorationsCollection`](https://microsoft.github.io/monaco-editor/typedoc/interfaces/editor_editor_api.editor.IEditorDecorationsCollection.html).
+-#[derive(Clone, Debug)]
+-pub struct TextDecorationCollection {
+-    state: WeakEntity<InputBaseState<EditorMode>>,
++pub struct TextDecorationCollection<M: InputModeKind = EditorMode> {
++    state: WeakEntity<InputBaseState<M>>,
+     id: DecorationCollectionId,
+ }
+ 
+-impl TextDecorationCollection {
++impl<M: InputModeKind> Clone for TextDecorationCollection<M> {
++    fn clone(&self) -> Self {
++        Self { state: self.state.clone(), id: self.id }
++    }
++}
++
++impl<M: InputModeKind> std::fmt::Debug for TextDecorationCollection<M> {
++    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        f.debug_struct("TextDecorationCollection").field("state", &self.state).field("id", &self.id).finish()
++    }
++}
++
++// Wundur patch: a code editor and ordinary multi-line text (the message box) can both
++// hold TextDecorationCollections.
++macro_rules! textdecorationcollection_api {
++    ($mode:ty) => {
++impl TextDecorationCollection<$mode> {
+     /// Replace all decorations in this collection.
+     ///
+     /// This corresponds to Monaco's
+@@ -280,18 +298,70 @@
+     }
+ }
+ 
++impl InputBaseState<$mode> {
++    /// Create an independently managed collection of text decorations.
++    ///
++    /// This follows Monaco's
++    /// [`createDecorationsCollection`](https://microsoft.github.io/monaco-editor/typedoc/interfaces/editor_editor_api.editor.ICodeEditor.html#createDecorationsCollection)
++    /// ownership model. Ranges use UTF-8 byte offsets into [`Self::value`].
++    ///
++    /// Decoration ranges follow text edits and do not need to be set again
++    /// after each change. Insertions at a range boundary do not expand the
++    /// range, matching Monaco's
++    /// [`NeverGrowsWhenTypingAtEdges`](https://microsoft.github.io/monaco-editor/typedoc/enums/editor_editor_api.editor.TrackedRangeStickiness.html#NeverGrowsWhenTypingAtEdges)
++    /// behavior. Decorations are not rendered while the input is masked.
++    /// Collections live until their [`InputBaseState`] is dropped.
++    ///
++    /// Collections are layered in insertion order; the first collection wins
++    /// when overlapping decorations set the same [`HighlightStyle`] property.
++    /// Callers should avoid conflicting overlaps within one collection.
++    pub fn create_decorations_collection(
++        &mut self,
++        decorations: Vec<TextDecoration>,
++        cx: &mut Context<Self>,
++    ) -> TextDecorationCollection<$mode> {
++        let decorations = normalize(&self.text, decorations);
++        let id = self.extras.decorations.create(decorations);
++        cx.notify();
++        TextDecorationCollection {
++            state: cx.entity().downgrade(),
++            id,
++        }
++    }
++
++}
++    };
++}
++textdecorationcollection_api!(EditorMode);
++textdecorationcollection_api!(TextareaMode);
++
+ /// An independently managed collection of geometric range decorations.
+ ///
+ /// Clones address the same collection. Dropping a handle does not clear it; use
+ /// [`Self::clear`] to empty it or [`Self::dispose`] to release it permanently.
+ /// Operations on a disposed collection or a dropped editor are harmless no-ops.
+-#[derive(Clone, Debug)]
+-pub struct RangeDecorationCollection {
+-    state: WeakEntity<InputBaseState<EditorMode>>,
++pub struct RangeDecorationCollection<M: InputModeKind = EditorMode> {
++    state: WeakEntity<InputBaseState<M>>,
+     id: DecorationCollectionId,
+ }
+ 
+-impl RangeDecorationCollection {
++impl<M: InputModeKind> Clone for RangeDecorationCollection<M> {
++    fn clone(&self) -> Self {
++        Self { state: self.state.clone(), id: self.id }
++    }
++}
++
++impl<M: InputModeKind> std::fmt::Debug for RangeDecorationCollection<M> {
++    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        f.debug_struct("RangeDecorationCollection").field("state", &self.state).field("id", &self.id).finish()
++    }
++}
++
++// Wundur patch: a code editor and ordinary multi-line text (the message box) can both
++// hold RangeDecorationCollections.
++macro_rules! rangedecorationcollection_api {
++    ($mode:ty) => {
++impl RangeDecorationCollection<$mode> {
+     /// Replace only this owner's decorations, clipping ranges to UTF-8 boundaries.
+     pub fn set(&self, decorations: Vec<RangeDecoration>, cx: &mut App) {
+         let _ = self.state.update(cx, |state, cx| {
+@@ -349,6 +419,42 @@
+     }
+ }
+ 
++impl InputBaseState<$mode> {
++    /// Create an independently owned collection of geometric range decorations.
++    ///
++    /// Ranges use UTF-8 byte offsets and the same tracking as text decorations:
++    /// insertion at either edge does not expand the range, insertion inside does,
++    /// replacement clips overlapping anchors, and deletion removes empty ranges.
++    /// Undo, redo, whole-document replacement and formatting apply these same edit
++    /// transforms; decorations themselves are not undo history, so deleted ranges
++    /// are not resurrected by undo. Folding changes projection, not stored ranges.
++    ///
++    /// Fills paint behind frames; within each style, later collections/items paint
++    /// over earlier ones. Neither affects text layout, hit testing or focus. The
++    /// default color is the editor foreground (12% opacity for fills).
++    /// Collections live until explicitly disposed or the editor is dropped.
++    pub fn create_range_decorations_collection(
++        &mut self,
++        decorations: Vec<RangeDecoration>,
++        cx: &mut Context<Self>,
++    ) -> RangeDecorationCollection<$mode> {
++        let id = self
++            .extras
++            .range_decorations
++            .create(normalize(&self.text, decorations));
++        cx.notify();
++        RangeDecorationCollection {
++            state: cx.entity().downgrade(),
++            id,
++        }
++    }
++
++}
++    };
++}
++rangedecorationcollection_api!(EditorMode);
++rangedecorationcollection_api!(TextareaMode);
++
+ /// An independently managed collection of [`GutterDecoration`] values.
+ ///
+ /// Each clone refers to the same collection. Dropping a handle does not clear it.
+@@ -876,65 +982,6 @@
+ }
+ 
+ impl InputBaseState<EditorMode> {
+-    /// Create an independently owned collection of geometric range decorations.
+-    ///
+-    /// Ranges use UTF-8 byte offsets and the same tracking as text decorations:
+-    /// insertion at either edge does not expand the range, insertion inside does,
+-    /// replacement clips overlapping anchors, and deletion removes empty ranges.
+-    /// Undo, redo, whole-document replacement and formatting apply these same edit
+-    /// transforms; decorations themselves are not undo history, so deleted ranges
+-    /// are not resurrected by undo. Folding changes projection, not stored ranges.
+-    ///
+-    /// Fills paint behind frames; within each style, later collections/items paint
+-    /// over earlier ones. Neither affects text layout, hit testing or focus. The
+-    /// default color is the editor foreground (12% opacity for fills).
+-    /// Collections live until explicitly disposed or the editor is dropped.
+-    pub fn create_range_decorations_collection(
+-        &mut self,
+-        decorations: Vec<RangeDecoration>,
+-        cx: &mut Context<Self>,
+-    ) -> RangeDecorationCollection {
+-        let id = self
+-            .extras
+-            .range_decorations
+-            .create(normalize(&self.text, decorations));
+-        cx.notify();
+-        RangeDecorationCollection {
+-            state: cx.entity().downgrade(),
+-            id,
+-        }
+-    }
+-
+-    /// Create an independently managed collection of text decorations.
+-    ///
+-    /// This follows Monaco's
+-    /// [`createDecorationsCollection`](https://microsoft.github.io/monaco-editor/typedoc/interfaces/editor_editor_api.editor.ICodeEditor.html#createDecorationsCollection)
+-    /// ownership model. Ranges use UTF-8 byte offsets into [`Self::value`].
+-    ///
+-    /// Decoration ranges follow text edits and do not need to be set again
+-    /// after each change. Insertions at a range boundary do not expand the
+-    /// range, matching Monaco's
+-    /// [`NeverGrowsWhenTypingAtEdges`](https://microsoft.github.io/monaco-editor/typedoc/enums/editor_editor_api.editor.TrackedRangeStickiness.html#NeverGrowsWhenTypingAtEdges)
+-    /// behavior. Decorations are not rendered while the input is masked.
+-    /// Collections live until their [`InputBaseState`] is dropped.
+-    ///
+-    /// Collections are layered in insertion order; the first collection wins
+-    /// when overlapping decorations set the same [`HighlightStyle`] property.
+-    /// Callers should avoid conflicting overlaps within one collection.
+-    pub fn create_decorations_collection(
+-        &mut self,
+-        decorations: Vec<TextDecoration>,
+-        cx: &mut Context<Self>,
+-    ) -> TextDecorationCollection {
+-        let decorations = normalize(&self.text, decorations);
+-        let id = self.extras.decorations.create(decorations);
+-        cx.notify();
+-        TextDecorationCollection {
+-            state: cx.entity().downgrade(),
+-            id,
+-        }
+-    }
+-
+     /// Create a collection of gutter marks, such as added, modified, and deleted
+     /// lines in a version-control diff.
+     ///
+diff -ruN -x Cargo.lock -x ._* -x rust-toolchain.toml -x target gpui-base-0.9.1/src/input/mod.rs /Volumes/Extreme SSD/workspace/keleuo/vendor/gpui-base/src/input/mod.rs
+--- a/src/input/mod.rs	2006-07-23 21:21:28
++++ b/src/input/mod.rs	2026-11-14 07:07:24
+@@ -106,7 +106,8 @@
+ pub use indent::TabSize;
+ pub use input::{Input, InputState};
+ pub use kind::{
+-    EditorExtras, EditorMode, InputExtras, InputMode, InputModeKind, MultiLineMode, TextareaMode,
++    EditorExtras, EditorMode, InputExtras, InputMode, InputModeKind, MultiLineMode, TextareaExtras,
++    TextareaMode,
+ };
+ pub(crate) use language::EditorLanguage;
+ pub use language::{LanguageProvider, set_language_config, set_language_provider};
+diff -ruN -x Cargo.lock -x ._* -x rust-toolchain.toml -x target gpui-base-0.9.1/src/resizable/resize_handle.rs /Volumes/Extreme SSD/workspace/keleuo/vendor/gpui-base/src/resizable/resize_handle.rs
+--- a/src/resizable/resize_handle.rs	2006-07-23 21:21:28
++++ b/src/resizable/resize_handle.rs	2026-11-14 07:07:25
+@@ -432,16 +432,19 @@
+ 
+         window.with_element_state(id.unwrap(), |state: Option<SharedHandleState>, window| {
+             let state = state.unwrap_or_default();
++            // A change of state redraws the view the handle is in, not the whole window (which
++            // would paint every cached panel again).
++            let view = window.current_view();
+ 
+             window.on_mouse_event({
+                 let state = state.clone();
+                 let hitbox = hitbox.clone();
+-                move |ev: &MouseDownEvent, phase, window, _| {
++                move |ev: &MouseDownEvent, phase, window, cx| {
+                     if phase.bubble()
+                         && hitbox.is_hovered_at(ev.position, window)
+                         && state.set(ResizeHandleState::Pressed)
+                     {
+-                        window.refresh();
++                        cx.notify(view);
+                     }
+                 }
+             });
+@@ -449,7 +452,7 @@
+             window.on_mouse_event({
+                 let state = state.clone();
+                 let hitbox = hitbox.clone();
+-                move |ev: &MouseMoveEvent, phase, window, _| {
++                move |ev: &MouseMoveEvent, phase, window, cx| {
+                     if !phase.bubble() {
+                         return;
+                     }
+@@ -466,7 +469,7 @@
+                         _ => ResizeHandleState::Idle,
+                     };
+                     if state.set(next) {
+-                        window.refresh();
++                        cx.notify(view);
+                     }
+                 }
+             });
+@@ -474,7 +477,7 @@
+             window.on_mouse_event({
+                 let state = state.clone();
+                 let hitbox = hitbox.clone();
+-                move |ev: &MouseUpEvent, _, window, _| {
++                move |ev: &MouseUpEvent, _, window, cx| {
+                     if !state.get().is_active() {
+                         return;
+                     }
+@@ -488,7 +491,7 @@
+                         ResizeHandleState::Idle
+                     };
+                     if state.set(next) {
+-                        window.refresh();
++                        cx.notify(view);
+                     }
+                 }
+             });
+diff -ruN -x Cargo.lock -x ._* -x rust-toolchain.toml -x target gpui-base-0.9.1/src/text/node.rs /Volumes/Extreme SSD/workspace/keleuo/vendor/gpui-base/src/text/node.rs
+--- a/src/text/node.rs	2006-07-23 21:21:28
++++ b/src/text/node.rs	2026-11-14 07:07:25
+@@ -3455,6 +3455,9 @@
+ 
+ /// `block` with `gap` below it. The box only exists to hold the padding,
+ /// so a block with no gap below it is returned as is.
++/// Wundur patch: the space between the items of a tight list, as a share of the paragraph gap.
++const LIST_ITEM_GAP: f32 = 0.375;
++
+ fn gapped(block: AnyElement, gap: Rems) -> AnyElement {
+     if gap.is_zero() {
+         block
+@@ -4035,7 +4038,9 @@
+                                     ));
+                                 }
+                                 BlockNode::List { .. } => {
+-                                    items.push(div().ml(indent).child(child.render_block(
++                                    // Wundur patch: the gap between items above a nested list too.
++                                    let gap = node_cx.style.paragraph_gap().0 * LIST_ITEM_GAP;
++                                    items.push(div().ml(indent).pt(rems(gap)).child(child.render_block(
+                                         NodeRenderOptions {
+                                             depth: options.depth + 1,
+                                             todo: checked.is_some(),
+@@ -4625,8 +4630,16 @@
+                     let mut item_index = 0;
+                     for (ix, item) in children.into_iter().enumerate() {
+                         let is_item = item.is_list_item();
+-
+-                        items.push(Self::render_list_item(
++                        // Wundur patch: space between list items, a share of the paragraph
++                        // gap (the whole gap in a loose list, as CommonMark spaces those like
++                        // paragraphs), so items do not run together as one block of lines.
++                        let item_gap = match item {
++                            BlockNode::ListItem { spread: true, .. } => {
++                                node_cx.style.paragraph_gap()
++                            }
++                            _ => rems(node_cx.style.paragraph_gap().0 * LIST_ITEM_GAP),
++                        };
++                        let rendered = Self::render_list_item(
+                             item,
+                             item_index,
+                             NodeRenderOptions {
+@@ -4638,7 +4651,12 @@
+                             node_cx,
+                             window,
+                             cx,
+-                        ));
++                        );
++                        items.push(if item_index > 0 {
++                            div().pt(item_gap).child(rendered).into_any_element()
++                        } else {
++                            rendered
++                        });
+ 
+                         if is_item {
+                             item_index += 1;
+diff -ruN -x Cargo.lock -x ._* -x rust-toolchain.toml -x target gpui-base-0.9.1/src/text/range_highlight.rs /Volumes/Extreme SSD/workspace/keleuo/vendor/gpui-base/src/text/range_highlight.rs
+--- a/src/text/range_highlight.rs	2006-07-23 21:21:28
++++ b/src/text/range_highlight.rs	2026-11-14 07:07:25
+@@ -171,6 +171,36 @@
+ 
+ impl Eq for RenderedText {}
+ 
++/// Where `query` occurs in `text`, ignoring case: byte ranges of `text`.
++pub(super) fn occurrences(text: &str, query: &str) -> Vec<Range<usize>> {
++    let query = query.trim();
++    if query.is_empty() || text.is_empty() {
++        return Vec::new();
++    }
++    // Lowercased side by side, char by char, so the ranges stay those of
++    // `text` (a lowercase form can differ in length).
++    let needle: Vec<char> = query.chars().flat_map(char::to_lowercase).collect();
++    let hay: Vec<(usize, usize, char)> = text
++        .char_indices()
++        .flat_map(|(i, c)| c.to_lowercase().map(move |l| (i, i + c.len_utf8(), l)))
++        .collect();
++    let mut out = Vec::new();
++    let mut i = 0;
++    while i + needle.len() <= hay.len() {
++        if hay[i..i + needle.len()]
++            .iter()
++            .map(|(_, _, c)| *c)
++            .eq(needle.iter().copied())
++        {
++            out.push(hay[i].0..hay[i + needle.len() - 1].1);
++            i += needle.len();
++        } else {
++            i += 1;
++        }
++    }
++    out
++}
++
+ /// A background painted behind one range of a [`RenderedText`].
+ ///
+ /// It is painted under the text and under the selection, and never changes
+diff -ruN -x Cargo.lock -x ._* -x rust-toolchain.toml -x target gpui-base-0.9.1/src/text/state.rs /Volumes/Extreme SSD/workspace/keleuo/vendor/gpui-base/src/text/state.rs
+--- a/src/text/state.rs	2006-07-23 21:21:28
++++ b/src/text/state.rs	2026-11-14 07:07:25
+@@ -44,6 +44,9 @@
+ // Preserve exact first-layout height for small documents while bounding the
+ // amount of source parsed synchronously on the UI thread.
+ const MAX_SYNC_FULL_REPLACE_BYTES: usize = 4 * 1024;
++/// The most text an append parses on the UI thread: the document's last block,
++/// which is parsed again with it, and the appended text.
++const MAX_SYNC_APPEND_BYTES: usize = 8 * 1024;
+ // Repaint a streamed fade at about 30 fps, not at the display refresh rate.
+ const STREAM_FADE_TICK: Duration = Duration::from_millis(33);
+ 
+@@ -160,12 +163,17 @@
+     revision: usize,
+     /// The revision of the update `parsed_content` was committed from.
+     committed_revision: usize,
++    /// Inside [`Self::set_element_text`]: the text arrives as the element draws.
++    in_element: bool,
+     /// The revision of the last update that replaced the text rather than
+     /// appending to it.
+     full_update_revision: usize,
+     /// The rendered text of `parsed_content`, built when first read.
+     rendered_index: Arc<OnceLock<RenderedIndex>>,
+     range_highlights: Option<Arc<RangeHighlightFrame>>,
++    /// The find marks the range highlights were last made from, and the
++    /// revision of the text they were found in.
++    find_marks: Option<(super::FindMarks, usize)>,
+     pub(super) pending_reveal: Option<PendingReveal>,
+     pub(super) selection_revision: usize,
+     compatible_layout_update: bool,
+@@ -260,9 +268,11 @@
+             element_text: None,
+             revision: 0,
+             committed_revision: 0,
++            in_element: false,
+             full_update_revision: 0,
+             rendered_index: Arc::default(),
+             range_highlights: None,
++            find_marks: None,
+             pending_reveal: None,
+             selection_revision: 0,
+             compatible_layout_update: false,
+@@ -370,7 +380,12 @@
+             return;
+         }
+         self.element_text = Some(text.clone());
++        // Called while the element draws: what is parsed now is drawn in this frame. Notifying
++        // here would mark the view for the next frame, whatever brings it, and every frame
++        // after a streamed piece would draw the view and all around it again.
++        self.in_element = true;
+         self.set_text(text, cx);
++        self.in_element = false;
+     }
+ 
+     /// Append partial text content to the existing text.
+@@ -553,6 +568,45 @@
+             markdown_extensions: self.markdown_extensions.clone(),
+         };
+ 
++        // A small append onto a document already parsed to its end: parsed here,
++        // so the frame that brought the text shows it. Handed to the background
++        // parser it shows a frame later, and that second frame redrew the whole
++        // view around it for every streamed piece. The background parser is
++        // still sent the append, to keep its own document in step; its result
++        // for this revision is dropped as already committed.
++        if append
++            && self.format == TextViewFormat::Markdown
++            && self.parsed_error.is_none()
++            && self.committed_revision + 1 == self.revision
++            && self.full_update_revision <= self.committed_revision
++        {
++            let document = &self.parsed_content.document;
++            let tail = document
++                .blocks
++                .last()
++                .and_then(|block| block.span())
++                .map_or(0, |span| document.source.len().saturating_sub(span.start));
++            if tail + text.len() <= MAX_SYNC_APPEND_BYTES
++                && let Ok(content) =
++                    parse_content(self.format, self.parsed_content.clone(), &update_options)
++            {
++                self.splice_appended_blocks(&content.document);
++                self.reconcile_range_highlights(&content.document, self.revision, true);
++                self.stream_fade.record(
++                    &self.parsed_content.document,
++                    &content.document,
++                    Instant::now(),
++                );
++                self.parsed_content = content;
++                self.compatible_layout_update = true;
++                _ = self.tx.try_send(update_options);
++                if !self.in_element {
++                    cx.notify();
++                }
++                return;
++            }
++        }
++
+         // Keep small full replacements synchronous so their first layout has
+         // the exact content height. Larger replacements use the existing
+         // background parser, bounding synchronous parser input on the UI thread.
+@@ -581,7 +635,9 @@
+             // later append extends this baseline instead of parsing the delta
+             // as a standalone document.
+             _ = self.tx.try_send(update_options);
+-            cx.notify();
++            if !self.in_element {
++                cx.notify();
++            }
+             return;
+         }
+ 
+@@ -737,6 +793,40 @@
+         );
+         cx.notify();
+         Ok(())
++    }
++
++    /// Mark `marks`' occurrences as range highlights, again only when the
++    /// marks or the parsed text changed. Called as the element lays out, so
++    /// it does not notify: the highlights paint in this same frame.
++    pub(crate) fn apply_find_marks(&mut self, marks: Option<&super::FindMarks>) {
++        let Some(marks) = marks.filter(|m| !m.query.trim().is_empty()) else {
++            if self.find_marks.take().is_some() {
++                self.range_highlights = None;
++            }
++            return;
++        };
++        if self.format != TextViewFormat::Markdown
++            || self
++                .find_marks
++                .as_ref()
++                .is_some_and(|(m, rev)| m == marks && *rev == self.committed_revision)
++        {
++            return;
++        }
++        let text = self.rendered_text();
++        let found = super::range_highlight::occurrences(text.as_str(), &marks.query);
++        let highlights = found.into_iter().enumerate().map(|(n, range)| {
++            let background = match marks.current {
++                Some((current, color)) if current == n => color,
++                _ => marks.background,
++            };
++            RangeHighlight::new(range, background)
++        });
++        self.range_highlights = RangeHighlightFrame::new(&text, highlights)
++            .ok()
++            .flatten()
++            .map(Arc::new);
++        self.find_marks = Some((marks.clone(), self.committed_revision));
+     }
+ 
+     /// Remove all range highlights.
+diff -ruN -x Cargo.lock -x ._* -x rust-toolchain.toml -x target gpui-base-0.9.1/src/text/text_view.rs /Volumes/Extreme SSD/workspace/keleuo/vendor/gpui-base/src/text/text_view.rs
+--- a/src/text/text_view.rs	2006-07-23 21:21:28
++++ b/src/text/text_view.rs	2026-11-14 07:11:47
+@@ -216,8 +216,40 @@
+     reveal_handler: Option<Rc<RevealHandlerFn>>,
+     markdown_extensions: Arc<MarkdownExtensions>,
+     motion: Option<TextViewMotion>,
++    find_marks: Option<FindMarks>,
+ }
+ 
++/// Words to mark wherever they occur in the rendered text, ignoring case, as
++/// a find bar does: every occurrence on `background`, and the `current`-th
++/// (counted from 0) on its own colour.
++#[derive(Clone, Debug, PartialEq)]
++pub struct FindMarks {
++    pub query: SharedString,
++    pub background: gpui::Hsla,
++    pub current: Option<(usize, gpui::Hsla)>,
++}
++
++thread_local! {
++    static FIND_MARKS: std::cell::RefCell<std::collections::HashMap<ElementId, FindMarks>> =
++        Default::default();
++}
++
++/// Set (or with `None` take away) the find marks of the text view with id
++/// `id`, for a wrapper that does not pass [`TextView::find_marks`] on: the
++/// view reads them as it lays out. Only a change of marks redoes the search.
++pub fn set_find_marks(id: &ElementId, marks: Option<FindMarks>) {
++    FIND_MARKS.with_borrow_mut(|all| match marks {
++        Some(marks) => {
++            if all.get(id) != Some(&marks) {
++                all.insert(id.clone(), marks);
++            }
++        }
++        None => {
++            all.remove(id);
++        }
++    });
++}
++
+ /// A plugin that can configure a [`TextView`].
+ pub trait TextViewPlugin {
+     fn setup(self, text_view: TextView) -> TextView;
+@@ -268,6 +300,7 @@
+             reveal_handler: None,
+             markdown_extensions: Arc::default(),
+             motion: None,
++            find_marks: None,
+         }
+     }
+ 
+@@ -297,6 +330,7 @@
+             reveal_handler: None,
+             markdown_extensions: Arc::default(),
+             motion: None,
++            find_marks: None,
+         }
+     }
+ 
+@@ -326,6 +360,7 @@
+             reveal_handler: None,
+             markdown_extensions: Arc::default(),
+             motion: None,
++            find_marks: None,
+         }
+     }
+ 
+@@ -542,6 +577,13 @@
+         self
+     }
+ 
++    /// Mark the occurrences of a query in the text (see [`FindMarks`]);
++    /// `None` takes earlier marks away.
++    pub fn find_marks(mut self, marks: Option<FindMarks>) -> Self {
++        self.find_marks = marks;
++        self
++    }
++
+     /// Replace the Markdown extension registry.
+     pub fn markdown_extensions(mut self, extensions: MarkdownExtensions) -> Self {
+         self.markdown_extensions = Arc::new(extensions);
+@@ -850,6 +892,11 @@
+             if let Some(text) = &self.text {
+                 state.set_element_text(text, cx);
+             }
++            let marks = self
++                .find_marks
++                .clone()
++                .or_else(|| FIND_MARKS.with_borrow(|all| all.get(&self.id).cloned()));
++            state.apply_find_marks(marks.as_ref());
+         });
+ 
+         let focus_handle = state.read(cx).focus_handle.clone();
