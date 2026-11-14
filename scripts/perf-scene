@@ -27,7 +27,10 @@ mkfifo "$t/ctl"
 : > "$t/log"
 echo "perf-scene: $bin on $project (files in $t)"
 
-WUNDUR_PERF=1 WUNDUR_TEST_BACKENDS=1 WUNDUR_BACKGROUND=1 \
+# A strip at the right edge of the screen, above the other windows (a covered window stops
+# drawing, and its numbers would mean nothing), never taking the keyboard.
+WUNDUR_WINDOW="${WUNDUR_WINDOW:-1640,160,1200,820}" WUNDUR_FLOAT=1 \
+  WUNDUR_PERF=1 WUNDUR_TEST_BACKENDS=1 WUNDUR_BACKGROUND=1 \
   WUNDUR_CONFIG_DIR="$t/config" WUNDUR_CACHE_DIR="$t/cache" WUNDUR_CONTROL="$t/ctl" \
   "$bin" "$project" >> "$t/log" 2>&1 &
 pid=$!
@@ -37,11 +40,7 @@ trap 'kill $pid 2>/dev/null || true' EXIT
 ctl() { printf '%s\n' "$*" > "$t/ctl"; sleep 0.3; }
 mark() { echo "== $1" >> "$t/log"; }
 
-sleep 6
-# Keep the window where nothing covers it (a covered window may stop drawing), without
-# bringing it to the front: typing must not land in it.
-osascript -e "tell application \"System Events\" to set position of window 1 of (first process whose unix id is $pid) to {1700, 200}" >/dev/null 2>&1 || true
-sleep 2
+sleep 8
 
 ctl new-scripted "$project"
 sleep 3
