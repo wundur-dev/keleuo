@@ -1,0 +1,208 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Tasks · Wundur Studio</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f6f6f4; --card: #ffffff; --fg: #1d1d1f; --muted: #6e6e73; --border: #e3e3e0;
+    --accent: #2f6fde; --accent-soft: rgba(47, 111, 222, .12); --green: #2e8b57; --green-soft: rgba(46, 139, 87, .14);
+    --code: #f1f1ee;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #1b1b1d; --card: #242427; --fg: #ececee; --muted: #9a9aa1; --border: #36363b;
+      --accent: #6b9cf5; --accent-soft: rgba(107, 156, 245, .16); --green: #5cc58a; --green-soft: rgba(92, 197, 138, .16);
+      --code: #1b1b1d;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  }
+  main { max-width: 640px; margin: 0 auto; padding: 28px 18px 60px; }
+  header.top { display: flex; align-items: baseline; gap: 10px; margin-bottom: 18px; }
+  header.top h1 { font-size: 22px; margin: 0; font-weight: 650; }
+  header.top .sub { color: var(--muted); font-size: 12px; }
+  .offline {
+    display: none; margin-bottom: 16px; padding: 10px 12px; border-radius: 10px;
+    border: 1px solid var(--border); background: var(--card); color: var(--muted); font-size: 13px;
+  }
+  body.down .offline { display: block; }
+  body.down #lists { opacity: .5; pointer-events: none; }
+  .empty { color: var(--muted); padding: 4px; }
+  section.list { margin-bottom: 26px; }
+  .list-head { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+  .list-head .names { flex: 1; min-width: 0; }
+  .list-head h2 { font-size: 16px; margin: 0; font-weight: 620; overflow-wrap: anywhere; }
+  .list-head .meta { color: var(--muted); font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .pill { flex: none; padding: 1px 8px; border-radius: 999px; font-size: 11.5px; font-weight: 550; background: var(--accent-soft); color: var(--accent); }
+  .pill.done { background: var(--green-soft); color: var(--green); }
+  button.icon {
+    flex: none; border: 0; background: transparent; color: var(--muted); cursor: pointer;
+    width: 26px; height: 26px; border-radius: 6px; font-size: 15px; line-height: 1;
+  }
+  button.icon:hover { background: var(--border); color: var(--fg); }
+  .cards { display: flex; flex-direction: column; gap: 6px; }
+  .card {
+    display: flex; gap: 10px; padding: 10px 12px; border-radius: 10px;
+    background: var(--card); border: 1px solid var(--border);
+  }
+  .card.done { opacity: .55; }
+  .card input[type=checkbox] { flex: none; width: 18px; height: 18px; margin: 1px 0 0; accent-color: var(--accent); cursor: pointer; }
+  .card .body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+  .card .title { display: flex; gap: 6px; font-weight: 550; }
+  .card .num { flex: none; color: var(--muted); font-weight: 650; }
+  .card .title span:last-child { overflow-wrap: anywhere; }
+  .card.done .title span:last-child { text-decoration: line-through; text-decoration-color: var(--muted); }
+  .card .detail { color: var(--muted); font-size: 12.5px; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .command {
+    margin-top: 4px; display: flex; align-items: center; gap: 8px; padding: 4px 4px 4px 8px;
+    border-radius: 6px; background: var(--code); border: 1px solid var(--border);
+  }
+  .command code { flex: 1; min-width: 0; font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre; overflow-x: auto; }
+  .command button {
+    flex: none; border: 1px solid var(--border); background: var(--card); color: var(--fg);
+    font: inherit; font-size: 11.5px; padding: 2px 8px; border-radius: 5px; cursor: pointer;
+  }
+  .command button:hover { border-color: var(--muted); }
+  .card a { margin-top: 3px; font-size: 12.5px; color: var(--accent); overflow-wrap: anywhere; text-decoration: none; }
+  .card a:hover { text-decoration: underline; }
+</style>
+</head>
+<body>
+<main>
+  <header class="top"><h1>Tasks</h1><span class="sub">Wundur Studio</span></header>
+  <div class="offline" id="offline">Wundur Studio isn't running. This page picks up again when it's back.</div>
+  <div id="lists"></div>
+</main>
+<script>
+"use strict";
+const base = location.pathname.replace(/\/?$/, "/");
+let lists = null;
+
+function el(tag, attrs, ...children) {
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (k === "class") e.className = v; else e.setAttribute(k, v);
+  }
+  for (const c of children) if (c != null) e.append(c);
+  return e;
+}
+
+function ago(secs) {
+  const s = Math.max(0, Math.floor(Date.now() / 1000) - secs);
+  if (s < 60) return "just now";
+  if (s < 3600) return Math.floor(s / 60) + "m";
+  if (s < 86400) return Math.floor(s / 3600) + "h";
+  return Math.floor(s / 86400) + "d";
+}
+
+// Only web addresses become links: anything else (javascript:, file:) shows as text.
+function safeLink(url) {
+  try {
+    const u = new URL(url);
+    return (u.protocol === "http:" || u.protocol === "https:") ? u.href : null;
+  } catch (_) { return null; }
+}
+
+async function copy(text, button) {
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch (_) {
+    const t = el("textarea", {}); t.value = text; document.body.append(t); t.select();
+    document.execCommand("copy"); t.remove();
+  }
+  button.textContent = "Copied";
+  setTimeout(() => { button.textContent = "Copy"; }, 1200);
+}
+
+function post(what, body) {
+  fetch(base + what, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) })
+    .catch(() => {});
+}
+
+function card(step, t) {
+  const box = el("input", { type: "checkbox", "aria-label": "Done" });
+  box.checked = t.done;
+  box.addEventListener("change", () => {
+    t.done = box.checked; render();
+    post("tick", { id: t.id, done: box.checked });
+  });
+  let command = null;
+  if (t.command) {
+    const b = el("button", { type: "button" }, "Copy");
+    b.addEventListener("click", () => copy(t.command, b));
+    command = el("div", { class: "command" }, el("code", {}, t.command), b);
+  }
+  let link = null;
+  if (t.link) {
+    const href = safeLink(t.link);
+    link = href ? el("a", { href, target: "_blank", rel: "noopener noreferrer" }, t.link) : el("div", { class: "detail" }, t.link);
+  }
+  return el("div", { class: "card" + (t.done ? " done" : "") }, box,
+    el("div", { class: "body" },
+      el("div", { class: "title" }, el("span", { class: "num" }, step + "."), el("span", {}, t.title)),
+      t.detail ? el("div", { class: "detail" }, t.detail) : null,
+      command, link));
+}
+
+function list(l) {
+  const open = l.tasks.filter(t => !t.done).length;
+  const remove = el("button", { type: "button", class: "icon", title: "Remove this list", "aria-label": "Remove this list" }, "×");
+  remove.addEventListener("click", () => {
+    lists = lists.filter(x => x.id !== l.id); render();
+    post("remove", { id: l.id });
+  });
+  // Open ones first, then those done; each keeps its number (its place as the agent wrote it).
+  const steps = l.tasks.map((t, i) => [i + 1, t]);
+  steps.sort((a, b) => a[1].done - b[1].done);
+  return el("section", { class: "list" },
+    el("div", { class: "list-head" },
+      el("div", { class: "names" }, el("h2", {}, l.title), el("div", { class: "meta" }, `${l.folder} · ${l.from} · ${ago(l.made)}`)),
+      el("span", { class: "pill" + (open === 0 ? " done" : "") }, open === 0 ? "All done" : `${open} of ${l.tasks.length} to do`),
+      remove),
+    el("div", { class: "cards" }, ...steps.map(([n, t]) => card(n, t))));
+}
+
+function render() {
+  const root = document.getElementById("lists");
+  if (lists === null) return;
+  const open = lists.reduce((n, l) => n + l.tasks.filter(t => !t.done).length, 0);
+  document.title = (open ? `(${open}) ` : "") + "Tasks · Wundur Studio";
+  if (lists.length === 0) {
+    root.replaceChildren(el("div", { class: "empty" }, "Nothing to do. When an agent has steps only you can take, they show up here."));
+    return;
+  }
+  root.replaceChildren(...lists.map(list));
+}
+
+// Changes arrive as events; a dropped stream (Wundur Studio quit or restarting) shows a quiet
+// note and keeps trying.
+let source = null, downTimer = null, retry = 1000;
+function connect() {
+  source = new EventSource(base + "events");
+  source.onopen = () => {
+    retry = 1000; clearTimeout(downTimer); downTimer = null;
+    document.body.classList.remove("down");
+  };
+  source.onmessage = e => {
+    try { lists = JSON.parse(e.data).lists; render(); } catch (_) {}
+  };
+  source.onerror = () => {
+    if (!downTimer) downTimer = setTimeout(() => document.body.classList.add("down"), 1500);
+    if (source.readyState === EventSource.CLOSED) {
+      setTimeout(connect, retry);
+      retry = Math.min(retry * 2, 10000);
+    }
+  };
+}
+connect();
+setInterval(render, 60000);
+</script>
+</body>
+</html>

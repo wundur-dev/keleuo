@@ -24,6 +24,7 @@ use wundur_core::settings::Settings;
 mod about;
 mod inbox;
 mod tasks;
+mod tasks_web;
 mod asset_panel;
 mod asset_store;
 mod actions;
@@ -316,6 +317,7 @@ fn main() {
             cx.on_action(|_: &AppearanceDark, cx| theme::set_appearance("dark", cx));
             control::start(cx);
             hooks::init(cx);
+            tasks_web::init(cx);
             app_icon::set();
             // Cached images and kept terminals older than 30 days go (off the UI thread).
             std::thread::spawn(|| {

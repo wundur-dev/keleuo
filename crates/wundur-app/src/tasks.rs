@@ -72,6 +72,7 @@ fn save(cx: &mut App) {
     if let Some(f) = file() {
         let _ = std::fs::write(f, text);
     }
+    crate::tasks_web::publish(cx);
     cx.refresh_windows();
 }
 

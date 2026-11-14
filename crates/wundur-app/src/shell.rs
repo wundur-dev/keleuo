@@ -1702,6 +1702,10 @@ impl Shell {
                 let (_, ids) = crate::tasks::add_list(title, folder, from, tasks, cx);
                 format!("ids={ids:?}")
             }
+            "tasks-web" => {
+                // Tests: start the tasks page's server without opening a browser; its address.
+                format!("url={}", crate::tasks_web::ensure(cx).unwrap_or_default())
+            }
             "inbox" => {
                 // Tests: open or close the inbox.
                 self.inbox_open = !self.inbox_open;
@@ -3025,8 +3029,24 @@ impl Shell {
                     .border_r_1()
                     .border_color(border)
                     .shadow_lg()
-                    
-                    .child(div().flex_none().h(px(44.)).px(px(14.)).flex().items_center().child(div().text_size(px(16.)).font_weight(FontWeight::SEMIBOLD).text_color(fg).child("Tasks")))
+                    .child(
+                        div()
+                            .flex_none()
+                            .h(px(44.))
+                            .px(px(14.))
+                            .flex()
+                            .items_center()
+                            .child(div().flex_1().text_size(px(16.)).font_weight(FontWeight::SEMIBOLD).text_color(fg).child("Tasks"))
+                            .child(
+                                Button::new("tasks-open-browser")
+                                    .icon(IconName::ExternalLink)
+                                    .label("Open in browser")
+                                    .xsmall()
+                                    .ghost()
+                                    .tooltip("Open these tasks as a page in your browser, kept in step with this panel")
+                                    .on_click(|_, _, cx| crate::tasks_web::open(cx)),
+                            ),
+                    )
                     .child(body),
             )
             .into_any_element()
