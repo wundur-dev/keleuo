@@ -56,6 +56,13 @@ actions!(
     ]
 );
 
+/// A shortcut with `secondary-` (Cmd on macOS, Ctrl elsewhere), resolved for the system the
+/// app runs on (`KeyBinding::new` takes only fixed modifiers).
+fn os_binding<A: Action>(keys: &str, action: A, context: Option<&str>, cx: &App) -> KeyBinding {
+    let context = context.map(|c| std::rc::Rc::new(KeyBindingContextPredicate::parse(c).expect("a valid key context")));
+    KeyBinding::load(keys, Box::new(action), context, false, None, cx).expect("a valid shortcut")
+}
+
 pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("cmd-q", Quit, None),
@@ -73,7 +80,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-n", NewSession, None),
         // Go to session: Cmd+P (Cmd+K is the terminal's Clear, as in every Mac terminal).
         KeyBinding::new("cmd-p", SwitchSession, None),
-        KeyBinding::new("secondary-k", TerminalClear, Some("Terminal")),
+        os_binding("secondary-k", TerminalClear, Some("Terminal"), cx),
         // In a terminal Tab is the program's (completion, a TUI's fields), not the window's move
         // to the next control: unbound there, it reaches the terminal, which sends it on.
         KeyBinding::new("tab", gpui_kit::NoAction, Some("Terminal")),
@@ -84,17 +91,17 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-shift-b", ToggleSessions, None),
         KeyBinding::new("cmd-alt-c", CopyConversation, None),
         // Find in the conversation: Cmd+F on macOS (and Ctrl+F, as elsewhere), Ctrl+F elsewhere.
-        KeyBinding::new("secondary-f", FindInChat, Some("Chat")),
+        os_binding("secondary-f", FindInChat, Some("Chat"), cx),
         KeyBinding::new("ctrl-f", FindInChat, Some("Chat")),
         // In a terminal Ctrl+F is the program's (the shell's cursor), not Find.
         KeyBinding::new("ctrl-f", gpui_kit::NoAction, Some("Terminal")),
         // Zoom a terminal, as other terminals do: Cmd (Ctrl elsewhere) with =, -, 0. Only that
         // terminal changes; Settings keeps the size the others use.
-        KeyBinding::new("secondary-=", TerminalZoomIn, Some("Terminal")),
-        KeyBinding::new("secondary-+", TerminalZoomIn, Some("Terminal")),
-        KeyBinding::new("secondary-shift-=", TerminalZoomIn, Some("Terminal")),
-        KeyBinding::new("secondary--", TerminalZoomOut, Some("Terminal")),
-        KeyBinding::new("secondary-0", TerminalZoomReset, Some("Terminal")),
+        os_binding("secondary-=", TerminalZoomIn, Some("Terminal"), cx),
+        os_binding("secondary-+", TerminalZoomIn, Some("Terminal"), cx),
+        os_binding("secondary-shift-=", TerminalZoomIn, Some("Terminal"), cx),
+        os_binding("secondary--", TerminalZoomOut, Some("Terminal"), cx),
+        os_binding("secondary-0", TerminalZoomReset, Some("Terminal"), cx),
         KeyBinding::new("ctrl-tab", NextSession, None),
         KeyBinding::new("ctrl-shift-tab", PrevSession, None),
         KeyBinding::new("ctrl--", GoBack, None),

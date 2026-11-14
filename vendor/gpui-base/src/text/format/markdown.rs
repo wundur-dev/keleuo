@@ -140,8 +140,8 @@ fn inline_groups(children: &[Node]) -> Vec<InlineGroup<'_>> {
     let mut groups = Vec::with_capacity(children.len());
     let mut ix = 0;
     while ix < children.len() {
-        if let Some((false, name)) = inline_html_tag(&children[ix])
-            && let Some(mark) = inline_html_mark(&name)
+        if let Some((false, name, attrs)) = inline_html_tag(&children[ix])
+            && let Some(mark) = inline_html_mark(&name, attrs)
             && let Some(close) = matching_close_tag(children, ix, &name)
         {
             groups.push(InlineGroup::Marked(mark, &children[ix + 1..close]));
@@ -154,7 +154,7 @@ fn inline_groups(children: &[Node]) -> Vec<InlineGroup<'_>> {
     groups
 }
 
-fn inline_html_tag(node: &Node) -> Option<(bool, String)> {
+fn inline_html_tag(node: &Node) -> Option<(bool, String, &str)> {
     let Node::Html(html) = node else {
         return None;
     };
@@ -166,20 +166,67 @@ fn inline_html_tag(node: &Node) -> Option<(bool, String)> {
         Some(rest) => (true, rest),
         None => (false, inner),
     };
-    let name = rest
-        .chars()
-        .take_while(char::is_ascii_alphanumeric)
-        .collect::<String>()
-        .to_ascii_lowercase();
-    (!name.is_empty()).then_some((closing, name))
+    let name_len = rest.chars().take_while(char::is_ascii_alphanumeric).count();
+    let name = rest[..name_len].to_ascii_lowercase();
+    let attrs = rest[name_len..].trim();
+    (!name.is_empty()).then_some((closing, name, attrs))
 }
 
-fn inline_html_mark(name: &str) -> Option<TextMark> {
+fn inline_html_attr<'a>(attrs: &'a str, name: &str) -> Option<&'a str> {
+    let mut rest = attrs;
+    while !rest.is_empty() {
+        rest = rest.trim_start();
+        let key_len = rest
+            .find(|c: char| c.is_whitespace() || matches!(c, '=' | '/' | '>'))
+            .unwrap_or(rest.len());
+        if key_len == 0 {
+            break;
+        }
+        let key = &rest[..key_len];
+        rest = rest[key_len..].trim_start();
+        let value = if let Some(after_eq) = rest.strip_prefix('=') {
+            rest = after_eq.trim_start();
+            if let Some(quote) = rest
+                .as_bytes()
+                .first()
+                .copied()
+                .filter(|b| *b == b'"' || *b == b'\'')
+            {
+                rest = &rest[1..];
+                let end = rest.find(quote as char)?;
+                let value = &rest[..end];
+                rest = &rest[end + 1..];
+                value
+            } else {
+                let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+                let value = &rest[..end];
+                rest = &rest[end..];
+                value
+            }
+        } else {
+            ""
+        };
+        if key.eq_ignore_ascii_case(name) {
+            return Some(value);
+        }
+    }
+    None
+}
+
+fn inline_html_mark(name: &str, attrs: &str) -> Option<TextMark> {
     Some(match name {
         "strong" | "b" => TextMark::default().bold(),
         "em" | "i" => TextMark::default().italic(),
         "u" => TextMark::default().underline(),
         "s" | "del" | "strike" => TextMark::default().strikethrough(),
+        "mark" => {
+            let color = super::html::mark_color_from_values(
+                inline_html_attr(attrs, "color"),
+                inline_html_attr(attrs, "style"),
+            )
+            .unwrap_or_else(super::html::default_mark_color);
+            TextMark::default().highlight(color)
+        }
         _ => return None,
     })
 }
@@ -188,8 +235,8 @@ fn matching_close_tag(children: &[Node], open: usize, name: &str) -> Option<usiz
     let mut depth = 0usize;
     for (ix, child) in children.iter().enumerate().skip(open + 1) {
         match inline_html_tag(child) {
-            Some((false, tag)) if tag == name => depth += 1,
-            Some((true, tag)) if tag == name => {
+            Some((false, tag, _)) if tag == name => depth += 1,
+            Some((true, tag, _)) if tag == name => {
                 if depth == 0 {
                     return Some(ix);
                 }
@@ -233,10 +280,9 @@ fn parse_table_row(source: &str, table: &mut Table, node: &mdast::TableRow, cx: 
             _ => {}
         };
     });
-    // GFM fixes the column count with the header/delimiter, not each body row.
-    // Padding/truncation keeps every row on the same measured column grid.
-    row.children
-        .resize_with(table.column_aligns.len(), Default::default);
+    // GFM fixes the column count with the header/delimiter. Leave missing
+    // cells implicit; the renderer places them on the shared column grid.
+    row.children.truncate(table.column_aligns.len());
     table.children.push(row);
 }
 
@@ -812,6 +858,17 @@ fn parse_paragraph(
                 ..Default::default()
             });
         }
+        Node::ImageReference(raw) => {
+            if let Some(definition) = cx.link_refs.get(raw.identifier.as_str()) {
+                paragraph.push_image(ImageNode {
+                    url: definition.url.clone().into(),
+                    title: definition.title.clone(),
+                    alt: Some(raw.alt.clone().into()),
+                    span,
+                    ..Default::default()
+                });
+            }
+        }
         Node::Break(_) => {
             // Hard line break (trailing two spaces / backslash). Mirror the
             // inline-HTML <br> path: emit a newline inline node so the break
@@ -902,21 +959,147 @@ fn parse_paragraph(
     text
 }
 
+/// Definitions may follow their references or live inside a container. The
+/// parser normalizes identifiers; CommonMark uses the first definition.
+fn collect_definitions(node: &Node, definitions: &mut BTreeMap<String, LinkMark>) {
+    if let Node::Definition(def) = node {
+        definitions
+            .entry(def.identifier.clone())
+            .or_insert_with(|| LinkMark {
+                url: def.url.clone().into(),
+                identifier: Some(def.identifier.clone().into()),
+                title: def.title.clone().map(Into::into),
+            });
+    }
+    if let Some(children) = node.children() {
+        for child in children {
+            collect_definitions(child, definitions);
+        }
+    }
+}
+
 fn ast_to_document(source: &str, root: mdast::Node, cx: &mut NodeContext) -> ParsedDocument {
+    let mut definitions = BTreeMap::new();
+    collect_definitions(&root, &mut definitions);
+    for (identifier, definition) in definitions {
+        cx.add_ref(identifier.into(), definition);
+    }
+
     let root = match root {
         Node::Root(r) => r,
         _ => panic!("expected root node"),
     };
 
+    let has_surfaces = cx.markdown_extensions.has_block_surfaces();
     let blocks = root
         .children
         .into_iter()
-        .map(|c| ast_to_node(source, c, cx))
+        .map(|node| match node {
+            Node::Blockquote(quote) if has_surfaces => blockquote_to_node(source, quote, cx),
+            node => ast_to_node(source, node, cx),
+        })
         .collect();
     ParsedDocument {
         source: source.to_string().into(),
         blocks: Arc::new(blocks),
     }
+}
+
+/// A top-level blockquote, which is a block surface when it opens with the
+/// marker of a registered one.
+fn blockquote_to_node(
+    source: &str,
+    mut quote: mdast::Blockquote,
+    cx: &mut NodeContext,
+) -> BlockNode {
+    let Some(name) = take_surface_marker(source, &mut quote, cx) else {
+        return ast_to_node(source, Node::Blockquote(quote), cx);
+    };
+    let children = quote
+        .children
+        .into_iter()
+        .map(|child| ast_to_node(source, child, cx))
+        .collect();
+    BlockNode::Surface {
+        name,
+        children,
+        span: new_span(quote.position, cx),
+    }
+}
+
+/// Removes the marker line that names a registered block surface from the
+/// start of `quote`, and returns that name.
+///
+/// As in a GitHub alert, the marker `[!name]` is alone on the first line of
+/// the first paragraph, and the lines after it are that paragraph's text. The
+/// name matches ASCII-case-insensitively.
+fn take_surface_marker(
+    source: &str,
+    quote: &mut mdast::Blockquote,
+    cx: &NodeContext,
+) -> Option<SharedString> {
+    let Some(Node::Paragraph(paragraph)) = quote.children.first_mut() else {
+        return None;
+    };
+    let Some(Node::Text(text)) = paragraph.children.first_mut() else {
+        return None;
+    };
+    let (line, rest) = match text.value.split_once('\n') {
+        Some((line, rest)) => (line.strip_suffix('\r').unwrap_or(line), Some(rest)),
+        None => (text.value.as_str(), None),
+    };
+    // An escaped `\[` or a character reference reads as the same text, but
+    // writes a literal, so the marker must appear as is in the source. The
+    // text of an escape starts after its backslash.
+    let start = text.position.as_ref()?.start.offset;
+    if source.get(..start)?.ends_with('\\') || !source.get(start..)?.starts_with(line) {
+        return None;
+    }
+    let name = line.strip_prefix("[!")?.strip_suffix(']')?;
+    let name = cx.markdown_extensions.block_surface_name(name)?;
+    match rest {
+        // The next line goes on in this text, which starts after the line's
+        // blockquote marker in the source.
+        Some(rest) => {
+            let rest = rest.to_string();
+            let position = text.position.as_mut()?;
+            let line_start =
+                source[position.start.offset..].find('\n')? + position.start.offset + 1;
+            let content = source[line_start..].trim_start_matches([' ', '\t']);
+            let content = content.strip_prefix('>').unwrap_or(content);
+            let content = content.trim_start_matches([' ', '\t']);
+            let offset = source.len() - content.len();
+            position.start = Point::new(position.start.line + 1, offset - line_start + 1, offset);
+            text.value = rest;
+            if text.value.is_empty() {
+                paragraph.children.remove(0);
+            }
+        }
+        // The marker ends the paragraph or a hard break ends its line.
+        None => match paragraph.children.get(1) {
+            None => {
+                paragraph.children.clear();
+            }
+            Some(Node::Break(_)) => {
+                paragraph.children.drain(..2);
+            }
+            Some(_) => return None,
+        },
+    }
+    // The paragraph starts where its first remaining child does.
+    match paragraph.children.first() {
+        Some(first) => {
+            if let Some(start) = first.position().map(|first| first.start.clone())
+                && let Some(position) = paragraph.position.as_mut()
+            {
+                position.start = start;
+            }
+        }
+        None => {
+            quote.children.remove(0);
+        }
+    }
+    Some(name)
 }
 
 fn new_span(pos: Option<markdown::unist::Position>, cx: &NodeContext) -> Option<Span> {
@@ -928,12 +1111,39 @@ fn new_span(pos: Option<markdown::unist::Position>, cx: &NodeContext) -> Option<
     })
 }
 
+/// The `[ ]` / `[x]` marker of a task list item, which mdast does not keep.
+///
+/// The marker opens the item's first paragraph. Before it in the item come
+/// only the list marker, whitespace, line prefixes and link reference
+/// definitions, so it is the first `[` after the definitions.
+fn task_marker_span(source: &str, item: &mdast::ListItem, cx: &NodeContext) -> Option<Span> {
+    item.checked?;
+    let mut from = item.position.as_ref()?.start.offset;
+    for definition in item
+        .children
+        .iter()
+        .take_while(|child| !matches!(child, Node::Paragraph(_)))
+    {
+        from = definition.position()?.end.offset;
+    }
+    let bytes = source.as_bytes();
+    let open = from + bytes.get(from..)?.iter().position(|&byte| byte == b'[')?;
+    let close = open + bytes[open..].iter().position(|&byte| byte == b']')?;
+    Some(Span {
+        start: cx.offset + open,
+        end: cx.offset + close + 1,
+    })
+}
+
 fn ast_to_node(source: &str, value: mdast::Node, cx: &mut NodeContext) -> BlockNode {
     let span = new_span(value.position().cloned(), cx);
     let parse_cx = MarkdownParseContext::new(source, cx.offset);
     if let Some(mut node) = cx.markdown_extensions.parse_block(&value, &parse_cx) {
         node.set_span(span);
-        return BlockNode::Custom(node);
+        return BlockNode::Custom {
+            node,
+            state: Default::default(),
+        };
     }
 
     match value {
@@ -969,6 +1179,7 @@ fn ast_to_node(source: &str, value: mdast::Node, cx: &mut NodeContext) -> BlockN
             }
         }
         Node::ListItem(val) => {
+            let task_marker = task_marker_span(source, &val, cx);
             let children = val
                 .children
                 .into_iter()
@@ -978,6 +1189,7 @@ fn ast_to_node(source: &str, value: mdast::Node, cx: &mut NodeContext) -> BlockN
                 children,
                 spread: val.spread,
                 checked: val.checked,
+                task_marker,
                 span: new_span(val.position, cx),
             }
         }
@@ -990,6 +1202,7 @@ fn ast_to_node(source: &str, value: mdast::Node, cx: &mut NodeContext) -> BlockN
             let segments = code_source_segments(source, &raw.value, span, cx.offset);
             BlockNode::CodeBlock(
                 CodeBlock::new(raw.value.into(), raw.lang.map(Into::into), span)
+                    .with_meta(raw.meta.map(Into::into))
                     .source_segments(segments),
             )
         }
@@ -1088,23 +1301,12 @@ fn ast_to_node(source: &str, value: mdast::Node, cx: &mut NodeContext) -> BlockN
             paragraph.span = new_span(def.position, cx);
             BlockNode::Paragraph(paragraph)
         }
-        Node::Definition(def) => {
-            cx.add_ref(
-                def.identifier.clone().into(),
-                LinkMark {
-                    url: def.url.clone().into(),
-                    identifier: Some(def.identifier.clone().into()),
-                    title: def.title.clone().map(Into::into),
-                },
-            );
-
-            BlockNode::Definition {
-                identifier: def.identifier.clone().into(),
-                url: def.url.clone().into(),
-                title: def.title.clone().map(|s| s.into()),
-                span: new_span(def.position, cx),
-            }
-        }
+        Node::Definition(def) => BlockNode::Definition {
+            identifier: def.identifier.clone().into(),
+            url: def.url.clone().into(),
+            title: def.title.clone().map(|s| s.into()),
+            span: new_span(def.position, cx),
+        },
         _ => {
             if cfg!(debug_assertions) {
                 tracing::warn!("unsupported node: {:#?}", value);
@@ -1216,10 +1418,10 @@ mod tests {
     }
 
     #[test]
-    fn table_rows_use_header_column_count() {
+    fn table_rows_keep_missing_cells_implicit() {
         let mut cx = NodeContext::default();
         let document = parse(
-            "| A | B | C |\n| --- | --- | --- |\n| one |\n| two | three | four | ignored |\n",
+            "| A | B | C |\n| --- | --- | --- |\n| one |\n| two | three | four | ignored |\n| five | | six |\n",
             &mut cx,
         )
         .unwrap();
@@ -1227,10 +1429,51 @@ mod tests {
             panic!("expected table");
         };
         assert_eq!(table.column_aligns.len(), 3);
-        assert!(table.children.iter().all(|row| row.children.len() == 3));
+        assert_eq!(
+            table
+                .children
+                .iter()
+                .map(|row| row.children.len())
+                .collect::<Vec<_>>(),
+            [3, 1, 3, 3]
+        );
         assert_eq!(table.children[1].children[0].children.text(), "one");
-        assert!(table.children[1].children[1].children.text().is_empty());
         assert_eq!(table.children[2].children[2].children.text(), "four");
+        assert!(table.children[3].children[1].children.text().is_empty());
+        assert_eq!(table.children[3].children[2].children.text(), "six");
+    }
+
+    #[test]
+    fn sparse_table_cell_count_tracks_source_cells() {
+        for (columns, rows) in [(32, 64), (64, 128)] {
+            let source = format!(
+                "{}|\n{}|\n{}",
+                "|h".repeat(columns),
+                "|---".repeat(columns),
+                "|x|\n".repeat(rows),
+            );
+            let mut cx = NodeContext::default();
+            let document = parse(&source, &mut cx).unwrap();
+            let BlockNode::Table(table) = &document.blocks[0] else {
+                panic!("expected table");
+            };
+            assert_eq!(table.column_aligns.len(), columns);
+            assert_eq!(table.children.len(), rows + 1);
+            assert_eq!(table.children[0].children.len(), columns);
+            assert!(
+                table.children[1..]
+                    .iter()
+                    .all(|row| row.children.len() == 1)
+            );
+            assert_eq!(
+                table
+                    .children
+                    .iter()
+                    .map(|row| row.children.len())
+                    .sum::<usize>(),
+                columns + rows
+            );
+        }
     }
 
     #[test]
@@ -1651,6 +1894,49 @@ mod tests {
         }
     }
 
+    fn task_markers(block: &BlockNode, markers: &mut Vec<Range<usize>>) {
+        match block {
+            BlockNode::ListItem {
+                children,
+                task_marker,
+                ..
+            } => {
+                markers.extend(task_marker.map(|span| span.start..span.end));
+                children
+                    .iter()
+                    .for_each(|child| task_markers(child, markers));
+            }
+            BlockNode::Root { children, .. }
+            | BlockNode::Blockquote { children, .. }
+            | BlockNode::List { children, .. } => children
+                .iter()
+                .for_each(|child| task_markers(child, markers)),
+            _ => {}
+        }
+    }
+
+    #[test]
+    fn task_marker_is_the_bracketed_check_wherever_the_item_text_starts() {
+        for (source, marker) in [
+            // The item text opens with a `[` of its own.
+            ("- [ ] [link](https://example.com)", "[ ]"),
+            ("> - [x] quoted", "[x]"),
+            ("- [X]\n  on the next line", "[X]"),
+            (
+                "- [a]: https://example.com\n  [ ] after a definition",
+                "[ ]",
+            ),
+        ] {
+            let document = parse(source, &mut NodeContext::default()).unwrap();
+            let mut markers = Vec::new();
+            for block in document.blocks.iter() {
+                task_markers(block, &mut markers);
+            }
+            let start = source.rfind(marker).unwrap();
+            assert_eq!(markers, vec![start..start + marker.len()], "{source:?}");
+        }
+    }
+
     #[test]
     fn selected_source_range_maps_fenced_code_nested_in_a_blockquote() {
         let source = "> ```\n> one\n> two\n> ```";
@@ -1899,6 +2185,89 @@ mod tests {
     }
 
     #[test]
+    fn test_reference_images() {
+        for (reference, alt) in [
+            ("![Alt &amp; text][PiCtUrE]", "Alt & text"),
+            ("![picture][]", "picture"),
+            ("![picture]", "picture"),
+        ] {
+            for destination in [
+                "https://example.com/image.png",
+                "./image.png",
+                "file:///image.png",
+                "data:image/png;base64,iVBORw0KGgo=",
+            ] {
+                let source =
+                    format!("Before {reference} after.\n\n[picture]: {destination} \"Title\"\n");
+                let mut cx = NodeContext {
+                    offset: 17,
+                    ..Default::default()
+                };
+                let document = parse(&source, &mut cx).unwrap();
+                let paragraph = document.blocks.iter().find_map(first_paragraph).unwrap();
+                assert_eq!(paragraph.children.len(), 3, "{source}");
+                assert_eq!(paragraph.children[0].text.as_ref(), "Before ");
+                assert_eq!(paragraph.children[2].text.as_ref(), " after.");
+                let image = paragraph.children[1].as_image().expect("reference image");
+                assert_eq!(image.url.as_ref(), destination);
+                assert_eq!(image.alt.as_deref(), Some(alt));
+                assert_eq!(image.title.as_deref(), Some("Title"));
+                assert_eq!(
+                    image.span,
+                    Some(Span {
+                        start: 24,
+                        end: 24 + reference.len()
+                    })
+                );
+                assert_eq!(image.width, None);
+                assert_eq!(image.height, None);
+                match image.source() {
+                    gpui::ImageSource::Image(_) => assert!(destination.starts_with("data:")),
+                    gpui::ImageSource::Resource(gpui::Resource::Uri(uri)) => {
+                        assert!(!destination.starts_with("data:"));
+                        assert_eq!(uri.as_ref(), destination);
+                    }
+                    _ => panic!("unexpected image source"),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_reference_image_definition_lookup() {
+        let source = "![alt][Some   LABEL]\n\n> [some label]: first.png\n\n[some label]: second.png \"Ignored\"\n";
+        let document = parse(source, &mut NodeContext::default()).unwrap();
+        let paragraph = document.blocks.iter().find_map(first_paragraph).unwrap();
+        let image = paragraph.children[0].as_image().expect("reference image");
+        assert_eq!(image.url.as_ref(), "first.png");
+        assert_eq!(image.title, None);
+        assert_eq!(image.alt.as_deref(), Some("alt"));
+
+        let source = "[picture]: image.png\n\n[![alt][picture]](https://example.com)";
+        let document = parse(source, &mut NodeContext::default()).unwrap();
+        let paragraph = document.blocks.iter().find_map(first_paragraph).unwrap();
+        let image = paragraph.children[0]
+            .as_image()
+            .expect("linked reference image");
+        assert_eq!(image.url.as_ref(), "image.png");
+        assert_eq!(
+            image.link.as_ref().unwrap().url.as_ref(),
+            "https://example.com"
+        );
+
+        let source = "![missing][unknown] ![collapsed][] ![shortcut]";
+        let document = parse(source, &mut NodeContext::default()).unwrap();
+        let paragraph = document.blocks.iter().find_map(first_paragraph).unwrap();
+        assert_eq!(paragraph.text(), source);
+        assert!(
+            paragraph
+                .children
+                .iter()
+                .all(|child| child.as_image().is_none())
+        );
+    }
+
+    #[test]
     fn test_inline_html_image_stays_in_markdown_paragraph() {
         let mut cx = NodeContext::default();
         let document = parse(
@@ -2107,7 +2476,7 @@ mod tests {
         };
         let document = parse("$TSLA.US", &mut cx).unwrap();
 
-        let BlockNode::Custom(node) = &document.blocks[0] else {
+        let BlockNode::Custom { node, .. } = &document.blocks[0] else {
             panic!("expected custom markdown node");
         };
         assert_eq!(node.name(), "ticker");
@@ -2293,6 +2662,54 @@ mod tests {
         assert_eq!(marked(|mark| mark.strikethrough), ["h"]);
     }
 
+    fn highlight_runs(paragraph: &Paragraph) -> Vec<(String, gpui::Hsla)> {
+        paragraph
+            .children
+            .iter()
+            .flat_map(|node| {
+                node.marks
+                    .iter()
+                    .filter_map(|(range, mark)| {
+                        mark.highlight
+                            .map(|color| (node.text[range.clone()].to_string(), color))
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
+
+    /// Inline `<mark>` is paired like `<strong>` and keeps the same color
+    /// rules as the block HTML path: default yellow, `color`, then
+    /// `style="background-color"`.
+    #[test]
+    fn inline_html_mark_applies_highlight_colors() {
+        let source = concat!(
+            r#"Plain <mark>highlighted</mark> text and "#,
+            r##"<mark data_id="1" color="#ff000059">red</mark> and "##,
+            r#"<mark style="background-color: #336699">hex</mark>."#
+        );
+        let mut cx = NodeContext::default();
+        let document = parse(source, &mut cx).unwrap();
+        assert_eq!(document.text(), "Plain highlighted text and red and hex.\n");
+        let BlockNode::Paragraph(paragraph) = &document.blocks[0] else {
+            panic!()
+        };
+        assert_eq!(
+            highlight_runs(paragraph),
+            [
+                ("highlighted".into(), gpui::rgb(0xfef08a).into()),
+                (
+                    "red".into(),
+                    gpui::Rgba::try_from("#ff000059").unwrap().into()
+                ),
+                (
+                    "hex".into(),
+                    gpui::Rgba::try_from("#336699").unwrap().into()
+                ),
+            ]
+        );
+    }
+
     #[test]
     fn unclaimed_inline_math_keeps_its_literal_source() {
         // Math parsing is on by default, so prose that merely contains dollar
@@ -2422,7 +2839,7 @@ mod tests {
         };
         let document = parse("$TSLA.US", &mut cx).unwrap();
 
-        let BlockNode::Custom(node) = &document.blocks[0] else {
+        let BlockNode::Custom { node, .. } = &document.blocks[0] else {
             panic!("expected custom markdown node");
         };
         assert_eq!(node.name(), "ticker");

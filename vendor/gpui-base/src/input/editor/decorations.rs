@@ -1,7 +1,7 @@
 use crate::input::{EditorMode, InputModeKind, TextareaMode};
 use std::{collections::BTreeMap, ops::Range};
 
-use gpui::{App, Context, HighlightStyle, Hsla, WeakEntity};
+use gpui::{App, Context, HighlightStyle, Hsla, Pixels, WeakEntity};
 use ropey::Rope;
 use sum_tree::Bias;
 
@@ -16,7 +16,8 @@ pub enum RangeDecorationStyle {
     /// Draw a continuous one-pixel frame around the visual range.
     #[default]
     Frame,
-    /// A row of small round dots under the text, as macOS marks a misspelled word.
+    /// Wundur patch: a row of small round dots under the text, as macOS marks a misspelled
+    /// word.
     Dots,
 }
 
@@ -66,6 +67,137 @@ impl RangeDecoration {
     }
 }
 
+/// A mark that the editor draws in a strip of the gutter, before the line numbers.
+///
+/// A non-empty range marks every line it touches. This matches Monaco's
+/// [`linesDecorationsClassName`](https://microsoft.github.io/monaco-editor/typedoc/interfaces/editor_editor_api.editor.IModelDecorationOptions.html#linesDecorationsClassName)
+/// with `isWholeLine`. An empty range marks a line boundary, such as where lines
+/// were deleted. When the range is at the start of a line, the mark appears above
+/// that line. Otherwise it appears below the line.
+///
+/// The default is an empty range at the start of the document, a boundary above
+/// the first line, in the editor foreground color.
+#[non_exhaustive]
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct GutterDecoration {
+    range: Range<usize>,
+    color: Option<Hsla>,
+    folded_color: Option<Hsla>,
+}
+
+impl GutterDecoration {
+    /// Create a mark with the editor foreground color.
+    pub fn new(range: Range<usize>) -> Self {
+        Self {
+            range,
+            color: None,
+            folded_color: None,
+        }
+    }
+
+    /// The decoration's half-open range of UTF-8 byte offsets.
+    pub fn range(&self) -> &Range<usize> {
+        &self.range
+    }
+
+    /// The application color override, or `None` to use the editor fallback.
+    pub fn color(&self) -> Option<Hsla> {
+        self.color
+    }
+
+    /// The color for the bar when the range starts inside a fold, or `None` to
+    /// use [`Self::color`].
+    pub fn folded_color(&self) -> Option<Hsla> {
+        self.folded_color
+    }
+
+    /// Set the color instead of the editor foreground fallback.
+    pub fn with_color(mut self, color: Hsla) -> Self {
+        self.color = Some(color);
+        self
+    }
+
+    /// Set the color for the bar on a fold's row when the range starts inside that fold.
+    pub fn with_folded_color(mut self, color: Hsla) -> Self {
+        self.folded_color = Some(color);
+        self
+    }
+}
+
+/// The lane that an [`OverviewRulerDecoration`] uses on the vertical scrollbar track.
+///
+/// This matches Monaco's
+/// [`OverviewRulerLane`](https://microsoft.github.io/monaco-editor/typedoc/enums/editor_editor_api.editor.OverviewRulerLane.html).
+/// Its convention uses `Left` for version control, `Center` for search results,
+/// and `Right` for diagnostics.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum OverviewRulerLane {
+    /// The left third of the track.
+    Left,
+    /// The middle third of the track.
+    #[default]
+    Center,
+    /// The right third of the track.
+    Right,
+    /// The whole width of the track.
+    Full,
+}
+
+/// A mark that the editor draws on the vertical scrollbar track for a UTF-8 byte range.
+///
+/// This is the counterpart of Monaco's
+/// [`overviewRuler`](https://microsoft.github.io/monaco-editor/typedoc/interfaces/editor_editor_api.editor.IModelDecorationOverviewRulerOptions.html)
+/// decoration option. Like a [`GutterDecoration`], an empty range marks a line boundary.
+///
+/// The default is an empty range at the start of the document in the center lane,
+/// in the editor foreground color.
+#[non_exhaustive]
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct OverviewRulerDecoration {
+    range: Range<usize>,
+    lane: OverviewRulerLane,
+    color: Option<Hsla>,
+}
+
+impl OverviewRulerDecoration {
+    /// Create a mark in the center lane with the editor foreground color.
+    pub fn new(range: Range<usize>) -> Self {
+        Self {
+            range,
+            lane: OverviewRulerLane::default(),
+            color: None,
+        }
+    }
+
+    /// The decoration's half-open range of UTF-8 byte offsets.
+    pub fn range(&self) -> &Range<usize> {
+        &self.range
+    }
+
+    /// The lane that this mark uses on the track.
+    pub fn lane(&self) -> OverviewRulerLane {
+        self.lane
+    }
+
+    /// The application color override, or `None` to use the editor fallback.
+    pub fn color(&self) -> Option<Hsla> {
+        self.color
+    }
+
+    /// Set the lane that this mark uses.
+    pub fn with_lane(mut self, lane: OverviewRulerLane) -> Self {
+        self.lane = lane;
+        self
+    }
+
+    /// Set the color instead of the editor foreground fallback.
+    pub fn with_color(mut self, color: Hsla) -> Self {
+        self.color = Some(color);
+        self
+    }
+}
+
 /// A presentation style applied to a UTF-8 byte range in an input.
 ///
 /// This is the GPUI [`HighlightStyle`] counterpart of Monaco's
@@ -90,8 +222,6 @@ struct DecorationCollectionId(usize);
 ///
 /// This is the GPUI Component counterpart of Monaco's
 /// [`IEditorDecorationsCollection`](https://microsoft.github.io/monaco-editor/typedoc/interfaces/editor_editor_api.editor.IEditorDecorationsCollection.html).
-/// A code editor and ordinary multi-line text can both hold collections; `M` is
-/// the mode of the input that owns this one.
 pub struct TextDecorationCollection<M: InputModeKind = EditorMode> {
     state: WeakEntity<InputBaseState<M>>,
     id: DecorationCollectionId,
@@ -99,29 +229,117 @@ pub struct TextDecorationCollection<M: InputModeKind = EditorMode> {
 
 impl<M: InputModeKind> Clone for TextDecorationCollection<M> {
     fn clone(&self) -> Self {
-        Self {
-            state: self.state.clone(),
-            id: self.id,
-        }
+        Self { state: self.state.clone(), id: self.id }
     }
 }
 
 impl<M: InputModeKind> std::fmt::Debug for TextDecorationCollection<M> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("TextDecorationCollection")
-            .field("state", &self.state)
-            .field("id", &self.id)
-            .finish()
+        f.debug_struct("TextDecorationCollection").field("state", &self.state).field("id", &self.id).finish()
     }
 }
+
+// Wundur patch: a code editor and ordinary multi-line text (the message box) can both
+// hold TextDecorationCollections.
+macro_rules! textdecorationcollection_api {
+    ($mode:ty) => {
+impl TextDecorationCollection<$mode> {
+    /// Replace all decorations in this collection.
+    ///
+    /// This corresponds to Monaco's
+    /// [`IEditorDecorationsCollection.set`](https://microsoft.github.io/monaco-editor/typedoc/interfaces/editor_editor_api.editor.IEditorDecorationsCollection.html#set).
+    pub fn set(&self, decorations: Vec<TextDecoration>, cx: &mut App) {
+        let _ = self.state.update(cx, |state, cx| {
+            let decorations = normalize(&state.text, decorations);
+            if state.extras.decorations.set(self.id, decorations) {
+                cx.notify();
+            }
+        });
+    }
+
+    /// Add decorations to this collection.
+    ///
+    /// This corresponds to Monaco's
+    /// [`IEditorDecorationsCollection.append`](https://microsoft.github.io/monaco-editor/typedoc/interfaces/editor_editor_api.editor.IEditorDecorationsCollection.html#append).
+    pub fn append(&self, decorations: Vec<TextDecoration>, cx: &mut App) {
+        let _ = self.state.update(cx, |state, cx| {
+            let decorations = normalize(&state.text, decorations);
+            if state.extras.decorations.append(self.id, decorations) {
+                cx.notify();
+            }
+        });
+    }
+
+    /// Remove all decorations from this collection.
+    ///
+    /// This corresponds to Monaco's
+    /// [`IEditorDecorationsCollection.clear`](https://microsoft.github.io/monaco-editor/typedoc/interfaces/editor_editor_api.editor.IEditorDecorationsCollection.html#clear).
+    pub fn clear(&self, cx: &mut App) {
+        self.set(Vec::new(), cx);
+    }
+
+    /// Return the UTF-8 byte ranges in this collection.
+    ///
+    /// This corresponds to Monaco's
+    /// [`IEditorDecorationsCollection.getRanges`](https://microsoft.github.io/monaco-editor/typedoc/interfaces/editor_editor_api.editor.IEditorDecorationsCollection.html#getRanges).
+    pub fn get_ranges(&self, cx: &App) -> Vec<Range<usize>> {
+        self.state
+            .read_with(cx, |state, _| {
+                state
+                    .extras
+                    .decorations
+                    .get(self.id)
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|decoration| decoration.range.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+}
+
+impl InputBaseState<$mode> {
+    /// Create an independently managed collection of text decorations.
+    ///
+    /// This follows Monaco's
+    /// [`createDecorationsCollection`](https://microsoft.github.io/monaco-editor/typedoc/interfaces/editor_editor_api.editor.ICodeEditor.html#createDecorationsCollection)
+    /// ownership model. Ranges use UTF-8 byte offsets into [`Self::value`].
+    ///
+    /// Decoration ranges follow text edits and do not need to be set again
+    /// after each change. Insertions at a range boundary do not expand the
+    /// range, matching Monaco's
+    /// [`NeverGrowsWhenTypingAtEdges`](https://microsoft.github.io/monaco-editor/typedoc/enums/editor_editor_api.editor.TrackedRangeStickiness.html#NeverGrowsWhenTypingAtEdges)
+    /// behavior. Decorations are not rendered while the input is masked.
+    /// Collections live until their [`InputBaseState`] is dropped.
+    ///
+    /// Collections are layered in insertion order; the first collection wins
+    /// when overlapping decorations set the same [`HighlightStyle`] property.
+    /// Callers should avoid conflicting overlaps within one collection.
+    pub fn create_decorations_collection(
+        &mut self,
+        decorations: Vec<TextDecoration>,
+        cx: &mut Context<Self>,
+    ) -> TextDecorationCollection<$mode> {
+        let decorations = normalize(&self.text, decorations);
+        let id = self.extras.decorations.create(decorations);
+        cx.notify();
+        TextDecorationCollection {
+            state: cx.entity().downgrade(),
+            id,
+        }
+    }
+
+}
+    };
+}
+textdecorationcollection_api!(EditorMode);
+textdecorationcollection_api!(TextareaMode);
 
 /// An independently managed collection of geometric range decorations.
 ///
 /// Clones address the same collection. Dropping a handle does not clear it; use
 /// [`Self::clear`] to empty it or [`Self::dispose`] to release it permanently.
 /// Operations on a disposed collection or a dropped editor are harmless no-ops.
-/// A code editor and ordinary multi-line text can both hold collections; `M` is the mode
-/// of the input that owns this one.
 pub struct RangeDecorationCollection<M: InputModeKind = EditorMode> {
     state: WeakEntity<InputBaseState<M>>,
     id: DecorationCollectionId,
@@ -129,25 +347,19 @@ pub struct RangeDecorationCollection<M: InputModeKind = EditorMode> {
 
 impl<M: InputModeKind> Clone for RangeDecorationCollection<M> {
     fn clone(&self) -> Self {
-        Self {
-            state: self.state.clone(),
-            id: self.id,
-        }
+        Self { state: self.state.clone(), id: self.id }
     }
 }
 
 impl<M: InputModeKind> std::fmt::Debug for RangeDecorationCollection<M> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RangeDecorationCollection")
-            .field("state", &self.state)
-            .field("id", &self.id)
-            .finish()
+        f.debug_struct("RangeDecorationCollection").field("state", &self.state).field("id", &self.id).finish()
     }
 }
 
-/// Range decorations for a mode whose extras hold them: a code editor and ordinary
-/// multi-line text.
-macro_rules! range_decoration_api {
+// Wundur patch: a code editor and ordinary multi-line text (the message box) can both
+// hold RangeDecorationCollections.
+macro_rules! rangedecorationcollection_api {
     ($mode:ty) => {
 impl RangeDecorationCollection<$mode> {
     /// Replace only this owner's decorations, clipping ranges to UTF-8 boundaries.
@@ -217,8 +429,8 @@ impl InputBaseState<$mode> {
     /// transforms; decorations themselves are not undo history, so deleted ranges
     /// are not resurrected by undo. Folding changes projection, not stored ranges.
     ///
-    /// Fills and dots paint behind frames; within each style, later collections/items
-    /// paint over earlier ones. Neither affects text layout, hit testing or focus. The
+    /// Fills paint behind frames; within each style, later collections/items paint
+    /// over earlier ones. Neither affects text layout, hit testing or focus. The
     /// default color is the editor foreground (12% opacity for fills).
     /// Collections live until explicitly disposed or the editor is dropped.
     pub fn create_range_decorations_collection(
@@ -236,14 +448,179 @@ impl InputBaseState<$mode> {
             id,
         }
     }
+
 }
     };
 }
-range_decoration_api!(EditorMode);
-range_decoration_api!(TextareaMode);
+rangedecorationcollection_api!(EditorMode);
+rangedecorationcollection_api!(TextareaMode);
+
+/// An independently managed collection of [`GutterDecoration`] values.
+///
+/// Each clone refers to the same collection. Dropping a handle does not clear it.
+/// Call [`Self::clear`] to empty it or [`Self::dispose`] to release it. Calls after
+/// disposal or after the editor is dropped do nothing.
+#[non_exhaustive]
+#[derive(Clone, Debug)]
+pub struct GutterDecorationCollection {
+    state: WeakEntity<InputBaseState<EditorMode>>,
+    id: DecorationCollectionId,
+}
+
+/// A handle that addresses no editor, so every operation on it does nothing. It
+/// can stand in for a collection until the editor that owns one exists.
+impl Default for GutterDecorationCollection {
+    fn default() -> Self {
+        Self {
+            state: WeakEntity::new_invalid(),
+            id: DecorationCollectionId(0),
+        }
+    }
+}
+
+impl GutterDecorationCollection {
+    /// Replace this collection's decorations and clip ranges to UTF-8 boundaries.
+    pub fn set(&self, decorations: Vec<GutterDecoration>, cx: &mut App) {
+        let _ = self.state.update(cx, |state, cx| {
+            let decorations = normalize(&state.text, decorations);
+            if state.extras.gutter_decorations.set(self.id, decorations) {
+                cx.notify();
+            }
+        });
+    }
+
+    /// Add decorations to this collection in paint order.
+    pub fn append(&self, decorations: Vec<GutterDecoration>, cx: &mut App) {
+        let _ = self.state.update(cx, |state, cx| {
+            let decorations = normalize(&state.text, decorations);
+            if state.extras.gutter_decorations.append(self.id, decorations) {
+                cx.notify();
+            }
+        });
+    }
+
+    /// Empty this collection and keep its handles usable. The gutter keeps its strip.
+    pub fn clear(&self, cx: &mut App) {
+        self.set(Vec::new(), cx);
+    }
+
+    /// Release this collection. Its cloned handles stop working. The gutter drops
+    /// its strip after the last gutter collection is released.
+    pub fn dispose(&self, cx: &mut App) {
+        let _ = self.state.update(cx, |state, cx| {
+            if state.extras.gutter_decorations.remove(self.id) {
+                cx.notify();
+            }
+        });
+    }
+
+    /// Return tracked UTF-8 byte ranges in insertion order.
+    pub fn get_ranges(&self, cx: &App) -> Vec<Range<usize>> {
+        self.state
+            .read_with(cx, |state, _| {
+                state
+                    .extras
+                    .gutter_decorations
+                    .get(self.id)
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|decoration| decoration.range.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+}
+
+/// An independently managed collection of [`OverviewRulerDecoration`] values.
+///
+/// Each clone refers to the same collection. Dropping a handle does not clear it.
+/// Call [`Self::clear`] to empty it or [`Self::dispose`] to release it. Calls after
+/// disposal or after the editor is dropped do nothing.
+#[non_exhaustive]
+#[derive(Clone, Debug)]
+pub struct OverviewRulerDecorationCollection {
+    state: WeakEntity<InputBaseState<EditorMode>>,
+    id: DecorationCollectionId,
+}
+
+/// A handle that addresses no editor, so every operation on it does nothing. It
+/// can stand in for a collection until the editor that owns one exists.
+impl Default for OverviewRulerDecorationCollection {
+    fn default() -> Self {
+        Self {
+            state: WeakEntity::new_invalid(),
+            id: DecorationCollectionId(0),
+        }
+    }
+}
+
+impl OverviewRulerDecorationCollection {
+    /// Replace this collection's decorations and clip ranges to UTF-8 boundaries.
+    pub fn set(&self, decorations: Vec<OverviewRulerDecoration>, cx: &mut App) {
+        let _ = self.state.update(cx, |state, cx| {
+            let decorations = normalize(&state.text, decorations);
+            if state
+                .extras
+                .overview_ruler_decorations
+                .set(self.id, decorations)
+            {
+                cx.notify();
+            }
+        });
+    }
+
+    /// Add decorations to this collection in paint order.
+    pub fn append(&self, decorations: Vec<OverviewRulerDecoration>, cx: &mut App) {
+        let _ = self.state.update(cx, |state, cx| {
+            let decorations = normalize(&state.text, decorations);
+            if state
+                .extras
+                .overview_ruler_decorations
+                .append(self.id, decorations)
+            {
+                cx.notify();
+            }
+        });
+    }
+
+    /// Empty this collection and keep its handles usable.
+    pub fn clear(&self, cx: &mut App) {
+        self.set(Vec::new(), cx);
+    }
+
+    /// Release this collection. Its cloned handles stop working.
+    pub fn dispose(&self, cx: &mut App) {
+        let _ = self.state.update(cx, |state, cx| {
+            if state.extras.overview_ruler_decorations.remove(self.id) {
+                cx.notify();
+            }
+        });
+    }
+
+    /// Return tracked UTF-8 byte ranges in insertion order.
+    pub fn get_ranges(&self, cx: &App) -> Vec<Range<usize>> {
+        self.state
+            .read_with(cx, |state, _| {
+                state
+                    .extras
+                    .overview_ruler_decorations
+                    .get(self.id)
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|decoration| decoration.range.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+}
 
 /// Both text styles and geometric decorations share normalization and edit affinity.
 pub(crate) trait TrackedDecoration {
+    /// Whether an empty range is a decoration of its own, a line boundary, rather
+    /// than nothing. Such a range survives the edits that empty it and stays before
+    /// text inserted at its offset.
+    const KEEPS_EMPTY: bool = false;
+
     fn range(&self) -> &Range<usize>;
     fn range_mut(&mut self) -> &mut Range<usize>;
 }
@@ -258,6 +635,28 @@ impl TrackedDecoration for TextDecoration {
 }
 
 impl TrackedDecoration for RangeDecoration {
+    fn range(&self) -> &Range<usize> {
+        &self.range
+    }
+    fn range_mut(&mut self) -> &mut Range<usize> {
+        &mut self.range
+    }
+}
+
+impl TrackedDecoration for GutterDecoration {
+    const KEEPS_EMPTY: bool = true;
+
+    fn range(&self) -> &Range<usize> {
+        &self.range
+    }
+    fn range_mut(&mut self) -> &mut Range<usize> {
+        &mut self.range
+    }
+}
+
+impl TrackedDecoration for OverviewRulerDecoration {
+    const KEEPS_EMPTY: bool = true;
+
     fn range(&self) -> &Range<usize> {
         &self.range
     }
@@ -311,15 +710,20 @@ impl DecorationIndex {
         if span.is_empty() || range.is_empty() {
             return 0;
         }
+        // An empty decoration that is kept, a line boundary, touches the range
+        // when it lies inside it, including at its start.
+        let touches = |end: usize, empty: bool| {
+            end > range.start || (T::KEEPS_EMPTY && empty && end == range.start)
+        };
         let mid = span.start + span.len() / 2;
-        if self.max_ends[mid] <= range.start {
+        if !touches(self.max_ends[mid], true) {
             return 1;
         }
         let mut visited = 1 + self.query(decorations, span.start..mid, range, matches);
         let ix = self.indices[mid];
         let candidate = decorations[ix].range();
         if candidate.start < range.end {
-            if candidate.end > range.start {
+            if touches(candidate.end, candidate.is_empty()) {
                 matches.push(ix);
             }
             visited += self.query(decorations, mid + 1..span.end, range, matches);
@@ -347,6 +751,9 @@ impl<T: TrackedDecoration> DecorationEntries<T> {
 pub(crate) struct DecorationCollections<T = TextDecoration> {
     entries: BTreeMap<DecorationCollectionId, DecorationEntries<T>>,
     next_id: usize,
+    /// Changes whenever an owner creates, replaces, extends, clears or releases a
+    /// collection, so painting can keep work derived from them until then.
+    revision: u64,
 }
 
 impl<T> Default for DecorationCollections<T> {
@@ -354,6 +761,7 @@ impl<T> Default for DecorationCollections<T> {
         Self {
             entries: BTreeMap::new(),
             next_id: 0,
+            revision: 0,
         }
     }
 }
@@ -363,6 +771,7 @@ impl<T: TrackedDecoration> DecorationCollections<T> {
         let id = DecorationCollectionId(self.next_id);
         self.next_id += 1;
         self.entries.insert(id, DecorationEntries::new(decorations));
+        self.revision += 1;
         id
     }
 
@@ -371,6 +780,7 @@ impl<T: TrackedDecoration> DecorationCollections<T> {
             return false;
         };
         *current = DecorationEntries::new(decorations);
+        self.revision += 1;
         true
     }
 
@@ -380,7 +790,18 @@ impl<T: TrackedDecoration> DecorationCollections<T> {
         };
         current.decorations.extend(decorations);
         current.reindex();
+        self.revision += 1;
         true
+    }
+
+    fn remove(&mut self, id: DecorationCollectionId) -> bool {
+        let removed = self.entries.remove(&id).is_some();
+        self.revision += u64::from(removed);
+        removed
+    }
+
+    pub(super) fn revision(&self) -> u64 {
+        self.revision
     }
 
     fn get(&self, id: DecorationCollectionId) -> Option<&[T]> {
@@ -398,19 +819,34 @@ impl<T: TrackedDecoration> DecorationCollections<T> {
             let mut remap = Vec::with_capacity(len);
             let mut retained = 0;
             entry.decorations.retain_mut(|decoration| {
-                *decoration.range_mut() =
-                    adjust_range_for_edit(decoration.range(), edited_range, inserted_len);
-                let keep = !decoration.range().is_empty();
+                let range = decoration.range();
+                *decoration.range_mut() = if T::KEEPS_EMPTY && range.is_empty() {
+                    let offset = adjust_point_for_edit(range.start, edited_range, inserted_len);
+                    offset..offset
+                } else {
+                    adjust_range_for_edit(range, edited_range, inserted_len)
+                };
+                let keep = T::KEEPS_EMPTY || !decoration.range().is_empty();
                 remap.push(if keep { retained } else { usize::MAX });
                 retained += usize::from(keep);
                 keep
             });
-            // Anchor transforms are monotone. Preserve start ordering and remap
-            // removed entries rather than sorting on every keystroke: O(n).
+            // Remap removed entries and restore start ordering when empty and
+            // non-empty ranges at the same offset move with different affinity.
             entry.index.indices.retain_mut(|ix| {
                 *ix = remap[*ix];
                 *ix != usize::MAX
             });
+            if !entry
+                .index
+                .indices
+                .is_sorted_by_key(|&ix| (entry.decorations[ix].range().start, ix))
+            {
+                entry
+                    .index
+                    .indices
+                    .sort_unstable_by_key(|&ix| (entry.decorations[ix].range().start, ix));
+            }
             entry.index.max_ends.resize(retained, 0);
             entry.index.build(&entry.decorations, 0..retained);
         }
@@ -420,6 +856,12 @@ impl<T: TrackedDecoration> DecorationCollections<T> {
         for entry in self.entries.values_mut() {
             *entry = DecorationEntries::new(Vec::new());
         }
+        self.revision += 1;
+    }
+
+    /// Whether any collection exists, even an empty one.
+    pub(super) fn has_collections(&self) -> bool {
+        !self.entries.is_empty()
     }
 
     pub(super) fn iter(&self) -> impl Iterator<Item = &[T]> {
@@ -497,18 +939,40 @@ fn adjust_range_for_edit(
     start..end
 }
 
+/// A point stays before text inserted at its offset, and a replacement that covers
+/// it moves it to where the replacement starts.
+fn adjust_point_for_edit(offset: usize, edited_range: &Range<usize>, inserted_len: usize) -> usize {
+    if offset <= edited_range.start {
+        offset
+    } else if offset >= edited_range.end {
+        (offset + inserted_len).saturating_sub(edited_range.len())
+    } else {
+        edited_range.start
+    }
+}
+
 fn normalize<T: TrackedDecoration>(text: &Rope, decorations: Vec<T>) -> Vec<T> {
     decorations
         .into_iter()
         .filter_map(|mut decoration| {
+            let range = decoration.range();
             // Reject reversed ranges before clipping, which could otherwise turn a
-            // reversed pair within a multibyte character into a nonempty range.
-            if decoration.range().is_empty() {
+            // reversed pair within a multibyte character into a nonempty range, and
+            // ranges past the end, which clipping would otherwise turn into a
+            // boundary at the end of the document.
+            if range.start > range.end
+                || range.start > text.len()
+                || (range.is_empty() && !T::KEEPS_EMPTY)
+            {
                 return None;
             }
-            let range = text.clip_offset(decoration.range().start, Bias::Left)
-                ..text.clip_offset(decoration.range().end, Bias::Right);
-            if range.is_empty() {
+            let start = text.clip_offset(range.start, Bias::Left);
+            let range = if range.is_empty() {
+                start..start
+            } else {
+                start..text.clip_offset(range.end, Bias::Right)
+            };
+            if range.is_empty() && !T::KEEPS_EMPTY {
                 return None;
             }
             *decoration.range_mut() = range;
@@ -517,100 +981,80 @@ fn normalize<T: TrackedDecoration>(text: &Rope, decorations: Vec<T>) -> Vec<T> {
         .collect()
 }
 
-/// Text decorations for a mode whose extras hold them: a code editor and ordinary
-/// multi-line text.
-macro_rules! text_decoration_api {
-    ($mode:ty) => {
-        impl TextDecorationCollection<$mode> {
-            /// Replace all decorations in this collection.
-            ///
-            /// This corresponds to Monaco's
-            /// [`IEditorDecorationsCollection.set`](https://microsoft.github.io/monaco-editor/typedoc/interfaces/editor_editor_api.editor.IEditorDecorationsCollection.html#set).
-            pub fn set(&self, decorations: Vec<TextDecoration>, cx: &mut App) {
-                let _ = self.state.update(cx, |state, cx| {
-                    let decorations = normalize(&state.text, decorations);
-                    if state.extras.decorations.set(self.id, decorations) {
-                        cx.notify();
-                    }
-                });
-            }
-
-            /// Add decorations to this collection.
-            ///
-            /// This corresponds to Monaco's
-            /// [`IEditorDecorationsCollection.append`](https://microsoft.github.io/monaco-editor/typedoc/interfaces/editor_editor_api.editor.IEditorDecorationsCollection.html#append).
-            pub fn append(&self, decorations: Vec<TextDecoration>, cx: &mut App) {
-                let _ = self.state.update(cx, |state, cx| {
-                    let decorations = normalize(&state.text, decorations);
-                    if state.extras.decorations.append(self.id, decorations) {
-                        cx.notify();
-                    }
-                });
-            }
-
-            /// Remove all decorations from this collection.
-            ///
-            /// This corresponds to Monaco's
-            /// [`IEditorDecorationsCollection.clear`](https://microsoft.github.io/monaco-editor/typedoc/interfaces/editor_editor_api.editor.IEditorDecorationsCollection.html#clear).
-            pub fn clear(&self, cx: &mut App) {
-                self.set(Vec::new(), cx);
-            }
-
-            /// Return the UTF-8 byte ranges in this collection.
-            ///
-            /// This corresponds to Monaco's
-            /// [`IEditorDecorationsCollection.getRanges`](https://microsoft.github.io/monaco-editor/typedoc/interfaces/editor_editor_api.editor.IEditorDecorationsCollection.html#getRanges).
-            pub fn get_ranges(&self, cx: &App) -> Vec<Range<usize>> {
-                self.state
-                    .read_with(cx, |state, _| {
-                        state
-                            .extras
-                            .decorations
-                            .get(self.id)
-                            .unwrap_or_default()
-                            .iter()
-                            .map(|decoration| decoration.range.clone())
-                            .collect()
-                    })
-                    .unwrap_or_default()
-            }
+impl InputBaseState<EditorMode> {
+    /// Create a collection of gutter marks, such as added, modified, and deleted
+    /// lines in a version-control diff.
+    ///
+    /// Marks draw in a strip before the line numbers. The strip stays reserved while
+    /// any gutter collection exists, including an empty collection, so the text does
+    /// not shift when marks change. Release every collection to drop the strip. Its
+    /// width is [`Self::gutter_decorations_width`].
+    ///
+    /// Ranges track edits as [range decorations](Self::create_range_decorations_collection)
+    /// do, but empty ranges are kept. They stay before text inserted at their offset,
+    /// and a range that an edit empties becomes a boundary. A mark whose range starts
+    /// inside a fold draws a bar on the fold's row, using its
+    /// [folded color](GutterDecoration::with_folded_color), and marks the lines of the
+    /// range after the fold as usual. Later collections and
+    /// items draw over earlier ones. After you recompute the decorations, call
+    /// [`set`](GutterDecorationCollection::set) with the whole collection. Tracking
+    /// keeps marks on their lines between updates.
+    pub fn create_gutter_decorations_collection(
+        &mut self,
+        decorations: Vec<GutterDecoration>,
+        cx: &mut Context<Self>,
+    ) -> GutterDecorationCollection {
+        let id = self
+            .extras
+            .gutter_decorations
+            .create(normalize(&self.text, decorations));
+        cx.notify();
+        GutterDecorationCollection {
+            state: cx.entity().downgrade(),
+            id,
         }
+    }
 
-        impl InputBaseState<$mode> {
-            /// Create an independently managed collection of text decorations.
-            ///
-            /// This follows Monaco's
-            /// [`createDecorationsCollection`](https://microsoft.github.io/monaco-editor/typedoc/interfaces/editor_editor_api.editor.ICodeEditor.html#createDecorationsCollection)
-            /// ownership model. Ranges use UTF-8 byte offsets into [`Self::value`].
-            ///
-            /// Decoration ranges follow text edits and do not need to be set again
-            /// after each change. Insertions at a range boundary do not expand the
-            /// range, matching Monaco's
-            /// [`NeverGrowsWhenTypingAtEdges`](https://microsoft.github.io/monaco-editor/typedoc/enums/editor_editor_api.editor.TrackedRangeStickiness.html#NeverGrowsWhenTypingAtEdges)
-            /// behavior. Decorations are not rendered while the input is masked.
-            /// Collections live until their [`InputBaseState`] is dropped.
-            ///
-            /// Collections are layered in insertion order; the first collection wins
-            /// when overlapping decorations set the same [`HighlightStyle`] property.
-            /// Callers should avoid conflicting overlaps within one collection.
-            pub fn create_decorations_collection(
-                &mut self,
-                decorations: Vec<TextDecoration>,
-                cx: &mut Context<Self>,
-            ) -> TextDecorationCollection<$mode> {
-                let decorations = normalize(&self.text, decorations);
-                let id = self.extras.decorations.create(decorations);
-                cx.notify();
-                TextDecorationCollection {
-                    state: cx.entity().downgrade(),
-                    id,
-                }
-            }
+    /// Create a collection of marks on the vertical scrollbar track, Monaco's
+    /// overview ruler.
+    ///
+    /// Each mark uses its [lane](OverviewRulerLane) at the rows' share of the content
+    /// height. It is at least 6 px tall. Touching marks with the same color merge.
+    /// Marks draw under Base's scrollbar or one supplied with
+    /// [`Self::set_scrollbar_renderer`], so they remain visible while the thumb fades.
+    /// Ranges track edits as [gutter decorations](Self::create_gutter_decorations_collection)
+    /// do.
+    pub fn create_overview_ruler_decorations_collection(
+        &mut self,
+        decorations: Vec<OverviewRulerDecoration>,
+        cx: &mut Context<Self>,
+    ) -> OverviewRulerDecorationCollection {
+        let id = self
+            .extras
+            .overview_ruler_decorations
+            .create(normalize(&self.text, decorations));
+        cx.notify();
+        OverviewRulerDecorationCollection {
+            state: cx.entity().downgrade(),
+            id,
         }
-    };
+    }
+
+    /// Set the width of the strip that [gutter decorations](Self::create_gutter_decorations_collection)
+    /// draw in. The default is 3 px.
+    pub fn gutter_decorations_width(mut self, width: Pixels) -> Self {
+        self.extras.gutter_decorations_width = width;
+        self
+    }
+
+    /// Set the width of the strip that gutter decorations draw in.
+    pub fn set_gutter_decorations_width(&mut self, width: Pixels, cx: &mut Context<Self>) {
+        if self.extras.gutter_decorations_width != width {
+            self.extras.gutter_decorations_width = width;
+            cx.notify();
+        }
+    }
 }
-text_decoration_api!(EditorMode);
-text_decoration_api!(TextareaMode);
 
 #[cfg(test)]
 mod tests {
@@ -645,6 +1089,82 @@ mod tests {
         assert_ne!(third, first);
         assert!(!collections.set(first, vec![RangeDecoration::new(0..1)]));
         assert!(collections.get(second).is_some());
+    }
+
+    #[test]
+    fn gutter_collections_keep_empty_ranges_as_line_boundaries() {
+        let mut collections = DecorationCollections::<GutterDecoration>::default();
+        let text = Rope::from("one\ntwo\nthree");
+        let id = collections.create(normalize(
+            &text,
+            vec![
+                GutterDecoration::new(4..4),
+                GutterDecoration::new(8..13),
+                GutterDecoration::new(9..8),
+                GutterDecoration::new(100..100),
+                GutterDecoration::new(100..200),
+                GutterDecoration::new(13..13),
+            ],
+        ));
+        let ranges = |collections: &DecorationCollections<GutterDecoration>| {
+            collections
+                .get(id)
+                .unwrap()
+                .iter()
+                .map(|decoration| decoration.range().clone())
+                .collect::<Vec<_>>()
+        };
+        // Reversed ranges and ranges past the end are dropped; a boundary at the
+        // end of the document is kept.
+        assert_eq!(ranges(&collections), vec![4..4, 8..13, 13..13]);
+        // Text typed at a boundary goes after it.
+        collections.adjust_for_edit(&(4..4), 2);
+        assert_eq!(ranges(&collections), vec![4..4, 10..15, 15..15]);
+        // Deleting the lines a bar covers leaves a boundary where they were.
+        collections.adjust_for_edit(&(10..15), 0);
+        assert_eq!(ranges(&collections), vec![4..4, 10..10, 10..10]);
+        // A replacement covering a boundary moves it to the replacement's start.
+        collections.adjust_for_edit(&(2..6), 1);
+        assert_eq!(ranges(&collections), vec![2..2, 7..7, 7..7]);
+    }
+
+    #[test]
+    fn gutter_queries_find_boundaries_inside_the_span() {
+        let mut collections = DecorationCollections::<GutterDecoration>::default();
+        collections.create(vec![
+            GutterDecoration::new(4..4),
+            GutterDecoration::new(8..13),
+            GutterDecoration::new(13..13),
+            GutterDecoration::new(20..20),
+        ]);
+        let ranges = |query: Range<usize>| {
+            collections
+                .intersecting(&[query])
+                .iter()
+                .map(|decoration| decoration.range().clone())
+                .collect::<Vec<_>>()
+        };
+        // A boundary at the span's start is inside it; one at its end is not.
+        assert_eq!(ranges(4..13), vec![4..4, 8..13]);
+        assert_eq!(ranges(13..21), vec![13..13, 20..20]);
+        assert_eq!(ranges(5..8), Vec::<Range<usize>>::new());
+    }
+
+    #[test]
+    fn gutter_query_keeps_index_order_after_inserting_at_mixed_ranges() {
+        let mut collections = DecorationCollections::<GutterDecoration>::default();
+        collections.create(vec![
+            GutterDecoration::new(4..8),
+            GutterDecoration::new(4..8),
+            GutterDecoration::new(4..4),
+        ]);
+        collections.adjust_for_edit(&(4..4), 1);
+        let ranges: Vec<_> = collections
+            .intersecting(&[4..5])
+            .into_iter()
+            .map(|decoration| decoration.range().clone())
+            .collect();
+        assert_eq!(ranges, vec![4..4]);
     }
 
     #[test]

@@ -3640,7 +3640,7 @@ impl Render for Shell {
                 if ev.keystroke.key == "escape" && crate::image_view::is_open(cx) {
                     crate::image_view::close(cx);
                     cx.stop_propagation();
-                } else if ev.keystroke.key == "c" && ev.keystroke.modifiers.secondary() && crate::image_view::copy(cx) {
+                } else if ev.keystroke.key == "c" && ev.keystroke.modifiers.secondary(cx) && crate::image_view::copy(cx) {
                     // Cmd+C with an image open copies the image.
                     cx.stop_propagation();
                 } else if ev.keystroke.key == "escape" && crate::skill_installer::is_open(cx) {
